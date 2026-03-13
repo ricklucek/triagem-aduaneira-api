@@ -81,7 +81,6 @@ def bootstrap_admin():
         return jsonify({"error": "Email already in use"}), 409
 
     user = User(
-        id=f"u_{uuid.uuid4()}",
         nome="Administrador",
         email=payload["email"],
         role="admin",
@@ -90,7 +89,11 @@ def bootstrap_admin():
     )
     user.set_password(payload["password"])
 
-    db.session.add(user)
-    db.session.commit()
+    try:
+        db.session.add(user)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
 
     return jsonify(user_schema.dump(user)), 201

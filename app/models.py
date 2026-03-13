@@ -2,13 +2,16 @@ from datetime import datetime
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
+import uuid
+from sqlalchemy.dialects.postgresql import UUID
+
 from .extensions import db
 
 
 class User(db.Model):
     __tablename__ = "users"
 
-    id = db.Column(db.String(36), primary_key=True)
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     nome = db.Column(db.String(255), nullable=False)
     email = db.Column(db.String(255), nullable=False, unique=True, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
@@ -32,7 +35,7 @@ class RefreshToken(db.Model):
     __tablename__ = "refresh_tokens"
 
     id = db.Column(db.String(36), primary_key=True)
-    user_id = db.Column(db.String(36), db.ForeignKey("users.id"), nullable=False, index=True)
+    user_id = db.Column(UUID(as_uuid=True), db.ForeignKey("users.id"), nullable=False, index=True)
     token = db.Column(db.String(1024), nullable=False, unique=True, index=True)
     revoked = db.Column(db.Boolean, nullable=False, default=False)
     expires_at = db.Column(db.DateTime, nullable=False)
@@ -49,8 +52,8 @@ class Scope(db.Model):
     draft = db.Column(db.JSON, nullable=False, default=dict)
     version_count = db.Column(db.Integer, nullable=False, default=0)
     completeness_score = db.Column(db.Integer, nullable=False, default=0)
-    created_by = db.Column(db.String(36), db.ForeignKey("users.id"), nullable=False)
-    responsible_user_id = db.Column(db.String(36), db.ForeignKey("users.id"), nullable=True)
+    created_by = db.Column(UUID(as_uuid=True), db.ForeignKey("users.id"), nullable=False)
+    responsible_user_id = db.Column(UUID(as_uuid=True), db.ForeignKey("users.id"), nullable=True)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_published_at = db.Column(db.DateTime, nullable=True)
 
