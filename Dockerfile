@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir --upgrade setuptools
 
 COPY . .
-CMD ["gunicorn","--workers", "6", "--bind", "0.0.0.0:5801","--timeout", "600", "wsgi:app"]
+CMD ["gunicorn","--workers", "6", "--bind", "0.0.0.0:8080","--timeout", "600", "wsgi:app"]
