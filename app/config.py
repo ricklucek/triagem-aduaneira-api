@@ -13,7 +13,12 @@ class Config:
     SECRET_KEY = os.getenv("SECRET_KEY")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
+    print("[DB] INSTANCE_CONNECTION_NAME =", repr(INSTANCE_CONNECTION_NAME))
+    print("[DB] DB_HOST =", repr(DB_HOST))
+    print("[DB] DB_NAME =", repr(DB_NAME))
+
     if INSTANCE_CONNECTION_NAME:
+        print("[DB] MODO = CLOUDSQL_SOCKET")
         # Cloud Run + Cloud SQL via Unix socket
         SQLALCHEMY_DATABASE_URI = URL.create(
             drivername="postgresql+psycopg2",
@@ -25,6 +30,7 @@ class Config:
             }
         )
     else:
+        print("[DB] MODO = TCP")
         # Ambiente local / conexão TCP direta
         SQLALCHEMY_DATABASE_URI = URL.create(
             drivername="postgresql+psycopg2",
