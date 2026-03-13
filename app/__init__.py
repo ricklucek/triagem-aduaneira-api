@@ -1,4 +1,5 @@
 from flask import Flask, jsonify
+from flask_cors import CORS
 from marshmallow import ValidationError
 
 from .config import Config
@@ -12,6 +13,13 @@ from .routes.user_routes import user_bp
 def create_app(config_object=Config):
     app = Flask(__name__)
     app.config.from_object(config_object)
+
+    CORS(
+        app,
+        resources={r"/*": {"origins": "https://triagem-aduaneira.vercel.app"}},
+        allow_headers=["Content-Type", "Authorization"],
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    )
 
     db.init_app(app)
 
