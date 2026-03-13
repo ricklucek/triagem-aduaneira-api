@@ -1,16 +1,18 @@
 from datetime import datetime
 
+from celery import uuid
 from flask import Blueprint, g, jsonify, request
 
 from ..auth import auth_required, decode_token, generate_tokens
 from ..extensions import db
 from ..models import RefreshToken, User
-from ..schemas import LoginSchema, RefreshSchema, UserSchema
+from ..schemas import CreateAdminSchema, LoginSchema, RefreshSchema, UserSchema
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
 login_schema = LoginSchema()
 refresh_schema = RefreshSchema()
 user_schema = UserSchema()
+create_admin_schema = CreateAdminSchema()
 
 
 @auth_bp.post("/login")
@@ -63,3 +65,32 @@ def logout():
 @auth_required
 def me():
     return jsonify(user_schema.dump(g.current_user))
+
+
+
+@auth_bp.post("/bootstrap-admin")
+def bootstrap_admin():
+    payload = create_admin_schema.load(request.get_json(force=True))
+
+    has_admin = User.query.filter_by(role="admin").first()
+    if has_admin:
+        return jsonify({"error": "Admin user already exists"}), 409
+
+    existing_email = User.query.filter_by(email=payload["email"]).first()
+    if existing_email:
+        return jsonify({"error": "Email already in use"}), 409
+
+    user = User(
+        id=f"u_{uuid.uuid4()}",
+        nome="Administrador",
+        email=payload["email"],
+        role="admin",
+        setor="TI",
+        ativo=True,
+    )
+    user.set_password(payload["password"])
+
+    db.session.add(user)
+    db.session.commit()
+
+    return jsonify(user_schema.dump(user)), 201

@@ -39,6 +39,7 @@ flask --app wsgi.py run --host 0.0.0.0 --port 5000
 
 ### Endpoints implementados
 - `POST /auth/login`
+- `POST /auth/bootstrap-admin` (cria primeiro admin com `email` e `password`)
 - `POST /auth/refresh`
 - `POST /auth/logout`
 - `GET /auth/me`

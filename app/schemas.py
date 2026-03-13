@@ -43,3 +43,7 @@ class ScopeVersionSchema(SQLAlchemyAutoSchema):
         model = ScopeVersion
         load_instance = True
         include_fk = True
+
+class CreateAdminSchema(Schema):
+    email = fields.Email(required=True)
+    password = fields.String(required=True, load_only=True)
