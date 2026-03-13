@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from celery import uuid
+import uuid
 from flask import Blueprint, g, jsonify, request
 
 from ..auth import auth_required, decode_token, generate_tokens
