@@ -11,13 +11,15 @@ from .models import RefreshToken, User
 
 def _jwt_payload(user: User, token_type: str, expires_in: int) -> dict:
     now = datetime.utcnow()
+    exp = now + timedelta(seconds=expires_in)
+
     return {
-        "sub": user.id,
+        "sub": str(user.id),
         "email": user.email,
         "role": user.role,
         "type": token_type,
-        "iat": now,
-        "exp": now + timedelta(seconds=expires_in),
+        "iat": int(now.timestamp()),
+        "exp": int(exp.timestamp()),
     }
 
 
