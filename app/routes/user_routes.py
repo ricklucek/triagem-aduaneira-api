@@ -29,7 +29,6 @@ def create_user():
         return jsonify({"error": "role must be one of comercial, credenciamento, operacao"}), 400
 
     user = User(
-        id=f"u_{uuid.uuid4()}",
         nome=payload["nome"],
         email=payload["email"],
         role=role,
