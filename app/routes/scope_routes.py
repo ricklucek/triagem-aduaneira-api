@@ -41,7 +41,7 @@ def _calc_completeness(draft: dict) -> int:
 def create_scope():
     initial = request.get_json(silent=True) or {}
     scope = Scope(
-        id=f"scope_{datetime.utcnow().timestamp_ns()}",
+        id=f"scope_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
         cnpj=(initial.get("sobreEmpresa") or {}).get("cnpj"),
         razao_social=(initial.get("sobreEmpresa") or {}).get("razaoSocial"),
         created_by=g.current_user.id,
