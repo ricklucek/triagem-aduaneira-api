@@ -1,0 +1,161 @@
+from copy import deepcopy
+
+
+_DEFAULT_SERVICO_VALOR_OU_SALARIO = {
+    "habilitado": False,
+    "tipoValor": None,
+    "valor": None,
+    "responsavel": None,
+}
+
+_DEFAULT_SERVICO_VALOR_SIMPLES = {
+    "habilitado": False,
+    "valor": None,
+}
+
+_DEFAULT_SERVICO_PREPOSTO = {
+    "habilitado": False,
+    "valor": None,
+    "inclusoNoDesembaracoCasco": None,
+}
+
+_DEFAULT_SERVICO_FRETE_INTERNACIONAL = {
+    "habilitado": False,
+    "ptaxNegociado": None,
+    "percentualSobreCfr": None,
+    "responsavel": None,
+}
+
+_DEFAULT_SERVICO_SEGURO = {
+    "habilitado": False,
+    "valorNegociado": None,
+    "descricaoComplementar": None,
+    "responsavel": None,
+}
+
+_DEFAULT_SERVICO_FRETE_RODOVIARIO = {
+    "habilitado": False,
+    "modalidade": None,
+    "responsavel": None,
+}
+
+
+DEFAULT_SCOPE_DRAFT = {
+    "informacoesFixas": {
+        "salarioMinimoVigente": 0,
+        "dadosBancariosCasco": {"banco": "", "agencia": "", "conta": ""},
+    },
+    "sobreEmpresa": {
+        "razaoSocial": "",
+        "cnpj": "",
+        "inscricaoEstadual": "",
+        "inscricaoMunicipal": None,
+        "enderecoCompletoEscritorio": "",
+        "enderecoCompletoArmazem": None,
+        "cnaePrincipal": "",
+        "cnaeSecundario": None,
+        "regimeTributacao": None,
+        "responsavelComercial": None,
+    },
+    "contatos": [],
+    "operacao": {
+        "tipos": [],
+        "importacao": {
+            "analistaDA": None,
+            "analistaAE": None,
+            "produtosImportados": None,
+            "ncms": [],
+            "vinculoComExportador": None,
+            "locaisEntrada": [],
+            "outroLocalEntrada": None,
+            "armazensLiberacao": [],
+            "outroArmazemLiberacao": None,
+            "necessidadeDtcDta": None,
+            "necessidadeLiLpco": None,
+            "anuencias": [],
+            "impostosFederais": {
+                "contaPagamento": None,
+                "dadosContaCliente": {"banco": "", "agencia": "", "conta": ""},
+                "ii": {"regime": None, "detalheBeneficio": None},
+                "ipi": {"regime": None, "detalheBeneficio": None},
+                "pis": {"regime": None, "detalheBeneficio": None},
+                "cofins": {"regime": None, "detalheBeneficio": None},
+            },
+            "afrmm": {
+                "contaPagamento": None,
+                "dadosContaCliente": {"banco": "", "agencia": "", "conta": ""},
+                "regime": None,
+                "detalheBeneficio": None,
+            },
+            "icms": {
+                "contaPagamento": None,
+                "dadosContaCliente": {"banco": "", "agencia": "", "conta": ""},
+                "regime": None,
+                "recolhida": None,
+                "efetiva": None,
+            },
+            "destinacao": None,
+            "subtipoConsumo": None,
+        },
+        "exportacao": {
+            "analistaDA": "",
+            "analistaAE": "",
+            "produtosExportados": "",
+            "ncms": [],
+            "portosFronteiras": [],
+            "outroPorto": None,
+            "outraFronteira": None,
+            "destinacao": None,
+            "subtipoConsumo": None,
+        },
+    },
+    "servicos": {
+        "importacao": {
+            "despachoAduaneiroImportacao": deepcopy(_DEFAULT_SERVICO_VALOR_OU_SALARIO),
+            "preposto": deepcopy(_DEFAULT_SERVICO_PREPOSTO),
+            "emissaoLiLpco": deepcopy(_DEFAULT_SERVICO_VALOR_SIMPLES),
+            "cadastroCatalogoProdutos": deepcopy(_DEFAULT_SERVICO_VALOR_SIMPLES),
+            "assessoria": deepcopy(_DEFAULT_SERVICO_VALOR_OU_SALARIO),
+            "freteInternacional": deepcopy(_DEFAULT_SERVICO_FRETE_INTERNACIONAL),
+            "seguroInternacional": deepcopy(_DEFAULT_SERVICO_SEGURO),
+            "freteRodoviario": deepcopy(_DEFAULT_SERVICO_FRETE_RODOVIARIO),
+            "regimeEspecial": [],
+            "emissaoNfe": deepcopy(_DEFAULT_SERVICO_VALOR_SIMPLES),
+        },
+        "exportacao": {
+            "despachoAduaneiroExportacao": deepcopy(_DEFAULT_SERVICO_VALOR_OU_SALARIO),
+            "preposto": deepcopy(_DEFAULT_SERVICO_PREPOSTO),
+            "certificadoOrigem": deepcopy(_DEFAULT_SERVICO_VALOR_SIMPLES),
+            "certificadoFitossanitario": deepcopy(_DEFAULT_SERVICO_VALOR_SIMPLES),
+            "outrosCertificados": {"habilitado": False, "itens": []},
+            "assessoria": deepcopy(_DEFAULT_SERVICO_VALOR_OU_SALARIO),
+            "freteInternacional": deepcopy(_DEFAULT_SERVICO_FRETE_INTERNACIONAL),
+            "seguroInternacional": deepcopy(_DEFAULT_SERVICO_SEGURO),
+            "freteRodoviario": deepcopy(_DEFAULT_SERVICO_FRETE_RODOVIARIO),
+            "regimeEspecial": [],
+        },
+    },
+    "financeiro": {
+        "dadosBancariosClienteDevolucaoSaldo": {"banco": "", "agencia": "", "conta": ""},
+        "observacoesFinanceiro": None,
+    },
+}
+
+
+def build_default_scope_draft() -> dict:
+    return deepcopy(DEFAULT_SCOPE_DRAFT)
+
+
+def merge_scope_draft(base: dict, patch: dict) -> dict:
+    if not isinstance(base, dict):
+        return deepcopy(patch)
+    result = deepcopy(base)
+    if not isinstance(patch, dict):
+        return result
+
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = merge_scope_draft(result[key], value)
+        else:
+            result[key] = value
+    return result

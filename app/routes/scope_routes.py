@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from app.scope_defaults import build_default_scope_draft, merge_scope_draft
 from flask import Blueprint, g, jsonify, request
 from sqlalchemy import or_
 
@@ -40,13 +41,16 @@ def _calc_completeness(draft: dict) -> int:
 @auth_required
 def create_scope():
     initial = request.get_json(silent=True) or {}
+    
+    draft = merge_scope_draft(build_default_scope_draft(), initial)
+
     scope = Scope(
         id=f"scope_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
-        cnpj=(initial.get("sobreEmpresa") or {}).get("cnpj"),
-        razao_social=(initial.get("sobreEmpresa") or {}).get("razaoSocial"),
+        cnpj=(draft.get("sobreEmpresa") or {}).get("cnpj"),
+        razao_social=(draft.get("sobreEmpresa") or {}).get("razaoSocial"),
         created_by=g.current_user.id,
-        draft=initial,
-        completeness_score=_calc_completeness(initial),
+        draft=draft,
+        completeness_score=_calc_completeness(draft),
     )
     db.session.add(scope)
     db.session.commit()
@@ -81,7 +85,8 @@ def list_scopes():
 @auth_required
 def get_scope(scope_id: str):
     scope = Scope.query.get_or_404(scope_id)
-    return jsonify({"id": scope.id, "status": scope.status, "draft": scope.draft})
+    draft = merge_scope_draft(build_default_scope_draft(), scope.draft or {})
+    return jsonify({"id": scope.id, "status": scope.status, "draft": draft})
 
 
 @scope_bp.put("/<scope_id>/draft")
@@ -89,10 +94,13 @@ def get_scope(scope_id: str):
 def save_draft(scope_id: str):
     scope = Scope.query.get_or_404(scope_id)
     draft = request.get_json(force=True)
-    scope.draft = draft
-    scope.cnpj = (draft.get("sobreEmpresa") or {}).get("cnpj")
-    scope.razao_social = (draft.get("sobreEmpresa") or {}).get("razaoSocial")
-    scope.completeness_score = _calc_completeness(draft)
+    
+    normalized_draft = merge_scope_draft(build_default_scope_draft(), draft)
+    scope.draft = normalized_draft
+    scope.cnpj = (normalized_draft.get("sobreEmpresa") or {}).get("cnpj")
+    scope.razao_social = (normalized_draft.get("sobreEmpresa") or {}).get("razaoSocial")
+    scope.completeness_score = _calc_completeness(normalized_draft)
+    
     db.session.commit()
     return "", 204
 

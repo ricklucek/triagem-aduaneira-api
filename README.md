@@ -56,6 +56,8 @@ flask --app wsgi.py run --host 0.0.0.0 --port 5000
 - `GET /users`
 - `POST /users`
 
+- `POST /scopes` agora inicializa o `draft` com estrutura completa/default para compatibilidade com o schema do frontend.
+
 ### Segurança de rotas
 - `auth_required`: valida Bearer token JWT e usuário ativo.
 - `roles_required(*roles)`: aplica autorização por perfil para recursos privados (ex.: admin em `/users`).
