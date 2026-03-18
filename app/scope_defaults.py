@@ -2,7 +2,7 @@ from copy import deepcopy
 
 
 _DEFAULT_BANK_ACCOUNT = {"banco": "", "agencia": "", "conta": ""}
-_DEFAULT_BENEFICIO = {"regime": None, "detalheBeneficio": None}
+_DEFAULT_BENEFICIO = {"regime": "INTEGRAL", "detalheBeneficio": ""}
 _DEFAULT_SERVICO_VALOR_OU_SALARIO = {
     "habilitado": False,
     "tipoValor": None,
