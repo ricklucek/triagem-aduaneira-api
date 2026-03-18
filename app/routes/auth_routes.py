@@ -1,29 +1,32 @@
 from datetime import datetime
-
 import uuid
 from flask import Blueprint, g, jsonify, request
 
-from ..auth import auth_required, decode_token, generate_tokens
+from ..auth import auth_required, decode_token, generate_tokens, resolve_identity, serialize_identity
 from ..extensions import db
-from ..models import RefreshToken, User
-from ..schemas import CreateAdminSchema, LoginSchema, RefreshSchema, UserSchema
+from ..models import Admin, RefreshToken, User
+from ..schemas import AdminSchema, CreateAdminSchema, LoginSchema, RefreshSchema
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
 login_schema = LoginSchema()
 refresh_schema = RefreshSchema()
-user_schema = UserSchema()
+admin_schema = AdminSchema()
 create_admin_schema = CreateAdminSchema()
 
 
 @auth_bp.post("/login")
 def login():
     payload = login_schema.load(request.get_json(force=True))
+
+    admin = Admin.query.filter_by(email=payload["email"]).first()
+    if admin and admin.check_password(payload["password"]):
+        return jsonify({"user": serialize_identity(admin), "tokens": generate_tokens(admin, "admin")})
+
     user = User.query.filter_by(email=payload["email"]).first()
     if not user or not user.check_password(payload["password"]):
         return jsonify({"error": "Invalid credentials"}), 401
 
-    tokens = generate_tokens(user)
-    return jsonify({"user": user_schema.dump(user), "tokens": tokens})
+    return jsonify({"user": serialize_identity(user), "tokens": generate_tokens(user, "user")})
 
 
 @auth_bp.post("/refresh")
@@ -43,20 +46,24 @@ def refresh():
     if not persisted or persisted.expires_at < datetime.utcnow():
         return jsonify({"error": "Refresh token expired or revoked"}), 401
 
-    user = User.query.get(decoded["sub"])
-    if not user or not user.ativo:
+    identity = resolve_identity(persisted.principal_type, persisted.principal_id)
+    if not identity or not identity.ativo:
         return jsonify({"error": "Invalid user"}), 401
 
     persisted.revoked = True
     db.session.commit()
 
-    return jsonify({"tokens": generate_tokens(user)})
+    return jsonify({"tokens": generate_tokens(identity, persisted.principal_type)})
 
 
 @auth_bp.post("/logout")
 @auth_required
 def logout():
-    db.session.query(RefreshToken).filter_by(user_id=g.current_user.id, revoked=False).update({"revoked": True})
+    db.session.query(RefreshToken).filter_by(
+        principal_id=g.current_user.id,
+        principal_type=g.current_user_type,
+        revoked=False,
+    ).update({"revoked": True})
     db.session.commit()
     return "", 204
 
@@ -64,36 +71,28 @@ def logout():
 @auth_bp.get("/me")
 @auth_required
 def me():
-    return jsonify(user_schema.dump(g.current_user))
-
+    return jsonify(g.current_identity)
 
 
 @auth_bp.post("/bootstrap-admin")
 def bootstrap_admin():
     payload = create_admin_schema.load(request.get_json(force=True))
 
-    has_admin = User.query.filter_by(role="admin").first()
-    if has_admin:
+    if Admin.query.first():
         return jsonify({"error": "Admin user already exists"}), 409
 
-    existing_email = User.query.filter_by(email=payload["email"]).first()
-    if existing_email:
+    if Admin.query.filter_by(email=payload["email"]).first() or User.query.filter_by(email=payload["email"]).first():
         return jsonify({"error": "Email already in use"}), 409
 
-    user = User(
-        nome="Administrador",
+    admin = Admin(
+        id=f"adm_{uuid.uuid4()}",
+        nome=payload["nome"],
         email=payload["email"],
-        role="admin",
-        setor="TI",
         ativo=True,
     )
-    user.set_password(payload["password"])
+    admin.set_password(payload["password"])
 
-    try:
-        db.session.add(user)
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
-        raise
+    db.session.add(admin)
+    db.session.commit()
 
-    return jsonify(user_schema.dump(user)), 201
+    return jsonify(admin_schema.dump(admin)), 201

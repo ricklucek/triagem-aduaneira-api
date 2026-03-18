@@ -2,27 +2,12 @@ from datetime import datetime
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
-import uuid
+from .extensions import db
 from sqlalchemy.dialects.postgresql import UUID
 
-from .extensions import db
 
-
-class User(db.Model):
-    __tablename__ = "users"
-
-    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    nome = db.Column(db.String(255), nullable=False)
-    email = db.Column(db.String(255), nullable=False, unique=True, index=True)
+class PasswordMixin:
     password_hash = db.Column(db.String(255), nullable=False)
-    role = db.Column(db.String(32), nullable=False)
-    setor = db.Column(db.String(255), nullable=True)
-    ativo = db.Column(db.Boolean, nullable=False, default=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-
-    scopes_created = db.relationship(
-        "Scope", backref="created_by_user", lazy=True, foreign_keys="Scope.created_by"
-    )
 
     def set_password(self, password: str) -> None:
         self.password_hash = generate_password_hash(password)
@@ -31,11 +16,40 @@ class User(db.Model):
         return check_password_hash(self.password_hash, password)
 
 
+class Admin(PasswordMixin, db.Model):
+    __tablename__ = "admins"
+
+    id = db.Column(UUID(as_uuid=True), primary_key=True)
+    nome = db.Column(db.String(255), nullable=False, default="Administrador")
+    email = db.Column(db.String(255), nullable=False, unique=True, index=True)
+    ativo = db.Column(db.Boolean, nullable=False, default=True)
+    salario_minimo_vigente = db.Column(db.Numeric(12, 2), nullable=False, default=0)
+    dados_bancarios_casco = db.Column(
+        db.JSON,
+        nullable=False,
+        default=lambda: {"banco": "", "agencia": "", "conta": ""},
+    )
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
+class User(PasswordMixin, db.Model):
+    __tablename__ = "users"
+
+    id = db.Column(UUID(as_uuid=True), primary_key=True)
+    nome = db.Column(db.String(255), nullable=False)
+    email = db.Column(db.String(255), nullable=False, unique=True, index=True)
+    role = db.Column(db.String(32), nullable=False)
+    setor = db.Column(db.String(255), nullable=True)
+    ativo = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
 class RefreshToken(db.Model):
     __tablename__ = "refresh_tokens"
 
-    id = db.Column(db.String(36), primary_key=True)
-    user_id = db.Column(UUID(as_uuid=True), db.ForeignKey("users.id"), nullable=False, index=True)
+    id = db.Column(UUID(as_uuid=True), primary_key=True)
+    principal_id = db.Column(UUID(as_uuid=True), nullable=False, index=True)
+    principal_type = db.Column(db.String(16), nullable=False, index=True)
     token = db.Column(db.String(1024), nullable=False, unique=True, index=True)
     revoked = db.Column(db.Boolean, nullable=False, default=False)
     expires_at = db.Column(db.DateTime, nullable=False)
@@ -52,11 +66,13 @@ class Scope(db.Model):
     draft = db.Column(db.JSON, nullable=False, default=dict)
     version_count = db.Column(db.Integer, nullable=False, default=0)
     completeness_score = db.Column(db.Integer, nullable=False, default=0)
-    created_by = db.Column(UUID(as_uuid=True), db.ForeignKey("users.id"), nullable=False)
+    created_by_id = db.Column(UUID(as_uuid=True), nullable=False, index=True)
+    created_by_type = db.Column(db.String(16), nullable=False, default="user")
     responsible_user_id = db.Column(UUID(as_uuid=True), db.ForeignKey("users.id"), nullable=True)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_published_at = db.Column(db.DateTime, nullable=True)
 
+    responsible_user = db.relationship("User", foreign_keys=[responsible_user_id])
     versions = db.relationship("ScopeVersion", backref="scope", lazy=True, cascade="all, delete")
 
 

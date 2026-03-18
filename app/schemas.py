@@ -1,7 +1,14 @@
 from marshmallow import Schema, fields
 from marshmallow_sqlalchemy import SQLAlchemyAutoSchema
 
-from .models import Scope, ScopeVersion, User
+from .models import Admin, Scope, ScopeVersion, User
+
+
+class AdminSchema(SQLAlchemyAutoSchema):
+    class Meta:
+        model = Admin
+        load_instance = True
+        exclude = ("password_hash", "created_at")
 
 
 class UserSchema(SQLAlchemyAutoSchema):
@@ -11,6 +18,15 @@ class UserSchema(SQLAlchemyAutoSchema):
         exclude = ("password_hash", "created_at")
 
 
+class AuthIdentitySchema(Schema):
+    id = fields.String(required=True)
+    nome = fields.String(required=True)
+    email = fields.Email(required=True)
+    role = fields.String(required=True)
+    setor = fields.String(allow_none=True)
+    tipo = fields.String(required=True)
+
+
 class LoginSchema(Schema):
     email = fields.Email(required=True)
     password = fields.String(required=True)
@@ -18,6 +34,17 @@ class LoginSchema(Schema):
 
 class RefreshSchema(Schema):
     refreshToken = fields.String(required=True)
+
+
+class CreateAdminSchema(Schema):
+    email = fields.Email(required=True)
+    password = fields.String(required=True, load_only=True)
+    nome = fields.String(load_default="Administrador")
+
+
+class AdminSettingsSchema(Schema):
+    salarioMinimoVigente = fields.Decimal(as_string=False, required=True)
+    dadosBancariosCasco = fields.Dict(required=True)
 
 
 class ScopeSchema(SQLAlchemyAutoSchema):
@@ -43,7 +70,3 @@ class ScopeVersionSchema(SQLAlchemyAutoSchema):
         model = ScopeVersion
         load_instance = True
         include_fk = True
-
-class CreateAdminSchema(Schema):
-    email = fields.Email(required=True)
-    password = fields.String(required=True, load_only=True)

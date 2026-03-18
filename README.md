@@ -1,12 +1,12 @@
 ## Triagem Aduaneira API (Flask)
 
-Backend Flask em Python 3 para atender o contrato de rotas do frontend (auth, scopes, dashboards e users), com PostgreSQL, SQLAlchemy, schemas automáticos (marshmallow-sqlalchemy) e versionamento via Alembic (Flask-Migrate).
+Backend Flask em Python 3 para atender o contrato do frontend com autenticação JWT, PostgreSQL, SQLAlchemy e versionamento via Flask-Migrate/Alembic.
 
 ### Stack
 - Flask
 - Flask-SQLAlchemy
-- marshmallow + marshmallow-sqlalchemy (`SQLAlchemyAutoSchema`)
-- Flask-Migrate (Alembic)
+- Flask-Migrate
+- marshmallow + marshmallow-sqlalchemy
 - PostgreSQL
 - JWT (access + refresh)
 
@@ -37,27 +37,46 @@ flask --app wsgi.py db upgrade
 flask --app wsgi.py run --host 0.0.0.0 --port 5000
 ```
 
-### Endpoints implementados
+### Regras implementadas
+- Admins ficam em tabela separada (`admins`) e sempre possuem privilégios administrativos.
+- Usuários operacionais ficam em `users` com `role`/`setor` específicos.
+- As informações fixas do escopo (`salarioMinimoVigente` e `dadosBancariosCasco`) são mantidas pelo admin e injetadas automaticamente no `draft` do escopo.
+- Responsáveis do formulário são carregados a partir dos usuários cadastrados, removendo dependência de listas hardcoded no frontend.
+
+### Endpoints
+#### Auth
+- `POST /auth/bootstrap-admin`
 - `POST /auth/login`
-- `POST /auth/bootstrap-admin` (cria primeiro admin com `email` e `password`)
 - `POST /auth/refresh`
 - `POST /auth/logout`
 - `GET /auth/me`
+
+#### Admin
+- `GET /admin/settings`
+- `PUT /admin/settings`
+
+#### Usuários
+- `GET /users` (admin)
+- `POST /users` (admin)
+- `DELETE /users/<userId>` (admin, desativa usuário)
+- `GET /users/responsibles` (autenticado)
+
+#### Escopos
+- `GET /scopes/metadata`
 - `POST /scopes`
 - `GET /scopes`
 - `GET /scopes/<scopeId>`
 - `PUT /scopes/<scopeId>/draft`
 - `POST /scopes/<scopeId>/publish`
 - `GET /scopes/<scopeId>/versions`
+
+#### Dashboards
 - `GET /dashboards/admin`
 - `GET /dashboards/comercial`
 - `GET /dashboards/credenciamento`
 - `GET /dashboards/operacao`
-- `GET /users`
-- `POST /users`
-
-- `POST /scopes` agora inicializa o `draft` com estrutura completa/default para compatibilidade com o schema do frontend.
 
 ### Segurança de rotas
-- `auth_required`: valida Bearer token JWT e usuário ativo.
-- `roles_required(*roles)`: aplica autorização por perfil para recursos privados (ex.: admin em `/users`).
+- `auth_required`: valida Bearer token JWT e resolve se o principal autenticado é um `Admin` ou `User`.
+- `admin_required`: restringe acesso apenas para principals da tabela `admins`.
+- `roles_required(*roles)`: permite admins e, para usuários operacionais, valida o `role` exigido.

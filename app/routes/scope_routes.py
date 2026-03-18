@@ -1,16 +1,47 @@
 from datetime import datetime
 
-from app.scope_defaults import build_default_scope_draft, merge_scope_draft
 from flask import Blueprint, g, jsonify, request
 from sqlalchemy import or_
 
 from ..auth import auth_required
 from ..extensions import db
-from ..models import Scope, ScopeVersion
+from ..models import Admin, Scope, ScopeVersion, User
 from ..schemas import ScopeSummarySchema
+from ..scope_defaults import apply_admin_defaults, build_default_scope_draft, merge_scope_draft
 
 scope_bp = Blueprint("scopes", __name__, url_prefix="/scopes")
 summary_schema = ScopeSummarySchema(many=True)
+
+
+def _serialize_admin_settings() -> dict:
+    admin = Admin.query.order_by(Admin.created_at.asc()).first()
+    if not admin:
+        return {
+            "salarioMinimoVigente": 0,
+            "dadosBancariosCasco": {"banco": "", "agencia": "", "conta": ""},
+        }
+    return {
+        "salarioMinimoVigente": float(admin.salario_minimo_vigente or 0),
+        "dadosBancariosCasco": admin.dados_bancarios_casco or {"banco": "", "agencia": "", "conta": ""},
+    }
+
+
+def _serialize_responsibles() -> list[dict]:
+    users = User.query.filter_by(ativo=True).order_by(User.nome.asc()).all()
+    return [
+        {
+            "id": user.id,
+            "nome": user.nome,
+            "email": user.email,
+            "role": user.role,
+            "setor": user.setor,
+        }
+        for user in users
+    ]
+
+
+def _normalize_draft(draft: dict | None) -> dict:
+    return apply_admin_defaults(merge_scope_draft(build_default_scope_draft(), draft or {}), _serialize_admin_settings())
 
 
 def _calc_completeness(draft: dict) -> int:
@@ -30,25 +61,32 @@ def _calc_completeness(draft: dict) -> int:
                 filled_fields += 1
         else:
             total_fields += 1
-            if value not in (None, "", []):
+            if value not in (None, "", []) and value != 0:
                 filled_fields += 1
 
     walk(draft)
     return int((filled_fields / total_fields) * 100) if total_fields else 0
 
 
+@scope_bp.get("/metadata")
+@auth_required
+def get_scope_metadata():
+    return jsonify({"informacoesFixas": _serialize_admin_settings(), "responsaveis": _serialize_responsibles()})
+
+
 @scope_bp.post("")
 @auth_required
 def create_scope():
     initial = request.get_json(silent=True) or {}
-    
-    draft = merge_scope_draft(build_default_scope_draft(), initial)
+    draft = _normalize_draft(initial)
 
     scope = Scope(
-        id=f"scope_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+        id=f"scope_{datetime.utcnow().timestamp_ns()}",
         cnpj=(draft.get("sobreEmpresa") or {}).get("cnpj"),
         razao_social=(draft.get("sobreEmpresa") or {}).get("razaoSocial"),
-        created_by=g.current_user.id,
+        created_by_id=g.current_user.id,
+        created_by_type=g.current_user_type,
+        responsible_user_id=(draft.get("sobreEmpresa") or {}).get("responsavelComercialId"),
         draft=draft,
         completeness_score=_calc_completeness(draft),
     )
@@ -85,22 +123,19 @@ def list_scopes():
 @auth_required
 def get_scope(scope_id: str):
     scope = Scope.query.get_or_404(scope_id)
-    draft = merge_scope_draft(build_default_scope_draft(), scope.draft or {})
-    return jsonify({"id": scope.id, "status": scope.status, "draft": draft})
+    return jsonify({"id": scope.id, "status": scope.status, "draft": _normalize_draft(scope.draft)})
 
 
 @scope_bp.put("/<scope_id>/draft")
 @auth_required
 def save_draft(scope_id: str):
     scope = Scope.query.get_or_404(scope_id)
-    draft = request.get_json(force=True)
-    
-    normalized_draft = merge_scope_draft(build_default_scope_draft(), draft)
+    normalized_draft = _normalize_draft(request.get_json(force=True))
     scope.draft = normalized_draft
     scope.cnpj = (normalized_draft.get("sobreEmpresa") or {}).get("cnpj")
     scope.razao_social = (normalized_draft.get("sobreEmpresa") or {}).get("razaoSocial")
+    scope.responsible_user_id = (normalized_draft.get("sobreEmpresa") or {}).get("responsavelComercialId")
     scope.completeness_score = _calc_completeness(normalized_draft)
-    
     db.session.commit()
     return "", 204
 
@@ -130,10 +165,10 @@ def list_versions(scope_id: str):
     return jsonify(
         [
             {
-                "version_number": v.version_number,
-                "published_at": v.published_at.isoformat() + "Z",
-                "data": v.data,
+                "version_number": version.version_number,
+                "published_at": version.published_at.isoformat() + "Z",
+                "data": _normalize_draft(version.data),
             }
-            for v in versions
+            for version in versions
         ]
     )

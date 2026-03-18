@@ -1,16 +1,16 @@
 from datetime import datetime, timedelta
 
-from flask import Blueprint, g, jsonify
+from flask import Blueprint, jsonify
 from sqlalchemy import func
 
-from ..auth import roles_required
+from ..auth import admin_required, roles_required
 from ..models import Scope
 
 dashboard_bp = Blueprint("dashboards", __name__, url_prefix="/dashboards")
 
 
 @dashboard_bp.get("/admin")
-@roles_required("admin")
+@admin_required
 def admin_dashboard():
     month_ago = datetime.utcnow() - timedelta(days=30)
     created_last_month = Scope.query.filter(Scope.updated_at >= month_ago).count()
@@ -18,8 +18,8 @@ def admin_dashboard():
     total = Scope.query.count()
 
     by_person = (
-        Scope.query.with_entities(Scope.created_by.label("group"), func.count(Scope.id).label("total"))
-        .group_by(Scope.created_by)
+        Scope.query.with_entities(Scope.created_by_id.label("group"), func.count(Scope.id).label("total"))
+        .group_by(Scope.created_by_id)
         .all()
     )
 
@@ -27,7 +27,7 @@ def admin_dashboard():
         {
             "createdLastMonth": created_last_month,
             "outdatedScopes": outdated,
-            "scopesByPerson": [{"group": x.group, "total": x.total} for x in by_person],
+            "scopesByPerson": [{"group": item.group, "total": item.total} for item in by_person],
             "scopesBySector": [],
             "comercialAveragePrice": 0,
             "totalScopes": total,

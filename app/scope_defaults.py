@@ -1,49 +1,35 @@
 from copy import deepcopy
 
 
+_DEFAULT_BANK_ACCOUNT = {"banco": "", "agencia": "", "conta": ""}
+_DEFAULT_BENEFICIO = {"regime": None, "detalheBeneficio": None}
 _DEFAULT_SERVICO_VALOR_OU_SALARIO = {
     "habilitado": False,
     "tipoValor": None,
     "valor": None,
     "responsavel": None,
 }
-
-_DEFAULT_SERVICO_VALOR_SIMPLES = {
-    "habilitado": False,
-    "valor": None,
-}
-
-_DEFAULT_SERVICO_PREPOSTO = {
-    "habilitado": False,
-    "valor": None,
-    "inclusoNoDesembaracoCasco": None,
-}
-
+_DEFAULT_SERVICO_VALOR_SIMPLES = {"habilitado": False, "valor": None}
+_DEFAULT_SERVICO_PREPOSTO = {"habilitado": False, "valor": None, "inclusoNoDesembaracoCasco": None}
 _DEFAULT_SERVICO_FRETE_INTERNACIONAL = {
     "habilitado": False,
     "ptaxNegociado": None,
     "percentualSobreCfr": None,
     "responsavel": None,
 }
-
 _DEFAULT_SERVICO_SEGURO = {
     "habilitado": False,
     "valorNegociado": None,
     "descricaoComplementar": None,
     "responsavel": None,
 }
-
-_DEFAULT_SERVICO_FRETE_RODOVIARIO = {
-    "habilitado": False,
-    "modalidade": None,
-    "responsavel": None,
-}
+_DEFAULT_SERVICO_FRETE_RODOVIARIO = {"habilitado": False, "modalidade": None, "responsavel": None}
 
 
 DEFAULT_SCOPE_DRAFT = {
     "informacoesFixas": {
         "salarioMinimoVigente": 0,
-        "dadosBancariosCasco": {"banco": "", "agencia": "", "conta": ""},
+        "dadosBancariosCasco": deepcopy(_DEFAULT_BANK_ACCOUNT),
     },
     "sobreEmpresa": {
         "razaoSocial": "",
@@ -55,7 +41,7 @@ DEFAULT_SCOPE_DRAFT = {
         "cnaePrincipal": "",
         "cnaeSecundario": None,
         "regimeTributacao": None,
-        "responsavelComercial": None,
+        "responsavelComercialId": None,
     },
     "contatos": [],
     "operacao": {
@@ -75,21 +61,21 @@ DEFAULT_SCOPE_DRAFT = {
             "anuencias": [],
             "impostosFederais": {
                 "contaPagamento": None,
-                "dadosContaCliente": {"banco": "", "agencia": "", "conta": ""},
-                "ii": {"regime": None, "detalheBeneficio": None},
-                "ipi": {"regime": None, "detalheBeneficio": None},
-                "pis": {"regime": None, "detalheBeneficio": None},
-                "cofins": {"regime": None, "detalheBeneficio": None},
+                "dadosContaCliente": deepcopy(_DEFAULT_BANK_ACCOUNT),
+                "ii": deepcopy(_DEFAULT_BENEFICIO),
+                "ipi": deepcopy(_DEFAULT_BENEFICIO),
+                "pis": deepcopy(_DEFAULT_BENEFICIO),
+                "cofins": deepcopy(_DEFAULT_BENEFICIO),
             },
             "afrmm": {
                 "contaPagamento": None,
-                "dadosContaCliente": {"banco": "", "agencia": "", "conta": ""},
+                "dadosContaCliente": deepcopy(_DEFAULT_BANK_ACCOUNT),
                 "regime": None,
                 "detalheBeneficio": None,
             },
             "icms": {
                 "contaPagamento": None,
-                "dadosContaCliente": {"banco": "", "agencia": "", "conta": ""},
+                "dadosContaCliente": deepcopy(_DEFAULT_BANK_ACCOUNT),
                 "regime": None,
                 "recolhida": None,
                 "efetiva": None,
@@ -136,7 +122,7 @@ DEFAULT_SCOPE_DRAFT = {
         },
     },
     "financeiro": {
-        "dadosBancariosClienteDevolucaoSaldo": {"banco": "", "agencia": "", "conta": ""},
+        "dadosBancariosClienteDevolucaoSaldo": deepcopy(_DEFAULT_BANK_ACCOUNT),
         "observacoesFinanceiro": None,
     },
 }
@@ -149,6 +135,7 @@ def build_default_scope_draft() -> dict:
 def merge_scope_draft(base: dict, patch: dict) -> dict:
     if not isinstance(base, dict):
         return deepcopy(patch)
+
     result = deepcopy(base)
     if not isinstance(patch, dict):
         return result
@@ -159,3 +146,18 @@ def merge_scope_draft(base: dict, patch: dict) -> dict:
         else:
             result[key] = value
     return result
+
+
+def apply_admin_defaults(draft: dict, admin_settings: dict | None) -> dict:
+    normalized = merge_scope_draft(build_default_scope_draft(), draft)
+    if not admin_settings:
+        return normalized
+
+    normalized["informacoesFixas"] = {
+        "salarioMinimoVigente": admin_settings.get("salarioMinimoVigente", 0),
+        "dadosBancariosCasco": merge_scope_draft(
+            deepcopy(_DEFAULT_BANK_ACCOUNT),
+            admin_settings.get("dadosBancariosCasco", {}),
+        ),
+    }
+    return normalized
