@@ -68,14 +68,18 @@ DEFAULT_SCOPE_DRAFT = {
                 "cofins": deepcopy(_DEFAULT_BENEFICIO),
             },
             "afrmm": {
+            "contaPagamento": None,
+            "dadosContaCliente": deepcopy(_DEFAULT_BANK_ACCOUNT),
+            "regime": None,
+            "detalheBeneficio": None,
+            },
+            "icms": {
                 "contaPagamento": None,
                 "dadosContaCliente": deepcopy(_DEFAULT_BANK_ACCOUNT),
                 "regime": None,
-                "detalheBeneficio": None,
+                "recolhida": None,
+                "efetiva": None,
             },
-            "icms": deepcopy(_DEFAULT_BENEFICIO),
-            "destinacao": None,
-            "subtipoConsumo": None,
         },
         "exportacao": {
             "analistaDA": "",
