@@ -1,4 +1,5 @@
 from datetime import datetime
+import uuid
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -19,7 +20,7 @@ class PasswordMixin:
 class Admin(PasswordMixin, db.Model):
     __tablename__ = "admins"
 
-    id = db.Column(UUID(as_uuid=True), primary_key=True)
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=lambda: f"{uuid.uuid4()}")
     nome = db.Column(db.String(255), nullable=False, default="Administrador")
     email = db.Column(db.String(255), nullable=False, unique=True, index=True)
     ativo = db.Column(db.Boolean, nullable=False, default=True)
@@ -35,7 +36,7 @@ class Admin(PasswordMixin, db.Model):
 class User(PasswordMixin, db.Model):
     __tablename__ = "users"
 
-    id = db.Column(UUID(as_uuid=True), primary_key=True)
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=lambda: f"{uuid.uuid4()}")
     nome = db.Column(db.String(255), nullable=False)
     email = db.Column(db.String(255), nullable=False, unique=True, index=True)
     role = db.Column(db.String(32), nullable=False)
@@ -47,7 +48,7 @@ class User(PasswordMixin, db.Model):
 class RefreshToken(db.Model):
     __tablename__ = "refresh_tokens"
 
-    id = db.Column(UUID(as_uuid=True), primary_key=True)
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=lambda: f"{uuid.uuid4()}")
     principal_id = db.Column(UUID(as_uuid=True), nullable=False, index=True)
     principal_type = db.Column(db.String(16), nullable=False, index=True)
     token = db.Column(db.String(1024), nullable=False, unique=True, index=True)
@@ -59,7 +60,7 @@ class RefreshToken(db.Model):
 class Scope(db.Model):
     __tablename__ = "scopes"
 
-    id = db.Column(UUID(as_uuid=True), primary_key=True)
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=lambda: f"{uuid.uuid4()}")
     cnpj = db.Column(db.String(14), index=True)
     razao_social = db.Column(db.String(255), index=True)
     status = db.Column(db.String(16), nullable=False, default="draft")
