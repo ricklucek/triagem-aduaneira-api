@@ -42,7 +42,7 @@ def resolve_identity(principal_type: str, principal_id: str):
 def _jwt_payload(identity, principal_type: str, token_type: str, expires_in: int) -> dict:
     now = datetime.utcnow()
     return {
-        "sub": identity.id,
+        "sub": str(identity.id),
         "email": identity.email,
         "role": ADMIN_ROLE if principal_type == "admin" else identity.role,
         "principal_type": principal_type,
@@ -69,7 +69,6 @@ def generate_tokens(identity, principal_type: str) -> dict:
 
     db.session.add(
         RefreshToken(
-            id=str(uuid.uuid4()),
             principal_id=identity.id,
             principal_type=principal_type,
             token=refresh_token,
