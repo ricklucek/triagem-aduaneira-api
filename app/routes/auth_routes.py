@@ -78,14 +78,10 @@ def me():
 def bootstrap_admin():
     payload = create_admin_schema.load(request.get_json(force=True))
 
-    if Admin.query.first():
-        return jsonify({"error": "Admin user already exists"}), 409
-
     if Admin.query.filter_by(email=payload["email"]).first() or User.query.filter_by(email=payload["email"]).first():
         return jsonify({"error": "Email already in use"}), 409
 
     admin = Admin(
-        id=f"adm_{uuid.uuid4()}",
         nome=payload["nome"],
         email=payload["email"],
         ativo=True,

@@ -59,7 +59,7 @@ class RefreshToken(db.Model):
 class Scope(db.Model):
     __tablename__ = "scopes"
 
-    id = db.Column(db.String(64), primary_key=True)
+    id = db.Column(UUID(as_uuid=True), primary_key=True)
     cnpj = db.Column(db.String(14), index=True)
     razao_social = db.Column(db.String(255), index=True)
     status = db.Column(db.String(16), nullable=False, default="draft")
@@ -80,7 +80,7 @@ class ScopeVersion(db.Model):
     __tablename__ = "scope_versions"
 
     id = db.Column(db.Integer, primary_key=True)
-    scope_id = db.Column(db.String(64), db.ForeignKey("scopes.id"), nullable=False, index=True)
+    scope_id = db.Column(UUID(as_uuid=True), db.ForeignKey("scopes.id"), nullable=False, index=True)
     version_number = db.Column(db.Integer, nullable=False)
     published_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     data = db.Column(db.JSON, nullable=False)

@@ -81,7 +81,6 @@ def create_scope():
     draft = _normalize_draft(initial)
 
     scope = Scope(
-        id=f"scope_{datetime.utcnow().timestamp_ns()}",
         cnpj=(draft.get("sobreEmpresa") or {}).get("cnpj"),
         razao_social=(draft.get("sobreEmpresa") or {}).get("razaoSocial"),
         created_by_id=g.current_user.id,

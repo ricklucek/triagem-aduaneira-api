@@ -50,7 +50,6 @@ def create_user():
         return jsonify({"error": "Email already in use"}), 409
 
     user = User(
-        id=f"u_{uuid.uuid4()}",
         nome=payload["nome"],
         email=payload["email"],
         role=role,
