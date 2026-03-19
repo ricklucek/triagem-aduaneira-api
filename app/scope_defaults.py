@@ -3,6 +3,19 @@ from copy import deepcopy
 
 _DEFAULT_BANK_ACCOUNT = {"banco": "", "agencia": "", "conta": ""}
 _DEFAULT_BENEFICIO = {"regime": "INTEGRAL", "detalheBeneficio": ""}
+_DEFAULT_AFRMM = {
+    "contaPagamento": "CASCO",
+    "dadosContaCliente": deepcopy(_DEFAULT_BANK_ACCOUNT),
+    "regime": "INTEGRAL",
+    "detalheBeneficio": "",
+}
+_DEFAULT_ICMS = {
+    "contaPagamento": "CASCO",
+    "dadosContaCliente": deepcopy(_DEFAULT_BANK_ACCOUNT),
+    "regime": "INTEGRAL",
+    "recolhida": "",
+    "efetiva": "",
+}
 _DEFAULT_SERVICO_VALOR_OU_SALARIO = {
     "habilitado": False,
     "tipoValor": None,
@@ -10,7 +23,11 @@ _DEFAULT_SERVICO_VALOR_OU_SALARIO = {
     "responsavel": None,
 }
 _DEFAULT_SERVICO_VALOR_SIMPLES = {"habilitado": False, "valor": None}
-_DEFAULT_SERVICO_PREPOSTO = {"habilitado": False, "valor": None, "inclusoNoDesembaracoCasco": None}
+_DEFAULT_SERVICO_PREPOSTO = {
+    "habilitado": False,
+    "valor": None,
+    "inclusoNoDesembaracoCasco": None,
+}
 _DEFAULT_SERVICO_FRETE_INTERNACIONAL = {
     "habilitado": False,
     "ptaxNegociado": None,
@@ -23,7 +40,11 @@ _DEFAULT_SERVICO_SEGURO = {
     "descricaoComplementar": None,
     "responsavel": None,
 }
-_DEFAULT_SERVICO_FRETE_RODOVIARIO = {"habilitado": False, "modalidade": None, "responsavel": None}
+_DEFAULT_SERVICO_FRETE_RODOVIARIO = {
+    "habilitado": False,
+    "modalidade": None,
+    "responsavel": None,
+}
 
 
 DEFAULT_SCOPE_DRAFT = {
@@ -35,51 +56,49 @@ DEFAULT_SCOPE_DRAFT = {
         "razaoSocial": "",
         "cnpj": "",
         "inscricaoEstadual": "",
-        "inscricaoMunicipal": None,
+        "inscricaoMunicipal": "",
         "enderecoCompletoEscritorio": "",
-        "enderecoCompletoArmazem": None,
+        "enderecoCompletoArmazem": "",
         "cnaePrincipal": "",
-        "cnaeSecundario": None,
-        "regimeTributacao": None,
-        "responsavelComercialId": None,
+        "cnaeSecundario": "",
+        "regimeTributacao": "",
+        "responsavelComercial": "",
     },
-    "contatos": [],
+    "contatos": [
+        {
+            "nome": "",
+            "cargoDepartamento": "",
+            "email": "",
+            "telefone": "",
+        }
+    ],
     "operacao": {
         "tipos": [],
         "importacao": {
-            "analistaDA": None,
-            "analistaAE": None,
-            "produtosImportados": None,
+            "analistaDA": "",
+            "analistaAE": "",
+            "produtosImportados": "",
             "ncms": [],
-            "vinculoComExportador": None,
+            "vinculoComExportador": "NAO",
             "locaisEntrada": [],
-            "outroLocalEntrada": None,
+            "outroLocalEntrada": "",
             "armazensLiberacao": [],
-            "outroArmazemLiberacao": None,
-            "necessidadeDtcDta": None,
-            "necessidadeLiLpco": None,
+            "outroArmazemLiberacao": "",
+            "necessidadeDtcDta": "NAO",
+            "necessidadeLiLpco": "NAO",
             "anuencias": [],
             "impostosFederais": {
-                "contaPagamento": None,
+                "contaPagamento": "CASCO",
                 "dadosContaCliente": deepcopy(_DEFAULT_BANK_ACCOUNT),
                 "ii": deepcopy(_DEFAULT_BENEFICIO),
                 "ipi": deepcopy(_DEFAULT_BENEFICIO),
                 "pis": deepcopy(_DEFAULT_BENEFICIO),
                 "cofins": deepcopy(_DEFAULT_BENEFICIO),
             },
-            "afrmm": {
-            "contaPagamento": None,
-            "dadosContaCliente": deepcopy(_DEFAULT_BANK_ACCOUNT),
-            "regime": None,
-            "detalheBeneficio": None,
-            },
-            "icms": {
-                "contaPagamento": None,
-                "dadosContaCliente": deepcopy(_DEFAULT_BANK_ACCOUNT),
-                "regime": None,
-                "recolhida": None,
-                "efetiva": None,
-            },
+            "afrmm": deepcopy(_DEFAULT_AFRMM),
+            "icms": deepcopy(_DEFAULT_ICMS),
+            "destinacao": "REVENDA",
+            "subtipoConsumo": None,
         },
         "exportacao": {
             "analistaDA": "",
@@ -89,7 +108,7 @@ DEFAULT_SCOPE_DRAFT = {
             "portosFronteiras": [],
             "outroPorto": None,
             "outraFronteira": None,
-            "destinacao": None,
+            "destinacao": "REVENDA",
             "subtipoConsumo": None,
         },
     },
@@ -121,7 +140,7 @@ DEFAULT_SCOPE_DRAFT = {
     },
     "financeiro": {
         "dadosBancariosClienteDevolucaoSaldo": deepcopy(_DEFAULT_BANK_ACCOUNT),
-        "observacoesFinanceiro": None,
+        "observacoesFinanceiro": "",
     },
 }
 
