@@ -31,12 +31,13 @@ _DEFAULT_SERVICO_PREPOSTO = {
 _DEFAULT_SERVICO_FRETE_INTERNACIONAL = {
     "habilitado": False,
     "ptaxNegociado": None,
-    "percentualSobreCfr": None,
     "responsavel": None,
 }
 _DEFAULT_SERVICO_SEGURO = {
     "habilitado": False,
     "valorNegociado": None,
+    "percentualSobreCfr": None,
+    "dataInclusaoApolice": "",
     "descricaoComplementar": None,
     "responsavel": None,
 }
