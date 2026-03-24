@@ -9,6 +9,7 @@ from .routes.dashboard_routes import dashboard_bp
 from .routes.scope_routes import scope_bp
 from .routes.user_routes import user_bp
 from .routes.admin_routes import admin_bp
+from .routes.prepostos import prepostos_bp
 
 
 def create_app(config_object=Config):
@@ -29,6 +30,7 @@ def create_app(config_object=Config):
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(user_bp)
     app.register_blueprint(admin_bp)
+    app.register_blueprint(prepostos_bp)
 
     @app.get("/health")
     def health():

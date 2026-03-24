@@ -85,3 +85,79 @@ class ScopeVersion(db.Model):
     version_number = db.Column(db.Integer, nullable=False)
     published_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     data = db.Column(db.JSON, nullable=False)
+
+
+class Preposto(db.Model):
+    __tablename__ = "prepostos"
+
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=lambda: f"{uuid.uuid4()}")
+    nome = db.Column(db.String(255), nullable=False, index=True)
+    razao_social = db.Column(db.String(255), nullable=True)
+    ativo = db.Column(db.Boolean, nullable=False, default=True)
+    observacoes = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    contatos = db.relationship(
+        "PrepostoContato",
+        backref="preposto",
+        lazy=True,
+        cascade="all, delete-orphan",
+        order_by="desc(PrepostoContato.principal), PrepostoContato.nome.asc()",
+    )
+
+    localidades = db.relationship(
+        "PrepostoLocalidade",
+        backref="preposto",
+        lazy=True,
+        cascade="all, delete-orphan",
+        order_by="PrepostoLocalidade.cidade.asc()",
+    )
+
+
+class PrepostoContato(db.Model):
+    __tablename__ = "preposto_contatos"
+
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=lambda: f"{uuid.uuid4()}")
+    preposto_id = db.Column(UUID(as_uuid=True), db.ForeignKey("prepostos.id"), nullable=False, index=True)
+
+    nome = db.Column(db.String(255), nullable=False)
+    email = db.Column(db.String(255), nullable=True, index=True)
+    telefone = db.Column(db.String(64), nullable=True)
+    whatsapp = db.Column(db.String(64), nullable=True)
+    principal = db.Column(db.Boolean, nullable=False, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PrepostoLocalidade(db.Model):
+    __tablename__ = "preposto_localidades"
+
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=lambda: f"{uuid.uuid4()}")
+    preposto_id = db.Column(UUID(as_uuid=True), db.ForeignKey("prepostos.id"), nullable=False, index=True)
+
+    cidade = db.Column(db.String(255), nullable=False, index=True)
+    uf = db.Column(db.String(2), nullable=True, index=True)
+    descricao_local = db.Column(db.String(255), nullable=True)
+    tipo_local = db.Column(db.String(32), nullable=True)  # CIDADE, PORTO, AEROPORTO, CLIA, FRONTEIRA
+
+    atende_importacao = db.Column(db.Boolean, nullable=False, default=False)
+    atende_exportacao = db.Column(db.Boolean, nullable=False, default=False)
+
+    valor_importacao = db.Column(db.Numeric(12, 2), nullable=True)
+    valor_exportacao = db.Column(db.Numeric(12, 2), nullable=True)
+
+    valor_importacao_descricao = db.Column(db.String(255), nullable=True)
+    valor_exportacao_descricao = db.Column(db.String(255), nullable=True)
+
+    moeda = db.Column(db.String(8), nullable=False, default="BRL")
+    observacoes = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        db.Index("ix_preposto_localidades_cidade_uf", "cidade", "uf"),
+        db.Index(
+            "ix_preposto_localidades_operacao",
+            "cidade",
+            "atende_importacao",
+            "atende_exportacao",
+        ),
+    )
