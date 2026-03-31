@@ -5,7 +5,7 @@ from sqlalchemy import or_
 
 from ..auth import auth_required
 from ..extensions import db
-from ..models import Admin, Scope, ScopeVersion, User
+from ..models import Admin, Scope, User
 from ..schemas import ScopeSummarySchema
 from ..scope_defaults import apply_admin_defaults, build_default_scope_draft, merge_scope_draft
 
@@ -125,9 +125,9 @@ def get_scope(scope_id: str):
     return jsonify({"id": scope.id, "status": scope.status, "draft": _normalize_draft(scope.draft)})
 
 
-@scope_bp.put("/<scope_id>/draft")
+@scope_bp.put("/<scope_id>")
 @auth_required
-def save_draft(scope_id: str):
+def save_escope(scope_id: str):
     scope = Scope.query.get_or_404(scope_id)
     normalized_draft = _normalize_draft(request.get_json(force=True))
     scope.draft = normalized_draft
@@ -143,31 +143,17 @@ def save_draft(scope_id: str):
 @auth_required
 def publish_scope(scope_id: str):
     scope = Scope.query.get_or_404(scope_id)
-    next_version = scope.version_count + 1
     now = datetime.utcnow()
 
     scope.status = "published"
-    scope.version_count = next_version
     scope.last_published_at = now
 
-    version = ScopeVersion(scope_id=scope.id, version_number=next_version, published_at=now, data=scope.draft)
-    db.session.add(version)
-    db.session.commit()
+    return jsonify({"scope_id": scope.id, "published_at": now.isoformat() + "Z"})
 
-    return jsonify({"scope_id": scope.id, "version_number": next_version, "published_at": now.isoformat() + "Z"})
-
-
-@scope_bp.get("/<scope_id>/versions")
+@scope_bp.delete("/<scope_id>")
 @auth_required
-def list_versions(scope_id: str):
-    versions = ScopeVersion.query.filter_by(scope_id=scope_id).order_by(ScopeVersion.version_number.desc()).all()
-    return jsonify(
-        [
-            {
-                "version_number": version.version_number,
-                "published_at": version.published_at.isoformat() + "Z",
-                "data": _normalize_draft(version.data),
-            }
-            for version in versions
-        ]
-    )
+def delete_scope(scope_id: str):
+    scope = Scope.query.get_or_404(scope_id)
+    db.session.delete(scope)
+    db.session.commit()
+    return "", 204

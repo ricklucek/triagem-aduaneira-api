@@ -65,7 +65,6 @@ class Scope(db.Model):
     razao_social = db.Column(db.String(255), index=True)
     status = db.Column(db.String(16), nullable=False, default="draft")
     draft = db.Column(db.JSON, nullable=False, default=dict)
-    version_count = db.Column(db.Integer, nullable=False, default=0)
     completeness_score = db.Column(db.Integer, nullable=False, default=0)
     created_by_id = db.Column(UUID(as_uuid=True), nullable=False, index=True)
     created_by_type = db.Column(db.String(16), nullable=False, default="user")
@@ -74,18 +73,6 @@ class Scope(db.Model):
     last_published_at = db.Column(db.DateTime, nullable=True)
 
     responsible_user = db.relationship("User", foreign_keys=[responsible_user_id])
-    versions = db.relationship("ScopeVersion", backref="scope", lazy=True, cascade="all, delete")
-
-
-class ScopeVersion(db.Model):
-    __tablename__ = "scope_versions"
-
-    id = db.Column(db.Integer, primary_key=True)
-    scope_id = db.Column(UUID(as_uuid=True), db.ForeignKey("scopes.id"), nullable=False, index=True)
-    version_number = db.Column(db.Integer, nullable=False)
-    published_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    data = db.Column(db.JSON, nullable=False)
-
 
 class Preposto(db.Model):
     __tablename__ = "prepostos"

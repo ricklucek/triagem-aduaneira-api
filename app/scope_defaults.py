@@ -9,6 +9,7 @@ _DEFAULT_AFRMM = {
     "dadosContaCliente": deepcopy(_DEFAULT_BANK_ACCOUNT),
     "regime": "INTEGRAL",
     "detalheBeneficio": "",
+    "observacao": "",
 }
 
 _DEFAULT_ICMS = {
@@ -17,6 +18,7 @@ _DEFAULT_ICMS = {
     "regime": "INTEGRAL",
     "recolhida": "",
     "efetiva": "",
+    "observacao": "",
 }
 
 _DEFAULT_SERVICO_VALOR_OU_SALARIO = {
@@ -94,6 +96,7 @@ DEFAULT_SCOPE_DRAFT = {
             "analistaAE": "",
             "produtosImportados": "",
             "ncms": [],
+            "observacaoNcms": "",
             "vinculoComExportador": "NAO",
             "locaisDesembaraco": [],
             "outroLocalDesembaraco": "",
@@ -110,6 +113,7 @@ DEFAULT_SCOPE_DRAFT = {
                 "ipi": deepcopy(_DEFAULT_BENEFICIO),
                 "pis": deepcopy(_DEFAULT_BENEFICIO),
                 "cofins": deepcopy(_DEFAULT_BENEFICIO),
+                "observacao": "",
             },
             "afrmm": deepcopy(_DEFAULT_AFRMM),
             "icms": deepcopy(_DEFAULT_ICMS),
@@ -120,6 +124,7 @@ DEFAULT_SCOPE_DRAFT = {
             "analistaDA": "",
             "produtosExportados": "",
             "ncms": [],
+            "observacaoNcms": "",
             "destinacao": "REVENDA",
             "subtipoConsumo": None,
         },

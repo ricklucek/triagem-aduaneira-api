@@ -4,7 +4,6 @@ from marshmallow_sqlalchemy import SQLAlchemyAutoSchema
 from .models import (
     Admin,
     Scope,
-    ScopeVersion,
     User,
     Preposto,
     PrepostoContato,
@@ -71,13 +70,6 @@ class ScopeSummarySchema(Schema):
     last_published_at = fields.DateTime(allow_none=True)
     version_count = fields.Integer(required=True)
     completeness_score = fields.Integer(required=True)
-
-
-class ScopeVersionSchema(SQLAlchemyAutoSchema):
-    class Meta:
-        model = ScopeVersion
-        load_instance = True
-        include_fk = True
 
 
 class PrepostoContatoSchema(SQLAlchemyAutoSchema):
