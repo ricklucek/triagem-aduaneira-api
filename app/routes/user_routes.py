@@ -5,12 +5,12 @@ from flask import Blueprint, jsonify, request
 from ..auth import admin_required, auth_required
 from ..extensions import db
 from ..models import Admin, User
-from ..schemas import UserSchema
+from ..schemas import AdminSchema, UserSchema
 
 user_bp = Blueprint("users", __name__, url_prefix="/users")
 user_schema = UserSchema()
 users_schema = UserSchema(many=True)
-ALLOWED_ROLES = {"comercial", "credenciamento", "operacao"}
+ALLOWED_ROLES = {"administrador", "comercial", "credenciamento", "operacao"}
 
 
 @user_bp.get("")
@@ -48,6 +48,13 @@ def create_user():
 
     if User.query.filter_by(email=payload["email"]).first() or Admin.query.filter_by(email=payload["email"]).first():
         return jsonify({"error": "Email already in use"}), 409
+    
+    if role == "administrador":
+        admin = Admin(nome=payload["nome"], email=payload["email"])
+        admin.set_password(payload["password"])
+        db.session.add(admin)
+        db.session.commit()
+        return jsonify(AdminSchema().dump(admin)), 201
 
     user = User(
         nome=payload["nome"],
@@ -63,10 +70,18 @@ def create_user():
     return jsonify(user_schema.dump(user)), 201
 
 
-@user_bp.delete("/<user_id>")
+@user_bp.delete("/user/<user_id>")
 @admin_required
 def delete_user(user_id: str):
-    user = User.query.get_or_404(user_id)
+    user = User.query.get(user_id)
     user.ativo = False
+    db.session.commit()
+    return "", 204
+
+@user_bp.delete("/admin/<admin_id>")
+@admin_required
+def delete_admin(admin_id: str):
+    admin = Admin.query.get(admin_id)
+    admin.ativo = False
     db.session.commit()
     return "", 204
