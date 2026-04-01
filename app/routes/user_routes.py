@@ -16,7 +16,7 @@ ALLOWED_ROLES = {"administrador", "comercial", "credenciamento", "operacao"}
 @user_bp.get("")
 @admin_required
 def list_users():
-    users = User.query.order_by(User.nome.asc()).all()
+    users = User.query.order_by(User.nome.asc()).filter(User.ativo == True).all()
     return jsonify(users_schema.dump(users))
 
 
@@ -66,6 +66,22 @@ def create_user():
     user.set_password(payload["password"])
 
     db.session.add(user)
+    db.session.commit()
+    return jsonify(user_schema.dump(user)), 201
+
+@user_bp.put("/user/<user_id>")
+@admin_required
+def update_user(user_id: str):
+    user = User.query.get_or_404(user_id)
+
+    payload = request.get_json(force=True)
+
+    user.nome = payload["nome"]
+    user.email = payload["email"]
+    user.setor = payload.get("setor")
+    user.ativo = payload.get("ativo", True)
+    user.set_password(payload["password"])
+
     db.session.commit()
     return jsonify(user_schema.dump(user)), 201
 
