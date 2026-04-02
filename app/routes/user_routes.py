@@ -45,8 +45,8 @@ def list_responsibles():
 def create_user():
     payload = request.get_json(force=True)
     role = payload.get("role")
-    if role != "administrador":
-        return jsonify({"ok": False, "message": "Você precisa de permissões de administrador"}), 400
+    if role not in ALLOWED_ROLES:
+        return jsonify({"ok": False, "message": "Os papeis devem ser um dos seguintes: " + ", ".join(ALLOWED_ROLES)}), 400
 
     if User.query.filter_by(email=payload["email"], ativo=True).first() or Admin.query.filter_by(email=payload["email"], ativo=True).first():
         return jsonify({"ok": False, "message": "Email já está em uso"}), 409
