@@ -23,8 +23,8 @@ _DEFAULT_ICMS = {
 
 _DEFAULT_SERVICO_VALOR_OU_SALARIO = {
     "habilitado": False,
-    "tipoValor": "",
-    "valor": "",
+    "tipoValor": None,
+    "valor": None,
     "responsavel": None,
     "ultimaAtualizacao": None,
 }

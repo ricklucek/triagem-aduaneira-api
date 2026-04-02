@@ -17,7 +17,9 @@ ALLOWED_ROLES = {"administrador", "comercial", "credenciamento", "operacao"}
 @admin_required
 def list_users():
     users = User.query.order_by(User.nome.asc()).filter(User.ativo == True).all()
-    return jsonify(users_schema.dump(users))
+    admins = Admin.query.order_by(Admin.nome.asc()).filter(Admin.ativo == True).all()
+
+    return jsonify(AdminSchema(many=True).dump(admins) + UserSchema(many=True).dump(users))
 
 
 @user_bp.get("/responsibles")
@@ -43,18 +45,18 @@ def list_responsibles():
 def create_user():
     payload = request.get_json(force=True)
     role = payload.get("role")
-    if role not in ALLOWED_ROLES:
-        return jsonify({"error": "role must be one of comercial, credenciamento, operacao"}), 400
+    if role != "administrador":
+        return jsonify({"ok": False, "message": "Você precisa de permissões de administrador"}), 400
 
-    if User.query.filter_by(email=payload["email"]).first() or Admin.query.filter_by(email=payload["email"]).first():
-        return jsonify({"error": "Email already in use"}), 409
+    if User.query.filter_by(email=payload["email"], ativo=True).first() or Admin.query.filter_by(email=payload["email"], ativo=True).first():
+        return jsonify({"ok": False, "message": "Email já está em uso"}), 409
     
     if role == "administrador":
         admin = Admin(nome=payload["nome"], email=payload["email"])
         admin.set_password(payload["password"])
         db.session.add(admin)
         db.session.commit()
-        return jsonify(AdminSchema().dump(admin)), 201
+        return jsonify({"ok": True, "data": AdminSchema().dump(admin)}), 201
 
     user = User(
         nome=payload["nome"],
@@ -67,7 +69,7 @@ def create_user():
 
     db.session.add(user)
     db.session.commit()
-    return jsonify(user_schema.dump(user)), 201
+    return jsonify({"ok": True, "data": user_schema.dump(user)}), 201
 
 @user_bp.put("/user/<user_id>")
 @admin_required
@@ -83,7 +85,7 @@ def update_user(user_id: str):
     user.set_password(payload["password"])
 
     db.session.commit()
-    return jsonify(user_schema.dump(user)), 201
+    return jsonify({"ok": True, "data": user_schema.dump(user)}), 201
 
 
 @user_bp.delete("/user/<user_id>")
@@ -92,7 +94,7 @@ def delete_user(user_id: str):
     user = User.query.get(user_id)
     user.ativo = False
     db.session.commit()
-    return "", 204
+    return jsonify({"ok": True, "message": "Usuário desativado com sucesso"}), 204
 
 @user_bp.delete("/admin/<admin_id>")
 @admin_required
@@ -100,4 +102,4 @@ def delete_admin(admin_id: str):
     admin = Admin.query.get(admin_id)
     admin.ativo = False
     db.session.commit()
-    return "", 204
+    return jsonify({"ok": True, "message": "Administrador desativado com sucesso"}), 204
