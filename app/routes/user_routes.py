@@ -17,9 +17,15 @@ ALLOWED_ROLES = {"administrador", "comercial", "credenciamento", "operacao"}
 @admin_required
 def list_users():
     users = User.query.order_by(User.nome.asc()).filter(User.ativo == True).all()
+
+    return jsonify(UserSchema(many=True).dump(users))
+
+@user_bp.get("/admin")
+@admin_required
+def list_admin():
     admins = Admin.query.order_by(Admin.nome.asc()).filter(Admin.ativo == True).all()
 
-    return jsonify(AdminSchema(many=True).dump(admins) + UserSchema(many=True).dump(users))
+    return jsonify(AdminSchema(many=True).dump(admins))
 
 
 @user_bp.get("/responsibles")
