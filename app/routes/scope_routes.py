@@ -148,6 +148,8 @@ def publish_scope(scope_id: str):
     scope.status = "published"
     scope.last_published_at = now
 
+    db.session.commit()
+
     return jsonify({"scope_id": scope.id, "published_at": now.isoformat() + "Z"})
 
 @scope_bp.delete("/<scope_id>")

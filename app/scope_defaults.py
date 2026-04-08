@@ -72,6 +72,7 @@ DEFAULT_SCOPE_DRAFT = {
     },
     "sobreEmpresa": {
         "razaoSocial": "",
+        "nomeResumido": "",
         "cnpj": "",
         "inscricaoEstadual": "",
         "inscricaoMunicipal": "",
@@ -120,7 +121,7 @@ DEFAULT_SCOPE_DRAFT = {
             "afrmm": deepcopy(_DEFAULT_AFRMM),
             "icms": deepcopy(_DEFAULT_ICMS),
             "destinacao": ["REVENDA"],
-            "subtipoConsumo": None,
+            "subtipoConsumo": [],
         },
         "exportacao": {
             "analistaDA": "",
@@ -128,7 +129,7 @@ DEFAULT_SCOPE_DRAFT = {
             "ncms": [],
             "observacaoNcms": "",
             "destinacao": ["REVENDA"],
-            "subtipoConsumo": None,
+            "subtipoConsumo": [],
         },
     },
     "servicos": {
