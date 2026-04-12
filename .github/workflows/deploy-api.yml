@@ -9,6 +9,7 @@ env:
   SERVICE_NAME: ta-api
   REGION: southamerica-east1
   ENV_VARS: DB_HOST=10.10.1.10,DB_PORT=5432,DB_NAME=appdb,DB_USER=appuser,SECRET_KEY=supersecretkey,JWT_ACCESS_EXPIRES_SECONDS=3600
+  SECRETS: DB_PASSWORD=DB_PASSWORD:latest
 
 jobs:
   deploy:
@@ -47,4 +48,5 @@ jobs:
             --subnet=run-subnet \
             --vpc-egress=private-ranges-only \
             --update-env-vars ${{ env.ENV_VARS }} \
+            --update-secrets ${{ env.SECRETS }} \
             --allow-unauthenticated 
