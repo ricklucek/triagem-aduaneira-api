@@ -18,8 +18,7 @@ class Config:
         password=DB_PASSWORD,
         host=DB_HOST,
         port=DB_PORT,
-        database=DB_NAME,
-        query={"charset": "utf8mb4"}
+        database=DB_NAME
     )
 
     JWT_ACCESS_EXPIRES_SECONDS = int(os.getenv("JWT_ACCESS_EXPIRES_SECONDS", "3600"))
