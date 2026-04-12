@@ -7,5 +7,8 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir --upgrade setuptools
 
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+
 COPY . .
 CMD ["gunicorn","--workers", "6", "--bind", "0.0.0.0:8080","--timeout", "600", "wsgi:app"]
