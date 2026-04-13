@@ -14,7 +14,10 @@ dashboard_bp = Blueprint("dashboards", __name__, url_prefix="/dashboards")
 def admin_dashboard():
     month_ago = datetime.utcnow() - timedelta(days=30)
     created_last_month = Scope.query.filter(Scope.updated_at >= month_ago).count()
-    outdated = Scope.query.filter(Scope.status == "draft").count()
+
+    year_ago = datetime.utcnow() - timedelta(days=365)
+
+    outdated = Scope.query.filter(Scope.last_published_at < year_ago).count()
     total = Scope.query.count()
 
     by_person = (
