@@ -10,6 +10,8 @@ from .routes.scope_routes import scope_bp
 from .routes.user_routes import user_bp
 from .routes.admin_routes import admin_bp
 from .routes.prepostos import prepostos_bp
+from .routes.client_routes import client_bp
+from .routes.organization_routes import organization_bp
 
 
 def create_app(config_object=Config):
@@ -31,6 +33,8 @@ def create_app(config_object=Config):
     app.register_blueprint(user_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(prepostos_bp)
+    app.register_blueprint(client_bp)
+    app.register_blueprint(organization_bp)
 
     @app.get("/health")
     def health():

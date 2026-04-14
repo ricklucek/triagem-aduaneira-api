@@ -30,5 +30,6 @@ Backend Flask em Python 3 para atender o contrato do frontend com autenticação
 flask --app wsgi.py run --host 0.0.0.0 --port 5000
 ```
 
-### Documentação de endpoints
-Consulte `docs/ENDPOINTS.md` para regras, payloads e respostas dos endpoints (incluindo publicação de escopo, filtros e edição em massa de responsáveis).
+### Documentação
+- Endpoints: `docs/ENDPOINTS.md`
+- Contexto da transformação backend/frontend: `docs/BACKEND_TRANSFORMATION.md`

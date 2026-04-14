@@ -54,6 +54,13 @@ def _normalize_draft(draft: dict | None) -> dict:
     return apply_admin_defaults(merge_scope_draft(build_default_scope_draft(), draft or {}), _get_admin_settings())
 
 
+def _load_scope_payload() -> dict:
+    payload = request.get_json(force=True)
+    if not isinstance(payload, dict):
+        return {}
+    return payload
+
+
 def _calc_completeness(draft: dict) -> int:
     if not isinstance(draft, dict) or not draft:
         return 0
@@ -140,7 +147,7 @@ def get_scope_metadata():
 @scope_bp.post("")
 @auth_required
 def create_scope():
-    initial = request.get_json(silent=True) or {}
+    initial = _load_scope_payload()
     draft = _normalize_draft(initial)
     sobre_empresa = draft.get("sobreEmpresa") or {}
 
@@ -221,7 +228,7 @@ def get_scope(scope_id: str):
 @auth_required
 def update_scope(scope_id: str):
     scope = _scope_query_for_current_user().filter(Scope.id == scope_id).first_or_404()
-    normalized_draft = _normalize_draft(request.get_json(force=True))
+    normalized_draft = _normalize_draft(_load_scope_payload())
 
     scope.draft = normalized_draft
     scope.completeness_score = _calc_completeness(normalized_draft)
