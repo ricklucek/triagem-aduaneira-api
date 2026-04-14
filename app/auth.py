@@ -6,23 +6,13 @@ import jwt
 from flask import current_app, g, jsonify, request
 
 from .extensions import db
-from .models import Admin, RefreshToken, User
+from .models import RefreshToken, User
 
 
 ADMIN_ROLE = "admin"
 
 
 def serialize_identity(identity) -> dict:
-    if isinstance(identity, Admin):
-        return {
-            "id": identity.id,
-            "nome": identity.nome,
-            "email": identity.email,
-            "role": ADMIN_ROLE,
-            "setor": "Administração",
-            "tipo": "admin",
-        }
-
     return {
         "id": identity.id,
         "nome": identity.nome,
@@ -33,9 +23,7 @@ def serialize_identity(identity) -> dict:
     }
 
 
-def resolve_identity(principal_type: str, principal_id: str):
-    if principal_type == "admin":
-        return Admin.query.get(principal_id)
+def resolve_identity(principal_id: str):
     return User.query.get(principal_id)
 
 

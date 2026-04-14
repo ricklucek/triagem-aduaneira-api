@@ -4,8 +4,8 @@ from flask import Blueprint, jsonify, request
 
 from ..auth import admin_required, auth_required
 from ..extensions import db
-from ..models import Admin, User
-from ..schemas import AdminSchema, UserSchema
+from ..models import User
+from ..schemas import UserSchema
 
 user_bp = Blueprint("users", __name__, url_prefix="/users")
 user_schema = UserSchema()
@@ -19,14 +19,6 @@ def list_users():
     users = User.query.order_by(User.nome.asc()).filter(User.ativo == True).all()
 
     return jsonify(UserSchema(many=True).dump(users))
-
-@user_bp.get("/admin")
-@admin_required
-def list_admin():
-    admins = Admin.query.order_by(Admin.nome.asc()).filter(Admin.ativo == True).all()
-
-    return jsonify(AdminSchema(many=True).dump(admins))
-
 
 @user_bp.get("/responsibles")
 @auth_required
@@ -54,15 +46,8 @@ def create_user():
     if role not in ALLOWED_ROLES:
         return jsonify({"ok": False, "message": "Os papeis devem ser um dos seguintes: " + ", ".join(ALLOWED_ROLES)}), 400
 
-    if User.query.filter_by(email=payload["email"], ativo=True).first() or Admin.query.filter_by(email=payload["email"], ativo=True).first():
+    if User.query.filter_by(email=payload["email"], ativo=True).first():
         return jsonify({"ok": False, "message": "Email já está em uso"}), 409
-    
-    if role == "administrador":
-        admin = Admin(nome=payload["nome"], email=payload["email"])
-        admin.set_password(payload["password"])
-        db.session.add(admin)
-        db.session.commit()
-        return jsonify({"ok": True, "data": AdminSchema().dump(admin)}), 201
 
     user = User(
         nome=payload["nome"],
@@ -102,10 +87,4 @@ def delete_user(user_id: str):
     db.session.commit()
     return jsonify({"ok": True, "message": "Usuário desativado com sucesso"}), 204
 
-@user_bp.delete("/admin/<admin_id>")
-@admin_required
-def delete_admin(admin_id: str):
-    admin = Admin.query.get(admin_id)
-    admin.ativo = False
-    db.session.commit()
-    return jsonify({"ok": True, "message": "Administrador desativado com sucesso"}), 204
+

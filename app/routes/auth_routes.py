@@ -2,15 +2,16 @@ from datetime import datetime
 import uuid
 from flask import Blueprint, g, jsonify, request
 
+from app.services.bootstrap_legacy_data import bootstrap_legacy_data_into_casco
+
 from ..auth import auth_required, decode_token, generate_tokens, resolve_identity, serialize_identity
 from ..extensions import db
-from ..models import Admin, RefreshToken, User
-from ..schemas import AdminSchema, CreateAdminSchema, LoginSchema, RefreshSchema
+from ..models import RefreshToken, User
+from ..schemas import CreateAdminSchema, LoginSchema, RefreshSchema
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
 login_schema = LoginSchema()
 refresh_schema = RefreshSchema()
-admin_schema = AdminSchema()
 create_admin_schema = CreateAdminSchema()
 
 
@@ -18,14 +19,10 @@ create_admin_schema = CreateAdminSchema()
 def login():
     payload = login_schema.load(request.get_json(force=True))
 
-    admin = Admin.query.filter_by(email=payload["email"]).first()
-    if admin and admin.check_password(payload["password"]):
-        return jsonify({"user": serialize_identity(admin), "tokens": generate_tokens(admin, "admin")})
-
     user = User.query.filter_by(email=payload["email"]).first()
     if not user or not user.check_password(payload["password"]):
         return jsonify({"error": "Invalid credentials"}), 401
-
+    
     return jsonify({"user": serialize_identity(user), "tokens": generate_tokens(user, "user")})
 
 
@@ -73,22 +70,3 @@ def logout():
 def me():
     return jsonify(g.current_identity)
 
-
-@auth_bp.post("/bootstrap-admin")
-def bootstrap_admin():
-    payload = create_admin_schema.load(request.get_json(force=True))
-
-    if Admin.query.filter_by(email=payload["email"]).first() or User.query.filter_by(email=payload["email"]).first():
-        return jsonify({"error": "Email already in use"}), 409
-
-    admin = Admin(
-        nome=payload["nome"],
-        email=payload["email"],
-        ativo=True,
-    )
-    admin.set_password(payload["password"])
-
-    db.session.add(admin)
-    db.session.commit()
-
-    return jsonify(admin_schema.dump(admin)), 201

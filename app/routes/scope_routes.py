@@ -5,7 +5,7 @@ from sqlalchemy import or_
 
 from ..auth import auth_required
 from ..extensions import db
-from ..models import Admin, Scope, User
+from ..models import Scope, User
 from ..schemas import ScopeSummarySchema
 from ..scope_defaults import apply_admin_defaults, build_default_scope_draft, merge_scope_draft
 
@@ -14,16 +14,10 @@ summary_schema = ScopeSummarySchema(many=True)
 
 
 def _serialize_admin_settings() -> dict:
-    admin = Admin.query.order_by(Admin.created_at.asc()).first()
-    if not admin:
-        return {
+    return {
             "salarioMinimoVigente": 0,
             "dadosBancariosCasco": {"banco": "", "agencia": "", "conta": ""},
         }
-    return {
-        "salarioMinimoVigente": float(admin.salario_minimo_vigente or 0),
-        "dadosBancariosCasco": admin.dados_bancarios_casco or {"banco": "", "agencia": "", "conta": ""},
-    }
 
 
 def _serialize_responsibles() -> list[dict]:

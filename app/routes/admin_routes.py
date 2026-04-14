@@ -4,14 +4,13 @@ from flask import Blueprint, g, jsonify, request
 
 from ..auth import admin_required
 from ..extensions import db
-from ..models import Admin
 from ..schemas import AdminSettingsSchema
 
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 settings_schema = AdminSettingsSchema()
 
 
-def _serialize_settings(admin: Admin) -> dict:
+def _serialize_settings(admin) -> dict:
     return {
         "salarioMinimoVigente": float(admin.salario_minimo_vigente or 0),
         "dadosBancariosCasco": admin.dados_bancarios_casco or {"banco": "", "agencia": "", "conta": ""},

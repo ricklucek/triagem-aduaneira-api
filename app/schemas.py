@@ -2,20 +2,12 @@ from marshmallow import Schema, fields, validate, validates_schema, ValidationEr
 from marshmallow_sqlalchemy import SQLAlchemyAutoSchema
 
 from .models import (
-    Admin,
     Scope,
     User,
     Preposto,
     PrepostoContato,
     PrepostoLocalidade,
 )
-
-
-class AdminSchema(SQLAlchemyAutoSchema):
-    class Meta:
-        model = Admin
-        load_instance = True
-        exclude = ("password_hash", "created_at")
 
 
 class UserSchema(SQLAlchemyAutoSchema):
