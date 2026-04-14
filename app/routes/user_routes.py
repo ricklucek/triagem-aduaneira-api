@@ -1,6 +1,4 @@
-import uuid
-
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, g, jsonify, request
 
 from ..auth import admin_required, auth_required
 from ..extensions import db
@@ -16,14 +14,20 @@ ALLOWED_ROLES = {"administrador", "comercial", "credenciamento", "operacao"}
 @user_bp.get("")
 @admin_required
 def list_users():
-    users = User.query.order_by(User.nome.asc()).filter(User.ativo == True).all()
+    query = User.query.order_by(User.nome.asc()).filter(User.ativo == True)
+    if g.current_user.organization_id:
+        query = query.filter(User.organization_id == g.current_user.organization_id)
+    users = query.all()
 
     return jsonify(UserSchema(many=True).dump(users))
 
 @user_bp.get("/responsibles")
 @auth_required
 def list_responsibles():
-    users = User.query.filter_by(ativo=True).order_by(User.nome.asc()).all()
+    query = User.query.filter_by(ativo=True).order_by(User.nome.asc())
+    if g.current_user.organization_id:
+        query = query.filter_by(organization_id=g.current_user.organization_id)
+    users = query.all()
     return jsonify(
         [
             {
@@ -55,8 +59,10 @@ def create_user():
         role=role,
         setor=payload.get("setor"),
         ativo=payload.get("ativo", True),
+        organization_id=g.current_user.organization_id,
     )
-    user.set_password(payload["password"])
+    if payload.get("password"):
+        user.set_password(payload["password"])
 
     db.session.add(user)
     db.session.commit()
@@ -73,7 +79,8 @@ def update_user(user_id: str):
     user.email = payload["email"]
     user.setor = payload.get("setor")
     user.ativo = payload.get("ativo", True)
-    user.set_password(payload["password"])
+    if payload.get("password"):
+        user.set_password(payload["password"])
 
     db.session.commit()
     return jsonify({"ok": True, "data": user_schema.dump(user)}), 201

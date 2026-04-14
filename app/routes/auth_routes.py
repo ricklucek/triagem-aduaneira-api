@@ -1,29 +1,75 @@
 from datetime import datetime
-import uuid
+import re
+
 from flask import Blueprint, g, jsonify, request
+from sqlalchemy.exc import IntegrityError
 
-from app.services.bootstrap_legacy_data import bootstrap_legacy_data_into_casco
-
-from ..auth import auth_required, decode_token, generate_tokens, resolve_identity, serialize_identity
+from ..auth import auth_required, decode_token, generate_tokens, serialize_identity
 from ..extensions import db
-from ..models import RefreshToken, User
-from ..schemas import CreateAdminSchema, LoginSchema, RefreshSchema
+from ..models import Organization, RefreshToken, User
+from ..schemas import LoginSchema, RefreshSchema, RegisterSchema
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
 login_schema = LoginSchema()
 refresh_schema = RefreshSchema()
-create_admin_schema = CreateAdminSchema()
+register_schema = RegisterSchema()
+
+
+def _slugify(text: str) -> str:
+    base = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower()).strip("-")
+    return base or "org"
+
+
+@auth_bp.post("/register")
+def register():
+    payload = register_schema.load(request.get_json(force=True))
+
+    if User.query.filter_by(email=payload["email"]).first():
+        return jsonify({"error": "Email já cadastrado"}), 409
+
+    organization = None
+    if payload.get("organization_id"):
+        organization = Organization.query.get(payload["organization_id"])
+        if not organization:
+            return jsonify({"error": "Organização não encontrada"}), 404
+    else:
+        slug = payload.get("organization_slug") or _slugify(payload["organization_nome"])
+        organization = Organization(
+            nome=payload["organization_nome"],
+            slug=slug,
+            cnpj=payload.get("organization_cnpj"),
+        )
+        db.session.add(organization)
+        db.session.flush()
+
+    user = User(
+        nome=payload["nome"],
+        email=payload["email"],
+        role=payload["role"],
+        setor=payload.get("setor"),
+        organization_id=organization.id,
+    )
+    user.set_password(payload["password"])
+
+    db.session.add(user)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"error": "Conflito ao criar usuário/organização"}), 409
+
+    return jsonify({"user": serialize_identity(user), "tokens": generate_tokens(user)}), 201
 
 
 @auth_bp.post("/login")
 def login():
     payload = login_schema.load(request.get_json(force=True))
 
-    user = User.query.filter_by(email=payload["email"]).first()
+    user = User.query.filter_by(email=payload["email"], ativo=True).first()
     if not user or not user.check_password(payload["password"]):
         return jsonify({"error": "Invalid credentials"}), 401
-    
-    return jsonify({"user": serialize_identity(user), "tokens": generate_tokens(user, "user")})
+
+    return jsonify({"user": serialize_identity(user), "tokens": generate_tokens(user)})
 
 
 @auth_bp.post("/refresh")
@@ -43,22 +89,21 @@ def refresh():
     if not persisted or persisted.expires_at < datetime.utcnow():
         return jsonify({"error": "Refresh token expired or revoked"}), 401
 
-    identity = resolve_identity(persisted.principal_type, persisted.principal_id)
+    identity = persisted.user
     if not identity or not identity.ativo:
         return jsonify({"error": "Invalid user"}), 401
 
     persisted.revoked = True
     db.session.commit()
 
-    return jsonify({"tokens": generate_tokens(identity, persisted.principal_type)})
+    return jsonify({"tokens": generate_tokens(identity)})
 
 
 @auth_bp.post("/logout")
 @auth_required
 def logout():
     db.session.query(RefreshToken).filter_by(
-        principal_id=g.current_user.id,
-        principal_type=g.current_user_type,
+        user_id=g.current_user.id,
         revoked=False,
     ).update({"revoked": True})
     db.session.commit()
@@ -69,4 +114,3 @@ def logout():
 @auth_required
 def me():
     return jsonify(g.current_identity)
-

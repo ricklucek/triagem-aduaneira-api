@@ -1,4 +1,3 @@
-import uuid
 from datetime import datetime, timedelta
 from functools import wraps
 
@@ -14,12 +13,13 @@ ADMIN_ROLE = "admin"
 
 def serialize_identity(identity) -> dict:
     return {
-        "id": identity.id,
+        "id": str(identity.id),
         "nome": identity.nome,
         "email": identity.email,
         "role": identity.role,
         "setor": identity.setor,
         "tipo": "user",
+        "organizationId": str(identity.organization_id) if identity.organization_id else None,
     }
 
 
@@ -40,7 +40,7 @@ def _jwt_payload(identity, principal_type: str, token_type: str, expires_in: int
     }
 
 
-def generate_tokens(identity, principal_type: str) -> dict:
+def generate_tokens(identity, principal_type: str = "user") -> dict:
     access_expires = current_app.config["JWT_ACCESS_EXPIRES_SECONDS"]
     refresh_expires = current_app.config["JWT_REFRESH_EXPIRES_SECONDS"]
 
@@ -57,8 +57,7 @@ def generate_tokens(identity, principal_type: str) -> dict:
 
     db.session.add(
         RefreshToken(
-            principal_id=identity.id,
-            principal_type=principal_type,
+            user_id=identity.id,
             token=refresh_token,
             expires_at=datetime.utcnow() + timedelta(seconds=refresh_expires),
         )
@@ -88,13 +87,12 @@ def auth_required(fn):
         if payload.get("type") != "access":
             return jsonify({"error": "Invalid access token"}), 401
 
-        principal_type = payload.get("principal_type", "user")
-        identity = resolve_identity(principal_type, payload["sub"])
+        identity = resolve_identity(payload["sub"])
         if not identity or not identity.ativo:
             return jsonify({"error": "User not found or inactive"}), 401
 
         g.current_user = identity
-        g.current_user_type = principal_type
+        g.current_user_type = "admin" if identity.role == ADMIN_ROLE else "user"
         g.current_identity = serialize_identity(identity)
         return fn(*args, **kwargs)
 
@@ -105,7 +103,7 @@ def admin_required(fn):
     @wraps(fn)
     @auth_required
     def wrapper(*args, **kwargs):
-        if g.current_user_type != "admin":
+        if g.current_user.role != ADMIN_ROLE:
             return jsonify({"error": "Forbidden"}), 403
         return fn(*args, **kwargs)
 
@@ -117,7 +115,7 @@ def roles_required(*roles):
         @wraps(fn)
         @auth_required
         def wrapper(*args, **kwargs):
-            if g.current_user_type == "admin":
+            if g.current_user.role == ADMIN_ROLE:
                 return fn(*args, **kwargs)
             if g.current_user.role not in roles:
                 return jsonify({"error": "Forbidden"}), 403

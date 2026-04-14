@@ -1,52 +1,81 @@
-from marshmallow import Schema, fields, validate, validates_schema, ValidationError
+from marshmallow import Schema, ValidationError, fields, validate, validates_schema
 from marshmallow_sqlalchemy import SQLAlchemyAutoSchema
 
 from .models import (
-    Scope,
-    User,
+    Client,
+    ClientContact,
+    Organization,
+    OrganizationSetting,
     Preposto,
     PrepostoContato,
     PrepostoLocalidade,
+    Scope,
+    ScopeAssignment,
+    ScopeService,
+    ScopeVersion,
+    User,
 )
+
+
+class OrganizationSchema(SQLAlchemyAutoSchema):
+    class Meta:
+        model = Organization
+        load_instance = True
+        exclude = ("created_at", "updated_at")
 
 
 class UserSchema(SQLAlchemyAutoSchema):
     class Meta:
         model = User
         load_instance = True
-        exclude = ("password_hash", "created_at")
+        exclude = ("password_hash",)
 
 
-class AuthIdentitySchema(Schema):
-    id = fields.String(required=True)
-    nome = fields.String(required=True)
-    email = fields.Email(required=True)
-    role = fields.String(required=True)
-    setor = fields.String(allow_none=True)
-    tipo = fields.String(required=True)
+class ClientContactSchema(SQLAlchemyAutoSchema):
+    class Meta:
+        model = ClientContact
+        load_instance = True
+        include_fk = True
 
 
-class LoginSchema(Schema):
-    email = fields.Email(required=True)
-    password = fields.String(required=True)
+class ClientSchema(SQLAlchemyAutoSchema):
+    contatos = fields.Nested(ClientContactSchema, many=True, dump_only=True)
+
+    class Meta:
+        model = Client
+        load_instance = True
+        include_fk = True
 
 
-class RefreshSchema(Schema):
-    refreshToken = fields.String(required=True)
+class ScopeAssignmentSchema(SQLAlchemyAutoSchema):
+    user = fields.Nested(UserSchema, only=("id", "nome", "email", "role", "setor"), dump_only=True)
+
+    class Meta:
+        model = ScopeAssignment
+        load_instance = True
+        include_fk = True
 
 
-class CreateAdminSchema(Schema):
-    email = fields.Email(required=True)
-    password = fields.String(required=True, load_only=True)
-    nome = fields.String(load_default="Administrador")
+class ScopeServiceSchema(SQLAlchemyAutoSchema):
+    class Meta:
+        model = ScopeService
+        load_instance = True
+        include_fk = True
 
 
-class AdminSettingsSchema(Schema):
-    salarioMinimoVigente = fields.Decimal(as_string=False, required=True)
-    dadosBancariosCasco = fields.Dict(required=True)
+class ScopeVersionSchema(SQLAlchemyAutoSchema):
+    class Meta:
+        model = ScopeVersion
+        load_instance = True
+        include_fk = True
 
 
 class ScopeSchema(SQLAlchemyAutoSchema):
+    client = fields.Nested(ClientSchema, dump_only=True)
+    responsible_user = fields.Nested(UserSchema, only=("id", "nome", "email", "role", "setor"), dump_only=True)
+    assignments = fields.Nested(ScopeAssignmentSchema, many=True, dump_only=True)
+    services = fields.Nested(ScopeServiceSchema, many=True, dump_only=True)
+
     class Meta:
         model = Scope
         load_instance = True
@@ -55,13 +84,77 @@ class ScopeSchema(SQLAlchemyAutoSchema):
 
 class ScopeSummarySchema(Schema):
     id = fields.String(required=True)
-    cnpj = fields.String(allow_none=True)
-    razao_social = fields.String(allow_none=True)
     status = fields.String(required=True)
+    completeness_score = fields.Integer(required=True)
+    version = fields.Integer(allow_none=True)
     updated_at = fields.DateTime(allow_none=True)
     last_published_at = fields.DateTime(allow_none=True)
-    version_count = fields.Integer(required=True)
-    completeness_score = fields.Integer(required=True)
+    client_id = fields.String(allow_none=True)
+    client_cnpj = fields.String(allow_none=True)
+    client_razao_social = fields.String(allow_none=True)
+    responsible_user_id = fields.String(allow_none=True)
+    responsible_user_nome = fields.String(allow_none=True)
+
+
+class ScopeListQuerySchema(Schema):
+    status = fields.String(required=False)
+    q = fields.String(required=False)
+    cnpj = fields.String(required=False)
+    client_id = fields.String(required=False)
+    responsible_user_id = fields.String(required=False)
+    created_by_id = fields.String(required=False)
+    limit = fields.Integer(load_default=20, validate=validate.Range(min=1, max=200))
+    offset = fields.Integer(load_default=0, validate=validate.Range(min=0))
+
+
+class ScopeBulkResponsibleSchema(Schema):
+    old_user_id = fields.String(required=True)
+    new_user_id = fields.String(required=True)
+    apply_status = fields.List(fields.String(), load_default=[])
+    only_active_assignments = fields.Boolean(load_default=True)
+    dry_run = fields.Boolean(load_default=True)
+
+
+class LoginSchema(Schema):
+    email = fields.Email(required=True)
+    password = fields.String(required=True)
+
+
+class RegisterSchema(Schema):
+    nome = fields.String(required=True)
+    email = fields.Email(required=True)
+    password = fields.String(required=True, load_only=True, validate=validate.Length(min=8))
+    role = fields.String(load_default="admin")
+    setor = fields.String(allow_none=True)
+
+    organization_id = fields.String(load_default=None, allow_none=True)
+    organization_nome = fields.String(load_default=None, allow_none=True)
+    organization_slug = fields.String(load_default=None, allow_none=True)
+    organization_cnpj = fields.String(load_default=None, allow_none=True)
+
+    @validates_schema
+    def validate_org(self, data, **kwargs):
+        if not data.get("organization_id") and not data.get("organization_nome"):
+            raise ValidationError(
+                "Informe organization_id existente ou organization_nome para criar organização.",
+                field_name="organization_id",
+            )
+
+
+class RefreshSchema(Schema):
+    refreshToken = fields.String(required=True)
+
+
+class OrganizationSettingSchema(SQLAlchemyAutoSchema):
+    class Meta:
+        model = OrganizationSetting
+        load_instance = True
+        include_fk = True
+
+
+class AdminSettingsSchema(Schema):
+    salarioMinimoVigente = fields.Decimal(as_string=False, required=True)
+    dadosBancariosCasco = fields.Dict(required=True)
 
 
 class PrepostoContatoSchema(SQLAlchemyAutoSchema):
@@ -69,7 +162,7 @@ class PrepostoContatoSchema(SQLAlchemyAutoSchema):
         model = PrepostoContato
         load_instance = True
         include_fk = True
-        exclude = ("created_at",)
+        exclude = ("created_at", "updated_at")
 
 
 class PrepostoLocalidadeSchema(SQLAlchemyAutoSchema):
@@ -77,7 +170,7 @@ class PrepostoLocalidadeSchema(SQLAlchemyAutoSchema):
         model = PrepostoLocalidade
         load_instance = True
         include_fk = True
-        exclude = ("created_at",)
+        exclude = ("created_at", "updated_at")
 
 
 class PrepostoSchema(SQLAlchemyAutoSchema):
@@ -87,7 +180,7 @@ class PrepostoSchema(SQLAlchemyAutoSchema):
     class Meta:
         model = Preposto
         load_instance = True
-        exclude = ("created_at",)
+        exclude = ("created_at", "updated_at")
 
 
 class PrepostoLookupItemSchema(Schema):
