@@ -162,6 +162,9 @@ DEFAULT_SCOPE_DRAFT = {
         "dadosBancariosClienteDevolucaoSaldo": deepcopy(_DEFAULT_BANK_ACCOUNT),
         "observacoesFinanceiro": "",
     },
+    "geral": {
+        "descricao": ""
+    }
 }
 
 def build_default_scope_draft() -> dict:

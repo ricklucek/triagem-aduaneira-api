@@ -51,6 +51,20 @@ def get_my_organization_settings():
     return jsonify(setting.value_json if setting else _default_fixed_info())
 
 
+@organization_bp.get("/settings/<string:key>")
+@auth_required
+def get_my_organization_settings_by_key(key: str):
+    if not g.current_user.organization_id:
+        return jsonify({"error": "Usuário sem organização"}), 400
+    
+    settings = OrganizationSetting.query.filter_by(organization_id=g.current_user.organization_id, key=key).one_or_none()
+
+    if not settings:
+        return jsonify({})
+
+    return jsonify(settings.value_json)
+
+
 @organization_bp.put("/me/settings")
 @admin_required
 def update_my_organization_settings():
