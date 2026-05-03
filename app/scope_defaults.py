@@ -19,6 +19,12 @@ _DEFAULT_ICMS = {
     "recolhida": "",
     "efetiva": "",
     "observacao": "",
+    "porDestinacao": {
+        "REVENDA": { "recolhida": "", "efetiva": "", "observacao": ""},
+        "INDUSTRIALIZACAO": { "recolhida": "", "efetiva": "", "observacao": ""},
+        "USO_E_CONSUMO": { "recolhida": "", "efetiva": "", "observacao": ""},
+        "ATIVO_IMOBILIZADO": { "recolhida": "", "efetiva": "", "observacao": ""},
+    }
 }
 
 _DEFAULT_SERVICO_VALOR_OU_SALARIO = {
@@ -94,8 +100,8 @@ DEFAULT_SCOPE_DRAFT = {
     "operacao": {
         "tipos": [],
         "importacao": {
-            "analistaDA": "",
-            "analistaAE": "",
+            "analistaDA": [],
+            "analistaAE": [],
             "produtosImportados": "",
             "ncms": [],
             "observacaoNcms": "",
@@ -159,7 +165,7 @@ DEFAULT_SCOPE_DRAFT = {
         },
     },
     "financeiro": {
-        "dadosBancariosClienteDevolucaoSaldo": deepcopy(_DEFAULT_BANK_ACCOUNT),
+        "dadosBancariosClienteDevolucaoSaldo": [deepcopy(_DEFAULT_BANK_ACCOUNT)],
         "observacoesFinanceiro": "",
     },
     "geral": {
