@@ -6,7 +6,7 @@ from sqlalchemy import and_, or_
 from ..auth import auth_required
 from ..extensions import db
 from ..models import Client, OrganizationSetting, Scope, ScopeAssignment, ScopeVersion, User
-from ..schemas import ScopeBulkResponsibleSchema, ScopeListQuerySchema, ScopeSchema
+from ..schemas import ScopeBulkResponsibleSchema, ScopeListQuerySchema, ScopeSchema, UserSchema
 from ..scope_defaults import apply_admin_defaults, build_default_scope_draft, merge_scope_draft
 
 scope_bp = Blueprint("scopes", __name__, url_prefix="/scopes")
@@ -220,8 +220,11 @@ def list_scopes():
 @scope_bp.get("/<scope_id>")
 @auth_required
 def get_scope(scope_id: str):
-    scope = _scope_query_for_current_user().filter(Scope.id == scope_id).first_or_404()
-    return jsonify(scope_schema.dump(scope))
+    scope_query = db.session.query(Scope, User).join(User, Scope.created_by_id == User.id).filter(Scope.id == scope_id).first_or_404()
+
+    scope, user = scope_query
+
+    return jsonify({**scope_schema.dump(scope), "created_by": UserSchema(only=["id", "nome", "email", "role", "setor"]).dump(user)})
 
 
 @scope_bp.put("/<scope_id>")
