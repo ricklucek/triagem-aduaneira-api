@@ -130,7 +130,7 @@ DEFAULT_SCOPE_DRAFT = {
             "subtipoConsumo": [],
         },
         "exportacao": {
-            "analistaDA": "",
+            "analistaDA": [],
             "produtosExportados": "",
             "ncms": [],
             "observacaoNcms": "",
