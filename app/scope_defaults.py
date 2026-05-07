@@ -131,6 +131,7 @@ DEFAULT_SCOPE_DRAFT = {
         },
         "exportacao": {
             "analistaDA": [],
+            "analistaAE": [],
             "produtosExportados": "",
             "ncms": [],
             "observacaoNcms": "",
