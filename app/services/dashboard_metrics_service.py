@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -436,6 +436,8 @@ class DashboardMetricsService:
             date_to=date_to,
         )
 
+        outdated_scopes_count = scope_query.filter(Scope.created_at < datetime.utcnow() - timedelta(days=365)).count()
+
         service_query = (
             db.session.query(ScopeService)
             .join(Scope, Scope.id == ScopeService.scope_id)
@@ -474,6 +476,7 @@ class DashboardMetricsService:
 
         return {
             "totalScopes": scope_query.count(),
+            "outdatedScopes": outdated_scopes_count,
             "totalEnabledServices": service_query.count(),
             "totalDistinctServices": int(distinct_services_query.scalar() or 0),
             "totalServicesAmount": self._money(amount_query.scalar()) or 0,
