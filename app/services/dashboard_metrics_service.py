@@ -210,7 +210,7 @@ class DashboardMetricsService:
         date_to: datetime | None = None,
     ) -> dict:
         """
-        Retorna quais serviços estão sendo cadastrados/contratados,
+        Retorna a distribuição percentual de ocorrências por serviço,
         considerando apenas ScopeService.enabled == True.
         """
 
@@ -264,27 +264,59 @@ class DashboardMetricsService:
             .all()
         )
 
-        items = [
-            {
-                "serviceCatalogId": str(row.service_catalog_id),
-                "serviceCode": row.service_code,
-                "serviceName": row.service_name,
-                "operationType": row.operation_type,
-                "currency": row.currency,
-                "totalOccurrences": int(row.total_occurrences or 0),
-                "totalScopes": int(row.total_scopes or 0),
-                "totalAmount": self._money(row.total_amount) or 0,
-                "averageAmount": self._money(row.average_amount),
-                "minAmount": self._money(row.min_amount),
-                "maxAmount": self._money(row.max_amount),
-            }
-            for row in rows
-        ]
+        total_occurrences = sum(int(row.total_occurrences or 0) for row in rows)
+
+        total_scopes_query = db.session.query(func.count(distinct(Scope.id)))
+
+        total_scopes_query = self._apply_common_scope_filters(
+            total_scopes_query,
+            status=status,
+            date_from=date_from,
+            date_to=date_to,
+        )
+
+        total_system_scopes = int(total_scopes_query.scalar() or 0)
+
+        items = []
+
+        for row in rows:
+            total_occurrences = int(row.total_occurrences or 0)
+            total_service_scopes = int(row.total_scopes or 0)
+
+            appearance_percentage = (
+                round((total_service_scopes / total_system_scopes) * 100, 2)
+                if total_system_scopes > 0
+                else 0
+            )
+
+            items.append(
+                {
+                    "serviceCatalogId": str(row.service_catalog_id),
+                    "serviceCode": row.service_code,
+                    "serviceName": row.service_name,
+                    "operationType": row.operation_type,
+                    "currency": row.currency,
+
+                    # Quantas vezes o serviço aparece em ScopeService
+                    "totalOccurrences": total_occurrences,
+
+                    # Em quantos escopos distintos esse serviço aparece
+                    "totalScopes": total_service_scopes,
+
+                    # Percentual de presença no sistema
+                    "occurrencesPercentage": appearance_percentage,
+
+                    "totalAmount": self._money(row.total_amount) or 0,
+                    "averageAmount": self._money(row.average_amount),
+                    "minAmount": self._money(row.min_amount),
+                    "maxAmount": self._money(row.max_amount),
+                }
+            )
 
         return {
             "items": items,
             "totalServices": len(items),
-            "totalOccurrences": sum(item["totalOccurrences"] for item in items),
+            "totalOccurrences": total_occurrences,
             "totalAmount": sum(item["totalAmount"] for item in items),
         }
 
@@ -436,7 +468,7 @@ class DashboardMetricsService:
             date_to=date_to,
         )
 
-        outdated_scopes_count = scope_query.filter(Scope.created_at < datetime.utcnow() - timedelta(days=365)).count()
+        outdated_scopes_count = scope_query.filter(Scope.created_at < datetime.now() - timedelta(days=365)).count()
 
         service_query = (
             db.session.query(ScopeService)
