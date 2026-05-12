@@ -72,7 +72,7 @@ def _common_filters() -> dict:
 
 
 @dashboard_bp.get("/admin")
-@admin_required
+@roles_required("comercial")
 def admin_dashboard():
     """
     Endpoint legado mantido para compatibilidade com o front atual.
@@ -116,7 +116,7 @@ def admin_dashboard():
 
 
 @dashboard_bp.get("/admin/metrics")
-@admin_required
+@roles_required("comercial")
 def admin_metrics_overview():
     service = DashboardMetricsService(g.current_user)
     filters = _common_filters()
@@ -131,7 +131,7 @@ def admin_metrics_overview():
 
 
 @dashboard_bp.get("/admin/scopes-by-user")
-@admin_required
+@roles_required("comercial")
 def admin_scopes_by_user():
     service = DashboardMetricsService(g.current_user)
     filters = _common_filters()
@@ -156,7 +156,7 @@ def admin_scopes_by_user():
 
 
 @dashboard_bp.get("/admin/services")
-@admin_required
+@roles_required("comercial")
 def admin_services_summary():
     service = DashboardMetricsService(g.current_user)
     filters = _common_filters()
@@ -173,7 +173,7 @@ def admin_services_summary():
 
 
 @dashboard_bp.get("/admin/services/by-scope")
-@admin_required
+@roles_required("comercial")
 def admin_services_by_scope():
     service = DashboardMetricsService(g.current_user)
     filters = _common_filters()
@@ -196,22 +196,6 @@ def admin_services_by_scope():
     )
 
     return jsonify(data)
-
-
-@dashboard_bp.get("/comercial")
-@roles_required("comercial")
-def comercial_dashboard():
-    service = DashboardMetricsService(g.current_user)
-    overview = service.get_admin_metrics_overview()
-    return jsonify(
-        {
-            "responsibleScopes": 0,
-            "salesAveragePrice": 0,
-            "createdLastMonthAsResponsible": 0,
-            "totalScopes": overview["totalScopes"],
-            "totalEnabledServices": overview["totalEnabledServices"],
-        }
-    )
 
 
 @dashboard_bp.get("/credenciamento")
