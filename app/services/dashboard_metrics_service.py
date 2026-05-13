@@ -179,30 +179,40 @@ class DashboardMetricsService:
             }
 
             if include_scopes:
-                scope_query = (
-                    db.session.query(Scope)
+                scope_ids_subquery = (
+                    db.session.query(Scope.id.label("scope_id"))
                     .join(ScopeAssignment, ScopeAssignment.scope_id == Scope.id)
-                    .outerjoin(Client, Scope.client_id == Client.id)
                     .filter(ScopeAssignment.user_id == row.user_id)
                     .filter(ScopeAssignment.active.is_(True))
                     .filter(ScopeAssignment.role.in_(roles))
                 )
 
-                scope_query = self._apply_common_scope_filters(
-                    scope_query,
+                scope_ids_subquery = self._apply_common_scope_filters(
+                    scope_ids_subquery,
                     status=status,
                     date_from=date_from,
                     date_to=date_to,
                 )
 
+                scope_ids_subquery = (
+                    scope_ids_subquery
+                    .group_by(Scope.id)
+                    .order_by(
+                        func.max(Scope.created_at).desc().nullslast(),
+                        func.max(Scope.updated_at).desc().nullslast(),
+                    )
+                    .limit(scopes_limit_per_user)
+                    .subquery()
+                )
+
                 scopes = (
-                    scope_query
+                    db.session.query(Scope)
+                    .join(scope_ids_subquery, scope_ids_subquery.c.scope_id == Scope.id)
+                    .outerjoin(Client, Scope.client_id == Client.id)
                     .order_by(
                         Scope.created_at.desc().nullslast(),
                         Scope.updated_at.desc().nullslast(),
                     )
-                    .distinct(Scope.id)
-                    .limit(scopes_limit_per_user)
                     .all()
                 )
 
