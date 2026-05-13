@@ -244,7 +244,6 @@ class Scope(TimestampMixin, db.Model):
     # snapshot opcional da última publicação
     published_snapshot = db.Column(db.JSON, nullable=True)
 
-    completeness_score = db.Column(db.Integer, nullable=False, default=0)
     version = db.Column(db.Integer, nullable=True, default=1)
 
     created_by_id = db.Column(

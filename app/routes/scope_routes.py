@@ -160,7 +160,7 @@ def update_scope(scope_id: str):
 def publish_scope(scope_id: str):
     processor = _processor()
     scope = processor.scope_query_for_current_user().filter(Scope.id == scope_id).first_or_404()
-    now = datetime.utcnow()
+    now = datetime.now()
 
     normalized_draft = processor.normalize_draft(scope.draft)
     processor.apply_draft_to_scope(scope, normalized_draft)

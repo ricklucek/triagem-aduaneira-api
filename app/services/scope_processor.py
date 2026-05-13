@@ -119,30 +119,6 @@ class ScopeDataProcessor:
             self.get_admin_settings(),
         )
 
-    def calc_completeness(self, draft: dict) -> int:
-        if not isinstance(draft, dict) or not draft:
-            return 0
-
-        total_fields = 0
-        filled_fields = 0
-
-        def walk(value):
-            nonlocal total_fields, filled_fields
-            if isinstance(value, dict):
-                for sub in value.values():
-                    walk(sub)
-            elif isinstance(value, list):
-                total_fields += 1
-                if len(value) > 0:
-                    filled_fields += 1
-            else:
-                total_fields += 1
-                if value not in (None, "", []) and value != 0:
-                    filled_fields += 1
-
-        walk(draft)
-        return int((filled_fields / total_fields) * 100) if total_fields else 0
-
     def scope_query_for_current_user(self):
         query = Scope.query
         if self.organization_id:
@@ -153,7 +129,6 @@ class ScopeDataProcessor:
         return {
             "id": str(scope.id),
             "status": scope.status,
-            "completeness_score": scope.completeness_score,
             "version": scope.version,
             "updated_at": scope.updated_at,
             "last_published_at": scope.last_published_at,
@@ -172,7 +147,6 @@ class ScopeDataProcessor:
         )
 
         scope.draft = normalized_draft
-        scope.completeness_score = self.calc_completeness(normalized_draft)
         scope.responsible_user_id = responsible_user_id or None
         return scope
 

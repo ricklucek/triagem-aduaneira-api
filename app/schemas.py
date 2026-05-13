@@ -85,7 +85,6 @@ class ScopeSchema(SQLAlchemyAutoSchema):
 class ScopeSummarySchema(Schema):
     id = fields.String(required=True)
     status = fields.String(required=True)
-    completeness_score = fields.Integer(required=True)
     version = fields.Integer(allow_none=True)
     updated_at = fields.DateTime(allow_none=True)
     last_published_at = fields.DateTime(allow_none=True)

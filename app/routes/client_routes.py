@@ -95,7 +95,6 @@ def list_client_scopes(client_id: str):
                 {
                     "id": str(scope.id),
                     "status": scope.status,
-                    "completeness_score": scope.completeness_score,
                     "version": scope.version,
                     "updated_at": scope.updated_at.isoformat() + "Z" if scope.updated_at else None,
                     "last_published_at": scope.last_published_at.isoformat() + "Z" if scope.last_published_at else None,
