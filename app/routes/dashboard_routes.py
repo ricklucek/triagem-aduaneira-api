@@ -144,7 +144,14 @@ def admin_scopes_by_user():
         max_value=500,
     )
 
+    group_by = (
+        request.args.get("groupBy")
+        or request.args.get("group_by")
+        or "created_by"
+    )
+
     data = service.get_scopes_by_user(
+        group_by=group_by,
         status=filters["status"],
         date_from=filters["date_from"],
         date_to=filters["date_to"],

@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import func, distinct, or_
 
 from ..extensions import db
-from ..models import Client, Scope, ScopeService, ServiceCatalog, User
+from ..models import Client, Scope, ScopeAssignment, ScopeService, ServiceCatalog, User
 
 
 class DashboardMetricsService:
@@ -21,6 +21,16 @@ class DashboardMetricsService:
     - agregar serviços habilitados;
     - listar serviços por escopo.
     """
+
+    ASSIGNMENT_GROUPS = {
+        "responsible": ["RESPONSAVEL_COMERCIAL"],
+        "analista_da": ["ANALISTA_DA_IMPORT", "ANALISTA_DA_EXPORT"],
+        "analista_da_import": ["ANALISTA_DA_IMPORT"],
+        "analista_da_export": ["ANALISTA_DA_EXPORT"],
+        "analista_ae": ["ANALISTA_AE_IMPORT", "ANALISTA_AE_EXPORT"],
+        "analista_ae_import": ["ANALISTA_AE_IMPORT"],
+        "analista_ae_export": ["ANALISTA_AE_EXPORT"],
+    }
 
     def __init__(self, current_user: User):
         self.current_user = current_user
@@ -98,8 +108,123 @@ class DashboardMetricsService:
             safe_offset = 0
 
         return safe_limit, safe_offset
+    
+    def _scope_dashboard_item(self, scope: Scope) -> dict:
+        return {
+            "id": str(scope.id),
+            "status": scope.status,
+            "clientId": str(scope.client_id) if scope.client_id else None,
+            "clientName": scope.client.razao_social if scope.client else None,
+            "clientCnpj": scope.client.cnpj if scope.client else None,
+            "createdById": str(scope.created_by_id) if scope.created_by_id else None,
+            "createdByName": scope.created_by.nome if scope.created_by else None,
+            "responsibleUserId": str(scope.responsible_user_id) if scope.responsible_user_id else None,
+            "responsibleUserName": scope.responsible_user.nome if scope.responsible_user else None,
+            "createdAt": self._dt(scope.created_at),
+            "updatedAt": self._dt(scope.updated_at),
+            "lastPublishedAt": self._dt(scope.last_published_at),
+        }
+    
+    def _get_scopes_by_assignment_roles(
+        self,
+        *,
+        group_by: str,
+        roles: list[str],
+        status: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        include_scopes: bool = True,
+        scopes_limit_per_user: int = 50,
+    ) -> dict:
+        base_query = (
+            db.session.query(
+                User.id.label("user_id"),
+                User.nome.label("user_name"),
+                User.email.label("user_email"),
+                User.role.label("user_role"),
+                User.setor.label("user_setor"),
+                func.count(distinct(Scope.id)).label("total_scopes"),
+            )
+            .join(ScopeAssignment, ScopeAssignment.user_id == User.id)
+            .join(Scope, Scope.id == ScopeAssignment.scope_id)
+            .filter(ScopeAssignment.active.is_(True))
+            .filter(ScopeAssignment.role.in_(roles))
+        )
 
-    def get_scopes_by_user(
+        base_query = self._apply_common_scope_filters(
+            base_query,
+            status=status,
+            date_from=date_from,
+            date_to=date_to,
+        )
+
+        rows = (
+            base_query
+            .group_by(User.id, User.nome, User.email, User.role, User.setor)
+            .order_by(func.count(distinct(Scope.id)).desc(), User.nome.asc())
+            .all()
+        )
+
+        items = []
+
+        for row in rows:
+            item = {
+                "userId": str(row.user_id),
+                "userName": row.user_name,
+                "userEmail": row.user_email,
+                "userRole": row.user_role,
+                "userSetor": row.user_setor,
+                "assignmentRoles": roles,
+                "totalScopes": int(row.total_scopes or 0),
+            }
+
+            if include_scopes:
+                scope_query = (
+                    db.session.query(Scope)
+                    .join(ScopeAssignment, ScopeAssignment.scope_id == Scope.id)
+                    .outerjoin(Client, Scope.client_id == Client.id)
+                    .filter(ScopeAssignment.user_id == row.user_id)
+                    .filter(ScopeAssignment.active.is_(True))
+                    .filter(ScopeAssignment.role.in_(roles))
+                )
+
+                scope_query = self._apply_common_scope_filters(
+                    scope_query,
+                    status=status,
+                    date_from=date_from,
+                    date_to=date_to,
+                )
+
+                scopes = (
+                    scope_query
+                    .order_by(
+                        Scope.created_at.desc().nullslast(),
+                        Scope.updated_at.desc().nullslast(),
+                    )
+                    .distinct(Scope.id)
+                    .limit(scopes_limit_per_user)
+                    .all()
+                )
+
+                item["scopes"] = [
+                    self._scope_dashboard_item(scope)
+                    for scope in scopes
+                ]
+
+                item["scopesLimit"] = scopes_limit_per_user
+                item["scopesTruncated"] = len(scopes) >= scopes_limit_per_user
+
+            items.append(item)
+
+        return {
+            "groupBy": group_by,
+            "assignmentRoles": roles,
+            "items": items,
+            "totalUsers": len(items),
+            "totalScopes": sum(item["totalScopes"] for item in items),
+        }
+    
+    def _get_scopes_by_created_by(
         self,
         *,
         status: str | None = None,
@@ -108,13 +233,6 @@ class DashboardMetricsService:
         include_scopes: bool = True,
         scopes_limit_per_user: int = 50,
     ) -> dict:
-        """
-        Retorna quantidade de escopos cadastrados por usuário e,
-        opcionalmente, quais escopos são esses.
-
-        A contagem considera Scope.created_by_id.
-        """
-
         base_query = (
             db.session.query(
                 User.id.label("user_id"),
@@ -122,7 +240,7 @@ class DashboardMetricsService:
                 User.email.label("user_email"),
                 User.role.label("user_role"),
                 User.setor.label("user_setor"),
-                func.count(Scope.id).label("total_scopes"),
+                func.count(distinct(Scope.id)).label("total_scopes"),
             )
             .join(Scope, Scope.created_by_id == User.id)
         )
@@ -137,11 +255,11 @@ class DashboardMetricsService:
         rows = (
             base_query
             .group_by(User.id, User.nome, User.email, User.role, User.setor)
-            .order_by(func.count(Scope.id).desc(), User.nome.asc())
+            .order_by(func.count(distinct(Scope.id)).desc(), User.nome.asc())
             .all()
         )
 
-        items: list[dict] = []
+        items = []
 
         for row in rows:
             item = {
@@ -150,6 +268,7 @@ class DashboardMetricsService:
                 "userEmail": row.user_email,
                 "userRole": row.user_role,
                 "userSetor": row.user_setor,
+                "assignmentRoles": [],
                 "totalScopes": int(row.total_scopes or 0),
             }
 
@@ -169,23 +288,16 @@ class DashboardMetricsService:
 
                 scopes = (
                     scope_query
-                    .order_by(Scope.created_at.desc().nullslast(), Scope.updated_at.desc().nullslast())
+                    .order_by(
+                        Scope.created_at.desc().nullslast(),
+                        Scope.updated_at.desc().nullslast(),
+                    )
                     .limit(scopes_limit_per_user)
                     .all()
                 )
 
                 item["scopes"] = [
-                    {
-                        "id": str(scope.id),
-                        "status": scope.status,
-                        "clientId": str(scope.client_id) if scope.client_id else None,
-                        "clientName": scope.client.razao_social if scope.client else None,
-                        "clientCnpj": scope.client.cnpj if scope.client else None,
-                        "responsibleUserId": str(scope.responsible_user_id) if scope.responsible_user_id else None,
-                        "createdAt": self._dt(scope.created_at),
-                        "updatedAt": self._dt(scope.updated_at),
-                        "lastPublishedAt": self._dt(scope.last_published_at),
-                    }
+                    self._scope_dashboard_item(scope)
                     for scope in scopes
                 ]
 
@@ -195,10 +307,61 @@ class DashboardMetricsService:
             items.append(item)
 
         return {
+            "groupBy": "created_by",
             "items": items,
             "totalUsers": len(items),
             "totalScopes": sum(item["totalScopes"] for item in items),
         }
+
+    def get_scopes_by_user(
+        self,
+        *,
+        group_by: str = "created_by",
+        status: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        include_scopes: bool = True,
+        scopes_limit_per_user: int = 50,
+    ) -> dict:
+        """
+        Retorna escopos agrupados por usuário.
+
+        group_by:
+        - created_by: escopos cadastrados pelo usuário, usando Scope.created_by_id
+        - responsible: escopos onde o usuário é RESPONSAVEL_COMERCIAL em ScopeAssignment
+        - analista_da: escopos onde o usuário é ANALISTA_DA_IMPORT ou ANALISTA_DA_EXPORT
+        - analista_ae: escopos onde o usuário é ANALISTA_AE_IMPORT ou ANALISTA_AE_EXPORT
+        """
+
+        if group_by == "created_by":
+            return self._get_scopes_by_created_by(
+                status=status,
+                date_from=date_from,
+                date_to=date_to,
+                include_scopes=include_scopes,
+                scopes_limit_per_user=scopes_limit_per_user,
+            )
+
+        roles = self.ASSIGNMENT_GROUPS.get(group_by)
+
+        if not roles:
+            return {
+                "items": [],
+                "totalUsers": 0,
+                "totalScopes": 0,
+                "groupBy": group_by,
+                "error": f"Invalid group_by: {group_by}",
+            }
+
+        return self._get_scopes_by_assignment_roles(
+            group_by=group_by,
+            roles=roles,
+            status=status,
+            date_from=date_from,
+            date_to=date_to,
+            include_scopes=include_scopes,
+            scopes_limit_per_user=scopes_limit_per_user,
+        )
 
     def get_services_summary(
         self,
