@@ -133,8 +133,6 @@ class DashboardMetricsService:
         status: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
-        include_scopes: bool = True,
-        scopes_limit_per_user: int = 50,
     ) -> dict:
         base_query = (
             db.session.query(
@@ -178,52 +176,6 @@ class DashboardMetricsService:
                 "totalScopes": int(row.total_scopes or 0),
             }
 
-            if include_scopes:
-                scope_ids_subquery = (
-                    db.session.query(Scope.id.label("scope_id"))
-                    .join(ScopeAssignment, ScopeAssignment.scope_id == Scope.id)
-                    .filter(ScopeAssignment.user_id == row.user_id)
-                    .filter(ScopeAssignment.active.is_(True))
-                    .filter(ScopeAssignment.role.in_(roles))
-                )
-
-                scope_ids_subquery = self._apply_common_scope_filters(
-                    scope_ids_subquery,
-                    status=status,
-                    date_from=date_from,
-                    date_to=date_to,
-                )
-
-                scope_ids_subquery = (
-                    scope_ids_subquery
-                    .group_by(Scope.id)
-                    .order_by(
-                        func.max(Scope.created_at).desc().nullslast(),
-                        func.max(Scope.updated_at).desc().nullslast(),
-                    )
-                    .limit(scopes_limit_per_user)
-                    .subquery()
-                )
-
-                scopes = (
-                    db.session.query(Scope)
-                    .join(scope_ids_subquery, scope_ids_subquery.c.scope_id == Scope.id)
-                    .outerjoin(Client, Scope.client_id == Client.id)
-                    .order_by(
-                        Scope.created_at.desc().nullslast(),
-                        Scope.updated_at.desc().nullslast(),
-                    )
-                    .all()
-                )
-
-                item["scopes"] = [
-                    self._scope_dashboard_item(scope)
-                    for scope in scopes
-                ]
-
-                item["scopesLimit"] = scopes_limit_per_user
-                item["scopesTruncated"] = len(scopes) >= scopes_limit_per_user
-
             items.append(item)
 
         return {
@@ -240,8 +192,6 @@ class DashboardMetricsService:
         status: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
-        include_scopes: bool = True,
-        scopes_limit_per_user: int = 50,
     ) -> dict:
         base_query = (
             db.session.query(
@@ -272,7 +222,7 @@ class DashboardMetricsService:
         items = []
 
         for row in rows:
-            item = {
+            items.append({
                 "userId": str(row.user_id),
                 "userName": row.user_name,
                 "userEmail": row.user_email,
@@ -280,41 +230,7 @@ class DashboardMetricsService:
                 "userSetor": row.user_setor,
                 "assignmentRoles": [],
                 "totalScopes": int(row.total_scopes or 0),
-            }
-
-            if include_scopes:
-                scope_query = (
-                    db.session.query(Scope)
-                    .outerjoin(Client, Scope.client_id == Client.id)
-                    .filter(Scope.created_by_id == row.user_id)
-                )
-
-                scope_query = self._apply_common_scope_filters(
-                    scope_query,
-                    status=status,
-                    date_from=date_from,
-                    date_to=date_to,
-                )
-
-                scopes = (
-                    scope_query
-                    .order_by(
-                        Scope.created_at.desc().nullslast(),
-                        Scope.updated_at.desc().nullslast(),
-                    )
-                    .limit(scopes_limit_per_user)
-                    .all()
-                )
-
-                item["scopes"] = [
-                    self._scope_dashboard_item(scope)
-                    for scope in scopes
-                ]
-
-                item["scopesLimit"] = scopes_limit_per_user
-                item["scopesTruncated"] = len(scopes) >= scopes_limit_per_user
-
-            items.append(item)
+            })
 
         return {
             "groupBy": "created_by",
@@ -330,8 +246,6 @@ class DashboardMetricsService:
         status: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
-        include_scopes: bool = True,
-        scopes_limit_per_user: int = 50,
     ) -> dict:
         """
         Retorna escopos agrupados por usuário.
@@ -348,8 +262,6 @@ class DashboardMetricsService:
                 status=status,
                 date_from=date_from,
                 date_to=date_to,
-                include_scopes=include_scopes,
-                scopes_limit_per_user=scopes_limit_per_user,
             )
 
         roles = self.ASSIGNMENT_GROUPS.get(group_by)
@@ -369,9 +281,96 @@ class DashboardMetricsService:
             status=status,
             date_from=date_from,
             date_to=date_to,
-            include_scopes=include_scopes,
-            scopes_limit_per_user=scopes_limit_per_user,
         )
+    
+    def get_scopes_for_user(
+        self,
+        *,
+        user_id: str,
+        group_by: str = "created_by",
+        status: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        limit, offset = self._pagination(limit, offset)
+
+        if group_by == "created_by":
+            query = (
+                db.session.query(Scope)
+                .outerjoin(Client, Scope.client_id == Client.id)
+                .filter(Scope.created_by_id == user_id)
+            )
+
+            query = self._apply_common_scope_filters(
+                query,
+                status=status,
+                date_from=date_from,
+                date_to=date_to,
+            )
+
+        else:
+            roles = self.ASSIGNMENT_GROUPS.get(group_by)
+
+            if not roles:
+                return {
+                    "items": [],
+                    "total": 0,
+                    "limit": limit,
+                    "offset": offset,
+                    "groupBy": group_by,
+                    "userId": str(user_id),
+                    "error": f"Invalid group_by: {group_by}",
+                }
+
+            scope_ids_subquery = (
+                db.session.query(Scope.id.label("scope_id"))
+                .join(ScopeAssignment, ScopeAssignment.scope_id == Scope.id)
+                .filter(ScopeAssignment.user_id == user_id)
+                .filter(ScopeAssignment.active.is_(True))
+                .filter(ScopeAssignment.role.in_(roles))
+            )
+
+            scope_ids_subquery = self._apply_common_scope_filters(
+                scope_ids_subquery,
+                status=status,
+                date_from=date_from,
+                date_to=date_to,
+            )
+
+            scope_ids_subquery = scope_ids_subquery.group_by(Scope.id).subquery()
+
+            query = (
+                db.session.query(Scope)
+                .join(scope_ids_subquery, scope_ids_subquery.c.scope_id == Scope.id)
+                .outerjoin(Client, Scope.client_id == Client.id)
+            )
+
+        total = query.count()
+
+        scopes = (
+            query
+            .order_by(
+                Scope.created_at.desc().nullslast(),
+                Scope.updated_at.desc().nullslast(),
+            )
+            .limit(limit)
+            .offset(offset)
+            .all()
+        )
+
+        return {
+            "userId": str(user_id),
+            "groupBy": group_by,
+            "items": [
+                self._scope_dashboard_item(scope)
+                for scope in scopes
+            ],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
 
     def get_services_summary(
         self,

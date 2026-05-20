@@ -136,14 +136,6 @@ def admin_scopes_by_user():
     service = DashboardMetricsService(g.current_user)
     filters = _common_filters()
 
-    include_scopes = _parse_bool(request.args.get("includeScopes"), default=True)
-    scopes_limit_per_user = _parse_int(
-        request.args.get("scopesLimitPerUser"),
-        default=50,
-        min_value=1,
-        max_value=500,
-    )
-
     group_by = (
         request.args.get("groupBy")
         or request.args.get("group_by")
@@ -155,8 +147,43 @@ def admin_scopes_by_user():
         status=filters["status"],
         date_from=filters["date_from"],
         date_to=filters["date_to"],
-        include_scopes=include_scopes,
-        scopes_limit_per_user=scopes_limit_per_user,
+    )
+
+    return jsonify(data)
+
+@dashboard_bp.get("/admin/users/<user_id>/scopes")
+@roles_required("comercial")
+def admin_scopes_for_user(user_id):
+    service = DashboardMetricsService(g.current_user)
+    filters = _common_filters()
+
+    group_by = (
+        request.args.get("groupBy")
+        or request.args.get("group_by")
+        or "created_by"
+    )
+
+    limit = _parse_int(
+        request.args.get("limit"),
+        default=50,
+        min_value=1,
+        max_value=500,
+    )
+
+    offset = _parse_int(
+        request.args.get("offset"),
+        default=0,
+        min_value=0,
+    )
+
+    data = service.get_scopes_for_user(
+        user_id=user_id,
+        group_by=group_by,
+        status=filters["status"],
+        date_from=filters["date_from"],
+        date_to=filters["date_to"],
+        limit=limit,
+        offset=offset,
     )
 
     return jsonify(data)
