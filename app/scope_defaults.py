@@ -166,7 +166,9 @@ DEFAULT_SCOPE_DRAFT = {
         },
     },
     "financeiro": {
+        "preferencia": "TRANSFERENCIA",
         "dadosBancariosClienteDevolucaoSaldo": [deepcopy(_DEFAULT_BANK_ACCOUNT)],
+        "chavePIXClienteDevolucaoSaldo": "",
         "observacoesFinanceiro": "",
     },
     "geral": {
