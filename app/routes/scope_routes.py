@@ -91,6 +91,10 @@ def list_scopes():
         query = query.filter(Scope.responsible_user_id == params["responsible_user_id"])
     if params.get("created_by_id"):
         query = query.filter(Scope.created_by_id == params["created_by_id"])
+    if params.get("assigned_user_id"):
+        query = query.join(ScopeAssignment, ScopeAssignment.scope_id == Scope.id).filter(
+            ScopeAssignment.user_id == params["assigned_user_id"]
+        )
     if params.get("cnpj"):
         query = query.join(Client, Scope.client_id == Client.id).filter(Client.cnpj == params["cnpj"])
     if params.get("q"):
@@ -115,6 +119,33 @@ def list_scopes():
             "offset": params["offset"],
         }
     )
+
+@scope_bp.get("/user/assigned-count")
+@auth_required
+def count_user_assigned_scopes():
+    processor = _processor()
+
+    query = processor.scope_query_for_current_user()
+
+    query_responsible_user_id = query.filter(Scope.responsible_user_id == g.current_user.id)
+    query_created_by_id = query.filter(Scope.created_by_id == g.current_user.id)
+    query_assigned_user_id = query.join(ScopeAssignment, ScopeAssignment.scope_id == Scope.id).filter(ScopeAssignment.user_id == g.current_user.id)
+
+
+    return jsonify([
+        {
+            "type": "responsible_user_id",
+            "count": query_responsible_user_id.count()
+        },
+        {
+            "type": "created_by_id",
+            "count": query_created_by_id.count()
+        },
+        {
+            "type": "assigned_user_id",
+            "count": query_assigned_user_id.count()
+        }
+    ])
 
 
 @scope_bp.get("/<scope_id>")

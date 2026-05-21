@@ -100,6 +100,7 @@ class ScopeListQuerySchema(Schema):
     q = fields.String(required=False)
     cnpj = fields.String(required=False)
     client_id = fields.String(required=False)
+    assigned_user_id = fields.String(required=False)
     responsible_user_id = fields.String(required=False)
     created_by_id = fields.String(required=False)
     limit = fields.Integer(load_default=20, validate=validate.Range(min=1, max=200))
