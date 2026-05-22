@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_
+from sqlalchemy import and_, distinct, func
 
 from ..extensions import db
 from ..models import (
@@ -18,6 +19,7 @@ from ..models import (
     ScopePreposto,
     ScopeService,
     ServiceCatalog,
+    User,
 )
 from ..scope_defaults import apply_admin_defaults, build_default_scope_draft, merge_scope_draft
 
@@ -71,6 +73,28 @@ class ScopeDataProcessor:
         "ANALISTA_AE_IMPORT",
         "ANALISTA_DA_EXPORT",
         "ANALISTA_AE_EXPORT",
+    }
+
+    BULK_ASSIGNMENT_GROUPS = {
+        "responsavel_comercial": {
+            "scope_field": "responsible_user_id",
+            "roles": ("RESPONSAVEL_COMERCIAL",),
+            "draft_path": ("sobreEmpresa", "responsavelComercial"),
+        },
+        "analista_da": {
+            "roles": ("ANALISTA_DA_IMPORT", "ANALISTA_DA_EXPORT"),
+            "draft_paths": (
+                ("operacao", "importacao", "analistaDA"),
+                ("operacao", "exportacao", "analistaDA"),
+            ),
+        },
+        "analista_ae": {
+            "roles": ("ANALISTA_AE_IMPORT", "ANALISTA_AE_EXPORT"),
+            "draft_paths": (
+                ("operacao", "importacao", "analistaAE"),
+                ("operacao", "exportacao", "analistaAE"),
+            ),
+        },
     }
 
     SERVICE_NAME_MAP = {
@@ -550,6 +574,313 @@ class ScopeDataProcessor:
                 counters["disabled"] += 1
 
         return counters
+
+    # ---------------------------------------------------------------------
+    # Bulk assignment operations
+    # ---------------------------------------------------------------------
+    def _bulk_group_config(self, group_by: str) -> dict[str, Any]:
+        config = self.BULK_ASSIGNMENT_GROUPS.get(group_by)
+        if not config:
+            allowed = ", ".join(sorted(self.BULK_ASSIGNMENT_GROUPS))
+            raise ValueError(f"groupBy inválido. Valores aceitos: {allowed}.")
+        return config
+
+    def _isoformat_z(self, value: datetime | None) -> str | None:
+        if not value:
+            return None
+        return value.isoformat() + "Z"
+
+    def _apply_org_filter_to_scope_query(self, query):
+        if self.organization_id:
+            return query.filter(Scope.organization_id == self.organization_id)
+        return query
+
+    def _validate_bulk_user(self, user_id: str, *, require_active: bool = False) -> User:
+        query = User.query.filter(User.id == user_id)
+        if self.organization_id:
+            query = query.filter(User.organization_id == self.organization_id)
+        if require_active:
+            query = query.filter(User.ativo.is_(True))
+
+        user = query.first()
+        if not user:
+            status = "ativo " if require_active else ""
+            raise ValueError(f"Usuário {status}não encontrado na organização atual.")
+        return user
+
+    def _replace_user_in_list(self, values: Any, from_user_id: str, to_user_id: str) -> list[str]:
+        if not isinstance(values, list):
+            return values
+
+        replaced: list[str] = []
+        for value in values:
+            normalized = str(value) if value is not None else value
+            if normalized == from_user_id:
+                normalized = to_user_id
+            if normalized and normalized not in replaced:
+                replaced.append(normalized)
+        return replaced
+
+    def _set_nested_value(self, payload: dict, path: tuple[str, ...], value: Any) -> None:
+        cursor = payload
+        for key in path[:-1]:
+            if not isinstance(cursor.get(key), dict):
+                cursor[key] = {}
+            cursor = cursor[key]
+        cursor[path[-1]] = value
+
+    def _get_nested_value(self, payload: dict, path: tuple[str, ...]) -> Any:
+        cursor: Any = payload
+        for key in path:
+            if not isinstance(cursor, dict):
+                return None
+            cursor = cursor.get(key)
+        return cursor
+
+    def _update_scope_draft_for_bulk_assignment(
+        self,
+        scope: Scope,
+        group_by: str,
+        from_user_id: str,
+        to_user_id: str,
+    ) -> None:
+        draft = deepcopy(scope.draft or {})
+
+        if group_by == "responsavel_comercial":
+            self._set_nested_value(draft, ("sobreEmpresa", "responsavelComercial"), to_user_id)
+            if self._get_nested_value(draft, ("sobreEmpresa", "responsavelComercialId")) is not None:
+                self._set_nested_value(draft, ("sobreEmpresa", "responsavelComercialId"), to_user_id)
+        else:
+            for path in self._bulk_group_config(group_by).get("draft_paths", ()):  # type: ignore[union-attr]
+                current = self._get_nested_value(draft, path)
+                if isinstance(current, list):
+                    self._set_nested_value(
+                        draft,
+                        path,
+                        self._replace_user_in_list(current, from_user_id, to_user_id),
+                    )
+
+        scope.draft = draft
+
+    def _upsert_active_assignment(self, scope_id, user_id: str, role: str, now: datetime) -> None:
+        existing = ScopeAssignment.query.filter_by(
+            scope_id=scope_id,
+            user_id=user_id,
+            role=role,
+            active=True,
+        ).first()
+        if existing:
+            return
+
+        db.session.add(
+            ScopeAssignment(
+                scope_id=scope_id,
+                user_id=user_id,
+                role=role,
+                active=True,
+                starts_at=now,
+            )
+        )
+
+    def _move_active_assignments(
+        self,
+        scope: Scope,
+        roles: tuple[str, ...],
+        from_user_id: str,
+        to_user_id: str,
+        now: datetime,
+    ) -> bool:
+        source_assignments = ScopeAssignment.query.filter(
+            ScopeAssignment.scope_id == scope.id,
+            ScopeAssignment.user_id == from_user_id,
+            ScopeAssignment.role.in_(roles),
+            ScopeAssignment.active.is_(True),
+        ).all()
+
+        if not source_assignments:
+            return False
+
+        roles_to_move = {assignment.role for assignment in source_assignments}
+        for assignment in source_assignments:
+            assignment.active = False
+            assignment.ends_at = now
+
+        for role in roles_to_move:
+            self._upsert_active_assignment(scope.id, to_user_id, role, now)
+
+        return True
+
+    def get_bulk_assignment_summary(self, group_by: str) -> dict[str, Any]:
+        config = self._bulk_group_config(group_by)
+
+        if config.get("scope_field") == "responsible_user_id":
+            query = (
+                db.session.query(
+                    User.id.label("user_id"),
+                    User.nome.label("user_name"),
+                    User.role.label("user_role"),
+                    User.setor.label("user_setor"),
+                    func.count(Scope.id).label("total_scopes"),
+                )
+                .join(Scope, Scope.responsible_user_id == User.id)
+            )
+            if self.organization_id:
+                query = query.filter(Scope.organization_id == self.organization_id)
+        else:
+            roles = config["roles"]
+            query = (
+                db.session.query(
+                    User.id.label("user_id"),
+                    User.nome.label("user_name"),
+                    User.role.label("user_role"),
+                    User.setor.label("user_setor"),
+                    func.count(distinct(Scope.id)).label("total_scopes"),
+                )
+                .join(ScopeAssignment, ScopeAssignment.user_id == User.id)
+                .join(Scope, Scope.id == ScopeAssignment.scope_id)
+                .filter(
+                    ScopeAssignment.active.is_(True),
+                    ScopeAssignment.role.in_(roles),
+                )
+            )
+            if self.organization_id:
+                query = query.filter(Scope.organization_id == self.organization_id)
+
+        rows = (
+            query.group_by(User.id, User.nome, User.role, User.setor)
+            .order_by(User.nome.asc())
+            .all()
+        )
+
+        items = [
+            {
+                "userId": str(row.user_id),
+                "userName": row.user_name,
+                "userRole": row.user_role,
+                "userSetor": row.user_setor,
+                "totalScopes": int(row.total_scopes or 0),
+            }
+            for row in rows
+        ]
+
+        return {
+            "groupBy": group_by,
+            "totalUsers": len(items),
+            "totalScopes": sum(item["totalScopes"] for item in items),
+            "items": items,
+        }
+
+    def get_bulk_assignment_scopes(self, group_by: str, user_id: str) -> dict[str, Any]:
+        config = self._bulk_group_config(group_by)
+        self._validate_bulk_user(user_id)
+
+        if config.get("scope_field") == "responsible_user_id":
+            query = Scope.query.filter(Scope.responsible_user_id == user_id)
+        else:
+            scope_ids_subquery = (
+                db.session.query(ScopeAssignment.scope_id)
+                .filter(
+                    ScopeAssignment.user_id == user_id,
+                    ScopeAssignment.role.in_(config["roles"]),
+                    ScopeAssignment.active.is_(True),
+                )
+                .distinct()
+                .subquery()
+            )
+
+            query = Scope.query.join(
+                scope_ids_subquery,
+                Scope.id == scope_ids_subquery.c.scope_id,
+            )
+
+        query = self._apply_org_filter_to_scope_query(query)
+        scopes = query.order_by(Scope.updated_at.desc().nullslast(), Scope.created_at.desc()).all()
+
+        items = [
+            {
+                "id": str(scope.id),
+                "status": scope.status,
+                "clientName": scope.client.razao_social if scope.client else None,
+                "clientCnpj": scope.client.cnpj if scope.client else None,
+                "updatedAt": self._isoformat_z(scope.updated_at),
+            }
+            for scope in scopes
+        ]
+
+        return {
+            "groupBy": group_by,
+            "userId": str(user_id),
+            "total": len(items),
+            "items": items,
+        }
+
+    def bulk_update_assignment(
+        self,
+        group_by: str,
+        from_user_id: str,
+        to_user_id: str,
+        scope_ids: list[str],
+    ) -> dict[str, Any]:
+        config = self._bulk_group_config(group_by)
+
+        if not from_user_id or not to_user_id:
+            raise ValueError("fromUserId e toUserId são obrigatórios.")
+        if str(from_user_id) == str(to_user_id):
+            raise ValueError("fromUserId e toUserId devem ser diferentes.")
+        if not isinstance(scope_ids, list) or not scope_ids:
+            raise ValueError("scopeIds deve ser uma lista não vazia.")
+
+        from_user_id = str(from_user_id)
+        to_user_id = str(to_user_id)
+        scope_ids = [str(scope_id) for scope_id in scope_ids if scope_id]
+        if not scope_ids:
+            raise ValueError("scopeIds deve conter identificadores válidos.")
+
+        self._validate_bulk_user(from_user_id)
+        self._validate_bulk_user(to_user_id, require_active=True)
+
+        query = Scope.query.filter(Scope.id.in_(scope_ids))
+        query = self._apply_org_filter_to_scope_query(query)
+        scopes = query.all()
+
+        scopes_by_id = {str(scope.id): scope for scope in scopes}
+        ordered_scopes = [scopes_by_id[scope_id] for scope_id in scope_ids if scope_id in scopes_by_id]
+        now = datetime.utcnow()
+        updated_scope_ids: list[str] = []
+
+        for scope in ordered_scopes:
+            changed = False
+
+            if config.get("scope_field") == "responsible_user_id":
+                if str(scope.responsible_user_id) != from_user_id:
+                    continue
+                scope.responsible_user_id = to_user_id
+                self._move_active_assignments(
+                    scope,
+                    config["roles"],
+                    from_user_id,
+                    to_user_id,
+                    now,
+                )
+                changed = True
+            else:
+                changed = self._move_active_assignments(
+                    scope,
+                    config["roles"],
+                    from_user_id,
+                    to_user_id,
+                    now,
+                )
+
+            if changed:
+                self._update_scope_draft_for_bulk_assignment(scope, group_by, from_user_id, to_user_id)
+                updated_scope_ids.append(str(scope.id))
+
+        return {
+            "ok": True,
+            "impactedScopes": len(updated_scope_ids),
+            "updatedScopeIds": updated_scope_ids,
+        }
 
     # ---------------------------------------------------------------------
     # Sync / auditoria

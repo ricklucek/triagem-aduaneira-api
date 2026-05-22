@@ -3,6 +3,8 @@ from datetime import datetime
 from flask import Blueprint, g, jsonify, request
 from sqlalchemy import and_, or_
 
+from app.scope_defaults import merge_scope_draft
+
 from ..auth import auth_required
 from ..extensions import db
 from ..models import Client, Scope, ScopeAssignment, ScopeVersion, User
@@ -22,6 +24,17 @@ def _processor() -> ScopeDataProcessor:
 def _load_scope_payload() -> dict:
     payload = request.get_json(force=True)
     return payload if isinstance(payload, dict) else {}
+
+
+def _load_optional_json_payload() -> dict:
+    payload = request.get_json(silent=True) or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _admin_forbidden_response():
+    if getattr(g.current_user, "role", None) != "admin":
+        return jsonify({"error": "forbidden", "message": "Endpoint permitido apenas para admin."}), 403
+    return None
 
 
 def _serialize_responsibles() -> list[dict]:
@@ -119,6 +132,66 @@ def list_scopes():
             "offset": params["offset"],
         }
     )
+
+@scope_bp.get("/bulk/assignment-summary")
+@auth_required
+def get_bulk_assignment_summary():
+    forbidden = _admin_forbidden_response()
+    if forbidden:
+        return forbidden
+
+    processor = _processor()
+    group_by = request.args.get("groupBy")
+
+    try:
+        return jsonify(processor.get_bulk_assignment_summary(group_by))
+    except ValueError as exc:
+        return jsonify({"error": "bad_request", "message": str(exc)}), 400
+
+
+@scope_bp.get("/bulk/assignment-scopes")
+@auth_required
+def get_bulk_assignment_scopes():
+    forbidden = _admin_forbidden_response()
+    if forbidden:
+        return forbidden
+
+    processor = _processor()
+    group_by = request.args.get("groupBy")
+    user_id = request.args.get("userId")
+
+    if not user_id:
+        return jsonify({"error": "bad_request", "message": "userId é obrigatório."}), 400
+
+    try:
+        return jsonify(processor.get_bulk_assignment_scopes(group_by, user_id))
+    except ValueError as exc:
+        return jsonify({"error": "bad_request", "message": str(exc)}), 400
+
+
+@scope_bp.post("/bulk/assignment-update")
+@auth_required
+def bulk_update_assignment():
+    forbidden = _admin_forbidden_response()
+    if forbidden:
+        return forbidden
+
+    processor = _processor()
+    payload = _load_optional_json_payload()
+
+    try:
+        result = processor.bulk_update_assignment(
+            group_by=payload.get("groupBy"),
+            from_user_id=payload.get("fromUserId"),
+            to_user_id=payload.get("toUserId"),
+            scope_ids=payload.get("scopeIds") or [],
+        )
+    except ValueError as exc:
+        return jsonify({"error": "bad_request", "message": str(exc)}), 400
+
+    db.session.commit()
+    return jsonify(result)
+
 
 @scope_bp.get("/user/assigned-count")
 @auth_required
@@ -302,61 +375,6 @@ def list_scope_versions(scope_id: str):
             }
             for row in rows
         ]
-    )
-
-
-@scope_bp.post("/bulk/reassign-responsible")
-@auth_required
-def bulk_reassign_responsible():
-    payload = bulk_responsible_schema.load(request.get_json(force=True))
-
-    filters = [Scope.responsible_user_id == payload["old_user_id"]]
-    if g.current_user.organization_id:
-        filters.append(Scope.organization_id == g.current_user.organization_id)
-    if payload["apply_status"]:
-        filters.append(Scope.status.in_(payload["apply_status"]))
-
-    scopes = Scope.query.filter(and_(*filters)).all()
-    impacted_scope_ids = [str(scope.id) for scope in scopes]
-
-    if payload["dry_run"]:
-        return jsonify({"dryRun": True, "impactedScopes": impacted_scope_ids, "count": len(impacted_scope_ids)})
-
-    now = datetime.utcnow()
-    for scope in scopes:
-        scope.responsible_user_id = payload["new_user_id"]
-
-        assignment_query = ScopeAssignment.query.filter_by(
-            scope_id=scope.id,
-            role="RESPONSAVEL_COMERCIAL",
-        )
-        if payload["only_active_assignments"]:
-            assignment_query = assignment_query.filter_by(active=True)
-
-        active_role = assignment_query.all()
-
-        for assignment in active_role:
-            assignment.active = False
-            assignment.ends_at = now
-
-        db.session.add(
-            ScopeAssignment(
-                scope_id=scope.id,
-                user_id=payload["new_user_id"],
-                role="RESPONSAVEL_COMERCIAL",
-                active=True,
-                starts_at=now,
-            )
-        )
-
-    db.session.commit()
-
-    return jsonify(
-        {
-            "dryRun": False,
-            "updatedCount": len(impacted_scope_ids),
-            "updatedScopeIds": impacted_scope_ids,
-        }
     )
 
 
