@@ -289,69 +289,6 @@ def publish_scope(scope_id: str):
     db.session.commit()
     return jsonify({"scope_id": str(scope.id), "published_at": now.isoformat() + "Z", "client_id": str(scope.client_id)})
 
-
-@scope_bp.post("/<scope_id>/sync")
-@auth_required
-def sync_scope(scope_id: str):
-    """Sincroniza um escopo específico com a arquitetura relacional.
-
-    Body opcional:
-        {"dryRun": true}
-
-    Se dryRun=true, apenas retorna o que está faltando.
-    Se dryRun=false, cria/atualiza Client, ScopeAssignment, ScopeService e ScopePreposto.
-    """
-    processor = _processor()
-    payload = request.get_json(silent=True) or {}
-    dry_run = bool(payload.get("dryRun", True))
-
-    scope = processor.scope_query_for_current_user().filter(Scope.id == scope_id).first_or_404()
-    result = processor.sync_scope(scope, dry_run=dry_run)
-
-    if not dry_run and result.changed:
-        db.session.commit()
-
-    return jsonify(result.to_dict())
-
-
-@scope_bp.post("/sync-missing")
-@auth_required
-def sync_missing_scopes():
-    """Sincroniza escopos antigos da organização atual em lote.
-
-    Body opcional:
-        {
-            "dryRun": true,
-            "limit": 100,
-            "status": "published"
-        }
-    """
-    processor = _processor()
-    payload = request.get_json(silent=True) or {}
-    dry_run = bool(payload.get("dryRun", True))
-    limit = min(int(payload.get("limit", 100)), 500)
-
-    query = processor.scope_query_for_current_user().order_by(Scope.created_at.asc())
-    if payload.get("status"):
-        query = query.filter(Scope.status == payload["status"])
-
-    scopes = query.limit(limit).all()
-    results = processor.sync_scopes(scopes, dry_run=dry_run)
-
-    if not dry_run:
-        db.session.commit()
-
-    return jsonify(
-        {
-            "dryRun": dry_run,
-            "checked": len(results),
-            "alreadySynced": sum(1 for item in results if item.already_synced),
-            "changed": sum(1 for item in results if item.changed),
-            "items": [item.to_dict() for item in results],
-        }
-    )
-
-
 @scope_bp.get("/<scope_id>/versions")
 @auth_required
 def list_scope_versions(scope_id: str):
