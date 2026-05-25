@@ -68,7 +68,6 @@ def create_scope():
     scope = Scope(
         organization_id=g.current_user.organization_id,
         created_by_id=g.current_user.id,
-        draft=draft,
         version=1,
     )
     processor.apply_draft_to_scope(scope, draft)
@@ -256,6 +255,18 @@ def update_scope(scope_id: str):
     return jsonify(ScopeStructuredSchema().dump(scope))
 
 
+
+
+@scope_bp.put("/<scope_id>/draft")
+@auth_required
+def save_scope_draft(scope_id: str):
+    processor = _processor()
+    scope = processor.scope_query_for_current_user().filter(Scope.id == scope_id).first_or_404()
+    payload = _load_scope_payload()
+    scope.legacy_draft = payload
+    db.session.commit()
+    return jsonify({"scope_id": str(scope.id), "draft_saved": True})
+
 @scope_bp.post("/<scope_id>/publish")
 @auth_required
 def publish_scope(scope_id: str):
@@ -263,7 +274,7 @@ def publish_scope(scope_id: str):
     scope = processor.scope_query_for_current_user().filter(Scope.id == scope_id).first_or_404()
     now = datetime.now()
 
-    normalized_draft = processor.normalize_draft(scope.draft)
+    normalized_draft = processor.normalize_draft(scope.legacy_draft)
     processor.apply_draft_to_scope(scope, normalized_draft)
     processor.upsert_client_from_draft(scope, normalized_draft)
     processor.sync_assignments_from_draft(scope, normalized_draft)
@@ -272,7 +283,7 @@ def publish_scope(scope_id: str):
 
     scope.status = "published"
     scope.last_published_at = now
-    scope.published_snapshot = normalized_draft
+    scope.published_snapshot = ScopeStructuredSchema().dump(scope)
     scope.version = (scope.version or 0) + 1
 
     db.session.flush()
@@ -280,8 +291,7 @@ def publish_scope(scope_id: str):
         ScopeVersion(
             scope_id=scope.id,
             version_number=scope.version,
-            draft_snapshot=normalized_draft,
-            published_snapshot=normalized_draft,
+            snapshot=ScopeStructuredSchema().dump(scope),
             created_by_id=g.current_user.id,
         )
     )
