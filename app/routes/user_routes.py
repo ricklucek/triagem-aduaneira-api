@@ -6,8 +6,7 @@ from ..models import User
 from ..schemas import UserSchema
 
 user_bp = Blueprint("users", __name__, url_prefix="/users")
-user_schema = UserSchema()
-users_schema = UserSchema(many=True)
+
 ALLOWED_ROLES = {"administrador", "comercial", "credenciamento", "operacao"}
 
 
@@ -66,7 +65,7 @@ def create_user():
 
     db.session.add(user)
     db.session.commit()
-    return jsonify({"ok": True, "data": user_schema.dump(user)}), 201
+    return jsonify({"ok": True, "data": UserSchema().dump(user)}), 201
 
 @user_bp.put("/user/<user_id>")
 @admin_required
@@ -83,7 +82,7 @@ def update_user(user_id: str):
         user.set_password(payload["password"])
 
     db.session.commit()
-    return jsonify({"ok": True, "data": user_schema.dump(user)}), 201
+    return jsonify({"ok": True, "data": UserSchema().dump(user)}), 201
 
 
 @user_bp.delete("/user/<user_id>")

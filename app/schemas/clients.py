@@ -2,15 +2,7 @@ from marshmallow import Schema, fields, validate
 from marshmallow_sqlalchemy import SQLAlchemyAutoSchema
 
 from app.models import Client, ClientContact
-from .common import DateTimeMixinSchema, UUIDStringField
-
-
-class ClientListQuerySchema(Schema):
-    q = fields.String(required=False)
-    cnpj = fields.String(required=False)
-    ativo = fields.Boolean(required=False)
-    limit = fields.Integer(load_default=20, validate=validate.Range(min=1, max=200))
-    offset = fields.Integer(load_default=0, validate=validate.Range(min=0))
+from .common import UUIDStringField
 
 
 class ClientUpdateSchema(Schema):

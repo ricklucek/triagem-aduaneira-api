@@ -1,12 +1,5 @@
 from marshmallow import Schema, ValidationError, fields, validate, validates_schema
 
-class LoginSchema(Schema):
-    email = fields.Email(required=True)
-    password = fields.String(required=True)
-
-class RefreshSchema(Schema):
-    refreshToken = fields.String(required=True)
-
 
 class RegisterSchema(Schema):
     nome = fields.String(required=True)

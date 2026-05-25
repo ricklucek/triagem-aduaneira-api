@@ -7,13 +7,9 @@ from sqlalchemy.exc import IntegrityError
 from ..auth import auth_required, decode_token, generate_tokens, serialize_identity
 from ..extensions import db
 from ..models import Organization, RefreshToken, User
-from ..schemas.auth import LoginSchema, RefreshSchema, RegisterSchema
+from ..schemas.auth import RegisterSchema
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
-login_schema = LoginSchema()
-refresh_schema = RefreshSchema()
-register_schema = RegisterSchema()
-
 
 def _slugify(text: str) -> str:
     base = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower()).strip("-")
@@ -22,7 +18,7 @@ def _slugify(text: str) -> str:
 
 @auth_bp.post("/register")
 def register():
-    payload = register_schema.load(request.get_json(force=True))
+    payload = RegisterSchema().load(request.get_json(force=True))
 
     if User.query.filter_by(email=payload["email"]).first():
         return jsonify({"error": "Email já cadastrado"}), 409
@@ -63,7 +59,7 @@ def register():
 
 @auth_bp.post("/login")
 def login():
-    payload = login_schema.load(request.get_json(force=True))
+    payload = request.get_json(force=True)
 
     user = User.query.filter_by(email=payload["email"], ativo=True).first()
     if not user or not user.check_password(payload["password"]):
@@ -74,7 +70,7 @@ def login():
 
 @auth_bp.post("/refresh")
 def refresh():
-    payload = refresh_schema.load(request.get_json(force=True))
+    payload = request.get_json(force=True)
     token = payload["refreshToken"]
 
     try:

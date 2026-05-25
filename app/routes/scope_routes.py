@@ -3,19 +3,16 @@ from datetime import datetime
 from flask import Blueprint, g, jsonify, request
 from sqlalchemy import and_, or_
 
+from app.schemas.scopes.response import ScopeStructuredSchema
 from app.scope_defaults import merge_scope_draft
 
 from ..auth import auth_required
 from ..extensions import db
 from ..models import Client, Scope, ScopeAssignment, ScopeVersion, User
-from ..schemas import ScopeBulkResponsibleSchema, ScopeListQuerySchema, ScopeSchema, UserSchema
+from ..schemas import UserSchema
 from ..services.scope_processor import ScopeDataProcessor
 
 scope_bp = Blueprint("scopes", __name__, url_prefix="/scopes")
-scope_schema = ScopeSchema()
-scope_list_query_schema = ScopeListQuerySchema()
-bulk_responsible_schema = ScopeBulkResponsibleSchema()
-
 
 def _processor() -> ScopeDataProcessor:
     return ScopeDataProcessor(current_user=g.current_user)
@@ -92,7 +89,7 @@ def create_scope():
 @auth_required
 def list_scopes():
     processor = _processor()
-    params = scope_list_query_schema.load(request.args)
+    params = request.args.to_dict()
 
     query = processor.scope_query_for_current_user()
 
@@ -236,7 +233,7 @@ def get_scope(scope_id: str):
 
     return jsonify(
         {
-            **scope_schema.dump(scope),
+            **ScopeStructuredSchema().dump(scope),
             "created_by": UserSchema(only=["id", "nome", "email", "role", "setor"]).dump(user),
         }
     )
@@ -256,7 +253,7 @@ def update_scope(scope_id: str):
     processor.sync_prepostos_from_draft(scope, normalized_draft)
 
     db.session.commit()
-    return jsonify(scope_schema.dump(scope))
+    return jsonify(ScopeStructuredSchema().dump(scope))
 
 
 @scope_bp.post("/<scope_id>/publish")

@@ -4,12 +4,9 @@ from sqlalchemy import or_
 from ..auth import auth_required
 from ..extensions import db
 from ..models import Client, Scope
-from ..schemas import ClientListQuerySchema, ClientSchema, ClientUpdateSchema
+from ..schemas import ClientSchema, ClientUpdateSchema
 
 client_bp = Blueprint("clients", __name__, url_prefix="/clients")
-client_schema = ClientSchema()
-client_list_query_schema = ClientListQuerySchema()
-client_update_schema = ClientUpdateSchema()
 
 
 def _client_query_for_user():
@@ -22,7 +19,7 @@ def _client_query_for_user():
 @client_bp.get("")
 @auth_required
 def list_clients():
-    params = client_list_query_schema.load(request.args)
+    params = request.args
     query = _client_query_for_user()
 
     if params.get("cnpj"):
@@ -43,7 +40,7 @@ def list_clients():
 
     return jsonify(
         {
-            "items": client_schema.dump(rows, many=True),
+            "items": ClientSchema().dump(rows, many=True),
             "total": total,
             "limit": params["limit"],
             "offset": params["offset"],
@@ -55,20 +52,20 @@ def list_clients():
 @auth_required
 def get_client(client_id: str):
     client = _client_query_for_user().filter(Client.id == client_id).first_or_404()
-    return jsonify(client_schema.dump(client))
+    return jsonify(ClientSchema().dump(client))
 
 
 @client_bp.patch("/<client_id>")
 @auth_required
 def update_client(client_id: str):
     client = _client_query_for_user().filter(Client.id == client_id).first_or_404()
-    payload = client_update_schema.load(request.get_json(force=True))
+    payload = ClientUpdateSchema().load(request.get_json(force=True))
 
     for key, value in payload.items():
         setattr(client, key, value)
 
     db.session.commit()
-    return jsonify(client_schema.dump(client))
+    return jsonify(ClientSchema().dump(client))
 
 
 @client_bp.get("/<client_id>/scopes")

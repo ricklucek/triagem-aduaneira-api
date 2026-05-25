@@ -5,11 +5,10 @@ from flask import Blueprint, g, jsonify, request
 from ..auth import admin_required, auth_required
 from ..extensions import db
 from ..models import Organization, OrganizationSetting
-from ..schemas import OrganizationFixedInfoSchema, OrganizationSchema
+from ..schemas import OrganizationSchema
 
 organization_bp = Blueprint("organizations", __name__, url_prefix="/organizations")
-organization_schema = OrganizationSchema()
-fixed_info_schema = OrganizationFixedInfoSchema()
+
 SETTINGS_KEY = "scope_fixed_info"
 
 
@@ -35,7 +34,7 @@ def get_my_organization():
 
     return jsonify(
         {
-            "organization": organization_schema.dump(org),
+            "organization": OrganizationSchema().dump(org),
             "fixedInfo": setting.value_json if setting else _default_fixed_info(),
         }
     )
@@ -71,7 +70,7 @@ def update_my_organization_settings():
     if not g.current_user.organization_id:
         return jsonify({"error": "Usuário sem organização"}), 400
 
-    payload = fixed_info_schema.load(request.get_json(force=True))
+    payload = request.get_json(force=True)
     serialized = {
         "salarioMinimoVigente": float(Decimal(str(payload["salarioMinimoVigente"]))),
         "dadosBancariosCasco": payload["dadosBancariosCasco"],

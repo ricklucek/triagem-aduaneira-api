@@ -4,7 +4,7 @@ from datetime import datetime
 
 from flask import Blueprint, g, jsonify, request
 
-from ..auth import admin_required, roles_required
+from ..auth import roles_required
 from ..services.dashboard_metrics_service import DashboardMetricsService
 
 dashboard_bp = Blueprint("dashboards", __name__, url_prefix="/dashboards")
