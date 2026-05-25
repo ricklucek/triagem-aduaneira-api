@@ -57,7 +57,7 @@ class ScopeDataProcessor:
         processor.apply_draft_to_scope(scope, draft)
         processor.sync_scope(scope)
 
-    A classe mantém Scope.draft como snapshot editável, mas materializa os dados
+    A classe mantém Scope.legacy_draft como snapshot editável, mas materializa os dados
     consultáveis em tabelas relacionais: Client, ScopeAssignment, ScopeService e
     ScopePreposto.
     """
@@ -77,7 +77,7 @@ class ScopeDataProcessor:
 
     BULK_ASSIGNMENT_GROUPS = {
         "responsavel_comercial": {
-            "scope_field": "responsible_user_id",
+            "scope_field": "commercial_responsible_user_id",
             "roles": ("RESPONSAVEL_COMERCIAL",),
             "draft_path": ("sobreEmpresa", "responsavelComercial"),
         },
@@ -159,19 +159,18 @@ class ScopeDataProcessor:
             "client_id": str(scope.client_id) if scope.client_id else None,
             "client_cnpj": scope.client.cnpj if scope.client else None,
             "client_razao_social": scope.client.razao_social if scope.client else None,
-            "responsible_user_id": str(scope.responsible_user_id) if scope.responsible_user_id else None,
-            "responsible_user_nome": scope.responsible_user.nome if scope.responsible_user else None,
+            "commercial_responsible_user_id": str(scope.commercial_responsible_user_id) if scope.commercial_responsible_user_id else None,
+            "commercial_responsible_user_nome": scope.commercial_responsible_user.nome if scope.commercial_responsible_user else None,
         }
 
     def apply_draft_to_scope(self, scope: Scope, normalized_draft: dict) -> Scope:
         sobre_empresa = normalized_draft.get("sobreEmpresa") or {}
-        responsible_user_id = (
+        commercial_responsible_user_id = (
             sobre_empresa.get("responsavelComercial")
             or sobre_empresa.get("responsavelComercialId")
         )
 
-        scope.draft = normalized_draft
-        scope.responsible_user_id = responsible_user_id or None
+        scope.commercial_responsible_user_id = commercial_responsible_user_id or None
         return scope
 
     # ---------------------------------------------------------------------
@@ -432,7 +431,7 @@ class ScopeDataProcessor:
             scope_service.pricing_type = self._extract_pricing_type(payload)
             scope_service.amount = self._extract_service_amount(payload)
             scope_service.currency = payload.get("moeda") or "BRL"
-            scope_service.responsible_user_id = payload.get("responsavel") or None
+            scope_service.commercial_responsible_user_id = payload.get("responsavel") or None
             scope_service.extra_data = payload
 
         existing_query = ScopeService.query.filter(ScopeService.scope_id == scope.id)
@@ -644,7 +643,7 @@ class ScopeDataProcessor:
         from_user_id: str,
         to_user_id: str,
     ) -> None:
-        draft = deepcopy(scope.draft or {})
+        draft = deepcopy(scope.legacy_draft or {})
 
         if group_by == "responsavel_comercial":
             self._set_nested_value(draft, ("sobreEmpresa", "responsavelComercial"), to_user_id)
@@ -660,7 +659,7 @@ class ScopeDataProcessor:
                         self._replace_user_in_list(current, from_user_id, to_user_id),
                     )
 
-        scope.draft = draft
+        scope.legacy_draft = draft
 
     def _upsert_active_assignment(self, scope_id, user_id: str, role: str, now: datetime) -> None:
         existing = ScopeAssignment.query.filter_by(
@@ -713,7 +712,7 @@ class ScopeDataProcessor:
     def get_bulk_assignment_summary(self, group_by: str) -> dict[str, Any]:
         config = self._bulk_group_config(group_by)
 
-        if config.get("scope_field") == "responsible_user_id":
+        if config.get("scope_field") == "commercial_responsible_user_id":
             query = (
                 db.session.query(
                     User.id.label("user_id"),
@@ -722,7 +721,7 @@ class ScopeDataProcessor:
                     User.setor.label("user_setor"),
                     func.count(Scope.id).label("total_scopes"),
                 )
-                .join(Scope, Scope.responsible_user_id == User.id)
+                .join(Scope, Scope.commercial_responsible_user_id == User.id)
             )
             if self.organization_id:
                 query = query.filter(Scope.organization_id == self.organization_id)
@@ -774,8 +773,8 @@ class ScopeDataProcessor:
         config = self._bulk_group_config(group_by)
         self._validate_bulk_user(user_id)
 
-        if config.get("scope_field") == "responsible_user_id":
-            query = Scope.query.filter(Scope.responsible_user_id == user_id)
+        if config.get("scope_field") == "commercial_responsible_user_id":
+            query = Scope.query.filter(Scope.commercial_responsible_user_id == user_id)
         else:
             scope_ids_subquery = (
                 db.session.query(ScopeAssignment.scope_id)
@@ -851,10 +850,10 @@ class ScopeDataProcessor:
         for scope in ordered_scopes:
             changed = False
 
-            if config.get("scope_field") == "responsible_user_id":
-                if str(scope.responsible_user_id) != from_user_id:
+            if config.get("scope_field") == "commercial_responsible_user_id":
+                if str(scope.commercial_responsible_user_id) != from_user_id:
                     continue
-                scope.responsible_user_id = to_user_id
+                scope.commercial_responsible_user_id = to_user_id
                 self._move_active_assignments(
                     scope,
                     config["roles"],
@@ -886,7 +885,7 @@ class ScopeDataProcessor:
     # Sync / auditoria
     # ---------------------------------------------------------------------
     def get_sync_missing(self, scope: Scope, draft: dict | None = None) -> dict[str, list[str]]:
-        draft = draft or scope.draft or {}
+        draft = draft or scope.legacy_draft or {}
         missing: dict[str, list[str]] = {
             "client": [],
             "assignments": [],
@@ -954,7 +953,7 @@ class ScopeDataProcessor:
         return not bool(self.get_sync_missing(scope, draft=draft))
 
     def sync_scope(self, scope: Scope, dry_run: bool = False) -> ScopeSyncResult:
-        normalized_draft = self.normalize_draft(scope.draft or {})
+        normalized_draft = self.normalize_draft(scope.legacy_draft or {})
         missing = self.get_sync_missing(scope, draft=normalized_draft)
         already_synced = not bool(missing)
 
