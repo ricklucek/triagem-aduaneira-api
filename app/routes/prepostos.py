@@ -3,12 +3,12 @@ from marshmallow import ValidationError
 from sqlalchemy import and_, func
 
 from app.extensions import db
-from app.models import Preposto, PrepostoContato, PrepostoLocalidade
+from app.models import Preposto, PrepostoContact, PrepostoLocation
 from app.schemas import (
     PrepostoSchema,
     PrepostoCreateSchema,
     PrepostoUpdateSchema,
-    PrepostoContatoSchema,
+    PrepostoContactSchema,
     PrepostoContatoCreateSchema,
     PrepostoContatoUpdateSchema,
     PrepostoLocalidadeSchema,
@@ -34,14 +34,14 @@ def get_preposto_or_404(preposto_id: str):
 
 
 def get_contato_or_404(preposto_id: str, contato_id: str):
-    contato = PrepostoContato.query.filter_by(id=contato_id, preposto_id=preposto_id).first()
+    contato = PrepostoContact.query.filter_by(id=contato_id, preposto_id=preposto_id).first()
     if not contato:
         return None
     return contato
 
 
 def get_localidade_or_404(preposto_id: str, localidade_id: str):
-    localidade = PrepostoLocalidade.query.filter_by(
+    localidade = PrepostoLocation.query.filter_by(
         id=localidade_id,
         preposto_id=preposto_id,
     ).first()
@@ -51,9 +51,9 @@ def get_localidade_or_404(preposto_id: str, localidade_id: str):
 
 
 def clear_other_principais(preposto_id, contato_id=None):
-    q = PrepostoContato.query.filter_by(preposto_id=preposto_id, principal=True)
+    q = PrepostoContact.query.filter_by(preposto_id=preposto_id, principal=True)
     if contato_id:
-        q = q.filter(PrepostoContato.id != contato_id)
+        q = q.filter(PrepostoContact.id != contato_id)
 
     for contato in q.all():
         contato.principal = False
@@ -163,7 +163,7 @@ def create_preposto_contato(preposto_id):
     except ValidationError as err:
         return json_error("Dados inválidos para criação do contato.", 422, err.messages)
 
-    contato = PrepostoContato(
+    contato = PrepostoContact(
         preposto_id=preposto.id,
         nome=payload["nome"].strip(),
         email=payload.get("email"),
@@ -180,7 +180,7 @@ def create_preposto_contato(preposto_id):
 
     db.session.commit()
 
-    return jsonify(PrepostoContatoSchema().dump(contato)), 201
+    return jsonify(PrepostoContactSchema().dump(contato)), 201
 
 
 @prepostos_bp.patch("/<uuid:preposto_id>/contatos/<uuid:contato_id>")
@@ -217,7 +217,7 @@ def update_preposto_contato(preposto_id, contato_id):
 
     db.session.commit()
 
-    return jsonify(PrepostoContatoSchema().dump(contato)), 200
+    return jsonify(PrepostoContactSchema().dump(contato)), 200
 
 
 @prepostos_bp.delete("/<uuid:preposto_id>/contatos/<uuid:contato_id>")
@@ -247,7 +247,7 @@ def create_preposto_localidade(preposto_id):
     except ValidationError as err:
         return json_error("Dados inválidos para criação da localidade.", 422, err.messages)
 
-    localidade = PrepostoLocalidade(
+    localidade = PrepostoLocation(
         preposto_id=preposto.id,
         cidade=payload["cidade"].strip(),
         uf=payload.get("uf"),
@@ -337,16 +337,16 @@ def lookup_prepostos():
 
     principal_contact_subquery = (
         db.session.query(
-            PrepostoContato.id.label("contato_id"),
-            PrepostoContato.preposto_id.label("preposto_id"),
+            PrepostoContact.id.label("contato_id"),
+            PrepostoContact.preposto_id.label("preposto_id"),
             func.row_number()
             .over(
-                partition_by=PrepostoContato.preposto_id,
-                order_by=PrepostoContato.created_at.asc(),
+                partition_by=PrepostoContact.preposto_id,
+                order_by=PrepostoContact.created_at.asc(),
             )
             .label("rn"),
         )
-        .filter(PrepostoContato.principal.is_(True))
+        .filter(PrepostoContact.principal.is_(True))
         .subquery()
     )
 
@@ -354,20 +354,20 @@ def lookup_prepostos():
         db.session.query(
             Preposto.id.label("id"),
             Preposto.nome.label("nome"),
-            PrepostoLocalidade.cidade.label("cidade"),
-            PrepostoLocalidade.uf.label("uf"),
-            PrepostoLocalidade.descricao_local.label("descricao_local"),
-            PrepostoLocalidade.moeda.label("moeda"),
-            PrepostoLocalidade.observacoes.label("observacoes"),
-            PrepostoLocalidade.valor_importacao.label("valor_importacao"),
-            PrepostoLocalidade.valor_exportacao.label("valor_exportacao"),
-            PrepostoLocalidade.valor_importacao_descricao.label("valor_importacao_descricao"),
-            PrepostoLocalidade.valor_exportacao_descricao.label("valor_exportacao_descricao"),
-            PrepostoContato.nome.label("contato_nome"),
-            PrepostoContato.email.label("email"),
-            PrepostoContato.telefone.label("telefone"),
+            PrepostoLocation.cidade.label("cidade"),
+            PrepostoLocation.uf.label("uf"),
+            PrepostoLocation.descricao_local.label("descricao_local"),
+            PrepostoLocation.moeda.label("moeda"),
+            PrepostoLocation.observacoes.label("observacoes"),
+            PrepostoLocation.valor_importacao.label("valor_importacao"),
+            PrepostoLocation.valor_exportacao.label("valor_exportacao"),
+            PrepostoLocation.valor_importacao_descricao.label("valor_importacao_descricao"),
+            PrepostoLocation.valor_exportacao_descricao.label("valor_exportacao_descricao"),
+            PrepostoContact.nome.label("contato_nome"),
+            PrepostoContact.email.label("email"),
+            PrepostoContact.telefone.label("telefone"),
         )
-        .join(PrepostoLocalidade, PrepostoLocalidade.preposto_id == Preposto.id)
+        .join(PrepostoLocation, PrepostoLocation.preposto_id == Preposto.id)
         .outerjoin(
             principal_contact_subquery,
             and_(
@@ -376,19 +376,19 @@ def lookup_prepostos():
             ),
         )
         .outerjoin(
-            PrepostoContato,
-            PrepostoContato.id == principal_contact_subquery.c.contato_id,
+            PrepostoContact,
+            PrepostoContact.id == principal_contact_subquery.c.contato_id,
         )
         .filter(Preposto.ativo.is_(True))
     )
 
     if cidade:
-        q = q.filter(func.lower(PrepostoLocalidade.cidade) == cidade.lower())
+        q = q.filter(func.lower(PrepostoLocation.cidade) == cidade.lower())
 
     if operacao == "IMPORTACAO":
-        q = q.filter(PrepostoLocalidade.atende_importacao.is_(True))
+        q = q.filter(PrepostoLocation.atende_importacao.is_(True))
     elif operacao == "EXPORTACAO":
-        q = q.filter(PrepostoLocalidade.atende_exportacao.is_(True))
+        q = q.filter(PrepostoLocation.atende_exportacao.is_(True))
 
     rows = q.order_by(Preposto.nome.asc()).all()
 

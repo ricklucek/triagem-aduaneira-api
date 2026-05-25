@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from ..auth import auth_required, decode_token, generate_tokens, serialize_identity
 from ..extensions import db
 from ..models import Organization, RefreshToken, User
-from ..schemas import LoginSchema, RefreshSchema, RegisterSchema
+from ..schemas.auth import LoginSchema, RefreshSchema, RegisterSchema
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
 login_schema = LoginSchema()
