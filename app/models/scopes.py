@@ -13,7 +13,7 @@ class Scope(TimestampMixin, db.Model):
 
     id = uuid_pk()
     organization_id = db.Column(UUID(as_uuid=True), db.ForeignKey("organizations.id"), nullable=False, index=True)
-    client_id = db.Column(UUID(as_uuid=True), db.ForeignKey("clients.id"), nullable=False, index=True)
+    client_id = db.Column(UUID(as_uuid=True), db.ForeignKey("clients.id"), nullable=True, index=True)
 
     status = db.Column(enum_column(ScopeStatus, "scope_status"), nullable=False, default=ScopeStatus.DRAFT, index=True)
     version = db.Column(db.Integer, nullable=False, default=1)
@@ -21,11 +21,7 @@ class Scope(TimestampMixin, db.Model):
     commercial_responsible_user_id = db.Column(UUID(as_uuid=True), db.ForeignKey("users.id"), nullable=True, index=True)
     last_published_at = db.Column(db.DateTime, nullable=True)
 
-    # Legacy only during migration. Do not use as source of truth.
-    legacy_draft = db.Column("draft", db.JSON, nullable=True)
-    published_snapshot = db.Column(db.JSON, nullable=True)
-    relational_migrated_at = db.Column(db.DateTime, nullable=True)
-    legacy_draft_hash = db.Column(db.String(64), nullable=True)
+    draft = db.Column(db.JSON, nullable=True)
 
     organization = db.relationship("Organization", back_populates="scopes")
     client = db.relationship("Client", back_populates="scopes")

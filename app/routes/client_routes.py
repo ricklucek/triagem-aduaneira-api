@@ -23,16 +23,16 @@ def list_clients():
     query = _client_query_for_user()
 
     if params.get("cnpj"):
-        query = query.filter(Client.cnpj == params["cnpj"])
+        query = query.filter(Client.tax_id == params["cnpj"])
     if params.get("ativo") is not None:
-        query = query.filter(Client.ativo == params["ativo"])
+        query = query.filter(Client.active == params["ativo"])
     if params.get("q"):
         term = f"%{params['q']}%"
-        query = query.filter(or_(Client.razao_social.ilike(term), Client.nome_resumido.ilike(term), Client.cnpj.ilike(term)))
+        query = query.filter(or_(Client.legal_name.ilike(term), Client.trade_name.ilike(term)))
 
     total = query.count()
     rows = (
-        query.order_by(Client.razao_social.asc())
+        query.order_by(Client.legal_name.asc())
         .limit(params["limit"])
         .offset(params["offset"])
         .all()

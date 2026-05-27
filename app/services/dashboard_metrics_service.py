@@ -23,13 +23,13 @@ class DashboardMetricsService:
     """
 
     ASSIGNMENT_GROUPS = {
-        "responsible": ["RESPONSAVEL_COMERCIAL"],
-        "analista_da": ["ANALISTA_DA_IMPORT", "ANALISTA_DA_EXPORT"],
-        "analista_da_import": ["ANALISTA_DA_IMPORT"],
-        "analista_da_export": ["ANALISTA_DA_EXPORT"],
-        "analista_ae": ["ANALISTA_AE_IMPORT", "ANALISTA_AE_EXPORT"],
-        "analista_ae_import": ["ANALISTA_AE_IMPORT"],
-        "analista_ae_export": ["ANALISTA_AE_EXPORT"],
+        "responsible": ["COMMERCIAL_RESPONSIBLE"],
+        "analista_da": ["IMPORT_DA_ANALYST", "EXPORT_DA_ANALYST"],
+        "analista_da_import": ["IMPORT_DA_ANALYST"],
+        "analista_da_export": ["EXPORT_DA_ANALYST"],
+        "analista_ae": ["IMPORT_AE_ANALYST", "EXPORT_AE_ANALYST"],
+        "analista_ae_import": ["IMPORT_AE_ANALYST"],
+        "analista_ae_export": ["EXPORT_AE_ANALYST"],
     }
 
     def __init__(self, current_user: User):
@@ -114,12 +114,12 @@ class DashboardMetricsService:
             "id": str(scope.id),
             "status": scope.status,
             "clientId": str(scope.client_id) if scope.client_id else None,
-            "clientName": scope.client.razao_social if scope.client else None,
-            "clientCnpj": scope.client.cnpj if scope.client else None,
+            "clientName": scope.client.legal_name if scope.client else None,
+            "clientCnpj": scope.client.tax_id if scope.client else None,
             "createdById": str(scope.created_by_id) if scope.created_by_id else None,
-            "createdByName": scope.created_by.nome if scope.created_by else None,
-            "responsibleUserId": str(scope.responsible_user_id) if scope.responsible_user_id else None,
-            "responsibleUserName": scope.responsible_user.nome if scope.responsible_user else None,
+            "createdByName": scope.created_by.name if scope.created_by else None,
+            "responsibleUserId": str(scope.commercial_responsible_user_id) if scope.commercial_responsible_user_id else None,
+            "responsibleUserName": scope.commercial_responsible_user.name if scope.commercial_responsible_user else None,
             "createdAt": self._dt(scope.created_at),
             "updatedAt": self._dt(scope.updated_at),
             "lastPublishedAt": self._dt(scope.last_published_at),
@@ -137,10 +137,10 @@ class DashboardMetricsService:
         base_query = (
             db.session.query(
                 User.id.label("user_id"),
-                User.nome.label("user_name"),
+                User.name.label("user_name"),
                 User.email.label("user_email"),
                 User.role.label("user_role"),
-                User.setor.label("user_setor"),
+                User.department.label("user_setor"),
                 func.count(distinct(Scope.id)).label("total_scopes"),
             )
             .join(ScopeAssignment, ScopeAssignment.user_id == User.id)
@@ -158,8 +158,8 @@ class DashboardMetricsService:
 
         rows = (
             base_query
-            .group_by(User.id, User.nome, User.email, User.role, User.setor)
-            .order_by(func.count(distinct(Scope.id)).desc(), User.nome.asc())
+            .group_by(User.id, User.name, User.email, User.role, User.department)
+            .order_by(func.count(distinct(Scope.id)).desc(), User.name.asc())
             .all()
         )
 
@@ -196,10 +196,10 @@ class DashboardMetricsService:
         base_query = (
             db.session.query(
                 User.id.label("user_id"),
-                User.nome.label("user_name"),
+                User.name.label("user_name"),
                 User.email.label("user_email"),
                 User.role.label("user_role"),
-                User.setor.label("user_setor"),
+                User.department.label("user_setor"),
                 func.count(distinct(Scope.id)).label("total_scopes"),
             )
             .join(Scope, Scope.created_by_id == User.id)
@@ -214,8 +214,8 @@ class DashboardMetricsService:
 
         rows = (
             base_query
-            .group_by(User.id, User.nome, User.email, User.role, User.setor)
-            .order_by(func.count(distinct(Scope.id)).desc(), User.nome.asc())
+            .group_by(User.id, User.name, User.email, User.role, User.department)
+            .order_by(func.count(distinct(Scope.id)).desc(), User.name.asc())
             .all()
         )
 
@@ -390,7 +390,7 @@ class DashboardMetricsService:
             db.session.query(
                 ServiceCatalog.id.label("service_catalog_id"),
                 ServiceCatalog.code.label("service_code"),
-                ServiceCatalog.nome.label("service_name"),
+                ServiceCatalog.name.label("service_name"),
                 ServiceCatalog.operation_type.label("operation_type"),
                 ScopeService.currency.label("currency"),
                 func.count(ScopeService.id).label("total_occurrences"),
@@ -428,11 +428,11 @@ class DashboardMetricsService:
             .group_by(
                 ServiceCatalog.id,
                 ServiceCatalog.code,
-                ServiceCatalog.nome,
+                ServiceCatalog.name,
                 ServiceCatalog.operation_type,
                 ScopeService.currency,
             )
-            .order_by(func.count(ScopeService.id).desc(), ServiceCatalog.nome.asc())
+            .order_by(func.count(ScopeService.id).desc(), ServiceCatalog.name.asc())
             .all()
         )
 
@@ -522,13 +522,13 @@ class DashboardMetricsService:
                 Scope.created_at.label("scope_created_at"),
                 Scope.updated_at.label("scope_updated_at"),
                 Scope.created_by_id.label("created_by_id"),
-                User.nome.label("created_by_name"),
+                User.name.label("created_by_name"),
                 Client.id.label("client_id"),
                 Client.razao_social.label("client_name"),
-                Client.cnpj.label("client_cnpj"),
+                Client.tax_id.label("client_cnpj"),
                 ServiceCatalog.id.label("service_catalog_id"),
                 ServiceCatalog.code.label("service_code"),
-                ServiceCatalog.nome.label("service_name"),
+                ServiceCatalog.name.label("service_name"),
                 ServiceCatalog.operation_type.label("operation_type"),
                 ScopeService.pricing_type.label("pricing_type"),
                 ScopeService.amount.label("amount"),
@@ -569,8 +569,8 @@ class DashboardMetricsService:
             query = query.filter(
                 or_(
                     Client.razao_social.ilike(term),
-                    Client.cnpj.ilike(term),
-                    ServiceCatalog.nome.ilike(term),
+                    Client.tax_id.ilike(term),
+                    ServiceCatalog.name.ilike(term),
                     ServiceCatalog.code.ilike(term),
                     Scope.status.ilike(term),
                 )

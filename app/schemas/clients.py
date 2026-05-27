@@ -33,7 +33,6 @@ class ClientContactSchema(SQLAlchemyAutoSchema):
 class ClientSchema(SQLAlchemyAutoSchema):
     id = UUIDStringField(dump_only=True)
     organizationId = UUIDStringField(attribute="organization_id", dump_only=True)
-
     taxId = fields.String(attribute="tax_id", required=True)
     legalName = fields.String(attribute="legal_name", required=True)
     tradeName = fields.String(attribute="trade_name", allow_none=True)
@@ -45,7 +44,6 @@ class ClientSchema(SQLAlchemyAutoSchema):
     secondaryCnae = fields.String(attribute="secondary_cnae", allow_none=True)
     taxRegime = fields.String(attribute="tax_regime", allow_none=True)
     radarMode = fields.String(attribute="radar_mode", allow_none=True)
-
     contacts = fields.Nested(ClientContactSchema, many=True, dump_only=True)
 
     class Meta:

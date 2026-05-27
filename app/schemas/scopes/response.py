@@ -53,7 +53,6 @@ class ScopeStructuredSchema(Schema):
     createdAt = fields.DateTime(attribute="created_at", allow_none=True)
     updatedAt = fields.DateTime(attribute="updated_at", allow_none=True)
     lastPublishedAt = fields.DateTime(attribute="last_published_at", allow_none=True)
-
     company = fields.Nested(ClientSchema, attribute="client", allow_none=True)
     contacts = fields.Method("get_contacts")
     assignments = fields.Method("get_assignments")
@@ -62,7 +61,6 @@ class ScopeStructuredSchema(Schema):
     services = fields.Method("get_services")
     financial = fields.Method("get_financial")
     general = fields.Method("get_general")
-
     contact_schema = ClientContactSchema(many=True)
     assignments_schema = ScopeAssignmentsSchema()
     operations_schema = ScopeOperationsSchema()

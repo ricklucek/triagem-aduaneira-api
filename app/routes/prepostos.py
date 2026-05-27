@@ -6,16 +6,10 @@ from app.extensions import db
 from app.models import Preposto, PrepostoContact, PrepostoLocation
 from app.schemas import (
     PrepostoSchema,
-    PrepostoCreateSchema,
-    PrepostoUpdateSchema,
+    PrepostoPayloadSchema,
     PrepostoContactSchema,
-    PrepostoContatoCreateSchema,
-    PrepostoContatoUpdateSchema,
-    PrepostoLocalidadeSchema,
-    PrepostoLocalidadeCreateSchema,
-    PrepostoLocalidadeUpdateSchema,
-    PrepostoLookupResponseSchema,
 )
+from app.schemas.prepostos import PrepostoLocationPayloadSchema
 
 prepostos_bp = Blueprint("prepostos", __name__, url_prefix="/prepostos")
 
@@ -62,7 +56,7 @@ def clear_other_principais(preposto_id, contato_id=None):
 @prepostos_bp.post("")
 def create_preposto():
     try:
-        payload = PrepostoCreateSchema().load(request.get_json() or {})
+        payload = PrepostoPayloadSchema().load(request.get_json() or {})
     except ValidationError as err:
         return json_error("Dados inválidos para criação do preposto.", 422, err.messages)
 
@@ -119,7 +113,7 @@ def update_preposto(preposto_id):
         return json_error("Preposto não encontrado.", 404)
 
     try:
-        payload = PrepostoUpdateSchema().load(request.get_json() or {}, partial=True)
+        payload = request.get_json()
     except ValidationError as err:
         return json_error("Dados inválidos para atualização do preposto.", 422, err.messages)
 
@@ -158,10 +152,7 @@ def create_preposto_contato(preposto_id):
     if not preposto:
         return json_error("Preposto não encontrado.", 404)
 
-    try:
-        payload = PrepostoContatoCreateSchema().load(request.get_json() or {})
-    except ValidationError as err:
-        return json_error("Dados inválidos para criação do contato.", 422, err.messages)
+    payload = request.get_json()
 
     contato = PrepostoContact(
         preposto_id=preposto.id,
@@ -193,10 +184,7 @@ def update_preposto_contato(preposto_id, contato_id):
     if not contato:
         return json_error("Contato não encontrado para este preposto.", 404)
 
-    try:
-        payload = PrepostoContatoUpdateSchema().load(request.get_json() or {}, partial=True)
-    except ValidationError as err:
-        return json_error("Dados inválidos para atualização do contato.", 422, err.messages)
+    payload = request.get_json()
 
     if "nome" in payload:
         contato.nome = payload["nome"].strip()
@@ -242,10 +230,7 @@ def create_preposto_localidade(preposto_id):
     if not preposto:
         return json_error("Preposto não encontrado.", 404)
 
-    try:
-        payload = PrepostoLocalidadeCreateSchema().load(request.get_json() or {})
-    except ValidationError as err:
-        return json_error("Dados inválidos para criação da localidade.", 422, err.messages)
+    payload = request.get_json()
 
     localidade = PrepostoLocation(
         preposto_id=preposto.id,
@@ -266,7 +251,7 @@ def create_preposto_localidade(preposto_id):
     db.session.add(localidade)
     db.session.commit()
 
-    return jsonify(PrepostoLocalidadeSchema().dump(localidade)), 201
+    return jsonify(PrepostoLocationPayloadSchema().dump(localidade)), 201
 
 
 @prepostos_bp.patch("/<uuid:preposto_id>/localidades/<uuid:localidade_id>")
@@ -279,10 +264,7 @@ def update_preposto_localidade(preposto_id, localidade_id):
     if not localidade:
         return json_error("Localidade não encontrada para este preposto.", 404)
 
-    try:
-        payload = PrepostoLocalidadeUpdateSchema().load(request.get_json() or {}, partial=True)
-    except ValidationError as err:
-        return json_error("Dados inválidos para atualização da localidade.", 422, err.messages)
+    payload = request.get_json()
 
     for field in [
         "cidade",
@@ -309,7 +291,7 @@ def update_preposto_localidade(preposto_id, localidade_id):
 
     db.session.commit()
 
-    return jsonify(PrepostoLocalidadeSchema().dump(localidade)), 200
+    return jsonify(PrepostoLocationPayloadSchema().dump(localidade)), 200
 
 
 @prepostos_bp.delete("/<uuid:preposto_id>/localidades/<uuid:localidade_id>")
@@ -424,4 +406,4 @@ def lookup_prepostos():
         "total": len(items),
     }
 
-    return jsonify(PrepostoLookupResponseSchema().dump(payload)), 200
+    return jsonify(payload), 200

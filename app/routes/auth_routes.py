@@ -4,7 +4,9 @@ import re
 from flask import Blueprint, g, jsonify, request
 from sqlalchemy.exc import IntegrityError
 
-from ..auth import auth_required, decode_token, generate_tokens, serialize_identity
+from app.schemas.identity import UserSchema
+
+from ..auth import auth_required, decode_token, generate_tokens
 from ..extensions import db
 from ..models import Organization, RefreshToken, User
 from ..schemas.auth import RegisterSchema
@@ -54,18 +56,18 @@ def register():
         db.session.rollback()
         return jsonify({"error": "Conflito ao criar usuário/organização"}), 409
 
-    return jsonify({"user": serialize_identity(user), "tokens": generate_tokens(user)}), 201
+    return jsonify({"user": UserSchema().dump(user), "tokens": generate_tokens(user)}), 201
 
 
 @auth_bp.post("/login")
 def login():
     payload = request.get_json(force=True)
 
-    user = User.query.filter_by(email=payload["email"], ativo=True).first()
+    user = User.query.filter_by(email=payload["email"], active=True).first()
     if not user or not user.check_password(payload["password"]):
         return jsonify({"error": "Invalid credentials"}), 401
 
-    return jsonify({"user": serialize_identity(user), "tokens": generate_tokens(user)})
+    return jsonify({"user": UserSchema().dump(user), "tokens": generate_tokens(user)})
 
 
 @auth_bp.post("/refresh")

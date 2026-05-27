@@ -13,7 +13,6 @@ from .clients import (
     ClientSummarySchema,
     ClientPayloadSchema,
     ClientContactPayloadSchema,
-    ClientListQuerySchema,
     ClientUpdateSchema
 )
 from .prepostos import (

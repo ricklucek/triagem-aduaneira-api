@@ -4,23 +4,13 @@ from functools import wraps
 import jwt
 from flask import current_app, g, jsonify, request
 
+from app.schemas.identity import UserSchema
+
 from .extensions import db
 from .models import RefreshToken, User
 
 
 ADMIN_ROLE = "admin"
-
-
-def serialize_identity(identity) -> dict:
-    return {
-        "id": str(identity.id),
-        "nome": identity.nome,
-        "email": identity.email,
-        "role": identity.role,
-        "setor": identity.setor,
-        "tipo": "user",
-        "organizationId": str(identity.organization_id) if identity.organization_id else None,
-    }
 
 
 def resolve_identity(principal_id: str):
@@ -88,12 +78,12 @@ def auth_required(fn):
             return jsonify({"error": "Invalid access token"}), 401
 
         identity = resolve_identity(payload["sub"])
-        if not identity or not identity.ativo:
+        if not identity or not identity.active:
             return jsonify({"error": "User not found or inactive"}), 401
 
         g.current_user = identity
         g.current_user_type = "admin" if identity.role == ADMIN_ROLE else "user"
-        g.current_identity = serialize_identity(identity)
+        g.current_identity = UserSchema().dump(identity)
         return fn(*args, **kwargs)
 
     return wrapper
