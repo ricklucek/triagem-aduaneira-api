@@ -633,6 +633,36 @@ class DashboardMetricsService:
         Resumo para cards principais do dashboard.
         """
 
+        now = datetime.now()
+
+        # Início do mês atual
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        # Início do próximo mês
+        if month_start.month == 12:
+            next_month_start = month_start.replace(
+                year=month_start.year + 1,
+                month=1,
+            )
+        else:
+            next_month_start = month_start.replace(
+                month=month_start.month + 1,
+            )
+
+        # Início da semana atual
+        # weekday(): segunda = 0, terça = 1, ..., domingo = 6
+        week_start = (now - timedelta(days=now.weekday())).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+
+        # Início da próxima semana
+        next_week_start = week_start + timedelta(days=7)
+
+        outdated_limit = now - timedelta(days=365)
+
         scope_query = self._apply_common_scope_filters(
             db.session.query(Scope),
             status=status,
@@ -640,13 +670,32 @@ class DashboardMetricsService:
             date_to=date_to,
         )
 
-        outdated_scopes_count = scope_query.filter(Scope.created_at < datetime.now() - timedelta(days=365)).count()
+        outdated_scopes_count = (
+            scope_query
+            .filter(Scope.created_at < outdated_limit)
+            .count()
+        )
+
+        month_created_scopes_count = (
+            scope_query
+            .filter(Scope.created_at >= month_start)
+            .filter(Scope.created_at < next_month_start)
+            .count()
+        )
+
+        week_created_scopes_count = (
+            scope_query
+            .filter(Scope.created_at >= week_start)
+            .filter(Scope.created_at < next_week_start)
+            .count()
+        )
 
         service_query = (
             db.session.query(ScopeService)
             .join(Scope, Scope.id == ScopeService.scope_id)
             .filter(ScopeService.enabled.is_(True))
         )
+
         service_query = self._apply_common_scope_filters(
             service_query,
             status=status,
@@ -659,6 +708,7 @@ class DashboardMetricsService:
             .join(Scope, Scope.id == ScopeService.scope_id)
             .filter(ScopeService.enabled.is_(True))
         )
+
         amount_query = self._apply_common_scope_filters(
             amount_query,
             status=status,
@@ -671,6 +721,7 @@ class DashboardMetricsService:
             .join(Scope, Scope.id == ScopeService.scope_id)
             .filter(ScopeService.enabled.is_(True))
         )
+
         distinct_services_query = self._apply_common_scope_filters(
             distinct_services_query,
             status=status,
@@ -681,6 +732,8 @@ class DashboardMetricsService:
         return {
             "totalScopes": scope_query.count(),
             "outdatedScopes": outdated_scopes_count,
+            "monthCreatedScopes": month_created_scopes_count,
+            "weekCreatedScopes": week_created_scopes_count,
             "totalEnabledServices": service_query.count(),
             "totalDistinctServices": int(distinct_services_query.scalar() or 0),
             "totalServicesAmount": self._money(amount_query.scalar()) or 0,
