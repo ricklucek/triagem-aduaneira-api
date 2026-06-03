@@ -4,14 +4,6 @@ from marshmallow import ValidationError
 
 from .config import Config
 from .extensions import db
-from .routes.auth_routes import auth_bp
-from .routes.dashboard_routes import dashboard_bp
-from .routes.scope_routes import scope_bp
-from .routes.user_routes import user_bp
-from .routes.admin_routes import admin_bp
-from .routes.prepostos import prepostos_bp
-from .routes.client_routes import client_bp
-from .routes.organization_routes import organization_bp
 
 
 def create_app(config_object=Config):
@@ -20,12 +12,23 @@ def create_app(config_object=Config):
 
     CORS(
         app,
-        resources={r"/*": {"origins": "https://www.portalcl.online"}},
+        resources={r"/*": {"origins": "http://localhost:3000"}},
         allow_headers=["Content-Type", "Authorization"],
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     )
 
     db.init_app(app)
+
+    from .routes.auth_routes import auth_bp
+    from .routes.dashboard_routes import dashboard_bp
+    from .routes.scope_routes import scope_bp
+    from .routes.user_routes import user_bp
+    from .routes.admin_routes import admin_bp
+    from .routes.prepostos import prepostos_bp
+    from .routes.client_routes import client_bp
+    from .routes.organization_routes import organization_bp
+
+    from .routes.processes_routes import app as processes_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(scope_bp)
@@ -35,6 +38,7 @@ def create_app(config_object=Config):
     app.register_blueprint(prepostos_bp)
     app.register_blueprint(client_bp)
     app.register_blueprint(organization_bp)
+    app.register_blueprint(processes_bp)
 
     @app.get("/health")
     def health():
