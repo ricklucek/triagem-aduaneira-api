@@ -12,7 +12,7 @@ def create_app(config_object=Config):
 
     CORS(
         app,
-        resources={r"/*": {"origins": "http://localhost:3000"}},
+        resources={r"/*": {"origins": "https://www.portalcl.online"}},
         allow_headers=["Content-Type", "Authorization"],
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     )
