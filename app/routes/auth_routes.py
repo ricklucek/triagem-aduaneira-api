@@ -3,6 +3,7 @@ import re
 
 from flask import Blueprint, g, jsonify, request
 from sqlalchemy.exc import IntegrityError
+from werkzeug.security import generate_password_hash
 
 from ..auth import auth_required, decode_token, generate_tokens, serialize_identity
 from ..extensions import db

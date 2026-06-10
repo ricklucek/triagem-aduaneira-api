@@ -834,3 +834,186 @@ class ImportProcessOutputSchema(Schema):
 
     createdAt = fields.DateTime(allow_none=True)
     updatedAt = fields.DateTime(allow_none=True)
+
+class ImportProcessShipmentCreateSchema(Schema):
+    estimated_departure_at = fields.Date(required=False, allow_none=True)
+    estimated_arrival_at = fields.Date(required=False, allow_none=True)
+
+    actual_departure_at = fields.Date(required=False, allow_none=True)
+    actual_arrival_at = fields.Date(required=False, allow_none=True)
+
+    origin = fields.String(required=False, allow_none=True)
+    destination = fields.String(required=False, allow_none=True)
+
+    vessel_name = fields.String(required=False, allow_none=True)
+    voyage_number = fields.String(required=False, allow_none=True)
+
+    master_bl = fields.String(required=False, allow_none=True)
+    house_bl = fields.String(required=False, allow_none=True)
+
+    container_number = fields.String(required=False, allow_none=True)
+
+    notes = fields.String(required=False, allow_none=True)
+
+
+class ImportProcessFreightCreateSchema(Schema):
+    international_freight_responsibility = fields.String(
+        required=True,
+        validate=validate.OneOf(INTERNATIONAL_FREIGHT_RESPONSIBILITIES),
+    )
+
+    quote_status = fields.String(
+        required=True,
+        validate=validate.OneOf(FREIGHT_QUOTE_STATUSES),
+    )
+
+    provider_name = fields.String(required=False, allow_none=True)
+
+    quoted_amount = fields.Decimal(
+        required=False,
+        allow_none=True,
+        as_string=True,
+        places=2,
+    )
+
+    quoted_currency = fields.String(
+        required=False,
+        allow_none=True,
+        validate=validate.Length(equal=3),
+    )
+
+    quote_requested_at = fields.DateTime(required=False, allow_none=True)
+    quote_approved_at = fields.DateTime(required=False, allow_none=True)
+    quote_rejected_at = fields.DateTime(required=False, allow_none=True)
+
+    notes = fields.String(required=False, allow_none=True)
+
+    @validates_schema
+    def validate_freight(self, data, **kwargs):
+        quote_status = data.get("quote_status")
+        responsibility = data.get("international_freight_responsibility")
+
+        if quote_status == "approved" and responsibility == "not_applicable":
+            raise ValidationError(
+                {
+                    "international_freight_responsibility": [
+                        "Quando quote_status for approved, international_freight_responsibility não pode ser not_applicable."
+                    ]
+                }
+            )
+
+        if data.get("quoted_amount") is not None and not data.get("quoted_currency"):
+            raise ValidationError(
+                {
+                    "quoted_currency": [
+                        "quoted_currency é obrigatório quando quoted_amount for informado."
+                    ]
+                }
+            )
+
+
+class ImportProcessServiceCreateSchema(Schema):
+    service_type = fields.String(
+        required=True,
+        validate=validate.OneOf(IMPORT_PROCESS_SERVICE_TYPES),
+    )
+
+    status = fields.String(
+        required=True,
+        validate=validate.OneOf(IMPORT_PROCESS_SERVICE_STATUSES),
+    )
+
+    started_at = fields.DateTime(required=False, allow_none=True)
+    completed_at = fields.DateTime(required=False, allow_none=True)
+    cancelled_at = fields.DateTime(required=False, allow_none=True)
+
+    notes = fields.String(required=False, allow_none=True)
+
+
+class ImportProcessTagCreateSchema(Schema):
+    tag_type = fields.String(
+        required=True,
+        validate=validate.OneOf(IMPORT_PROCESS_TAG_TYPES),
+    )
+
+
+class ImportProcessCreateSchema(Schema):
+    process_number = fields.String(
+        required=True,
+        validate=validate.Length(min=1, max=100),
+    )
+
+    internal_reference = fields.String(
+        required=False,
+        allow_none=True,
+        validate=validate.Length(max=100),
+    )
+
+    client_reference = fields.String(
+        required=False,
+        allow_none=True,
+        validate=validate.Length(max=100),
+    )
+
+    client_id = fields.String(required=True)
+
+    opened_at = fields.DateTime(required=True)
+
+    current_stage = fields.String(
+        required=True,
+        validate=validate.OneOf(IMPORT_PROCESS_STAGES),
+    )
+
+    metadata_json = fields.Dict(required=False, allow_none=True)
+
+    notes = fields.String(required=False, allow_none=True)
+
+    shipment = fields.Nested(
+        ImportProcessShipmentCreateSchema,
+        required=False,
+        allow_none=True,
+    )
+
+    freight = fields.Nested(
+        ImportProcessFreightCreateSchema,
+        required=False,
+        allow_none=True,
+    )
+
+    services = fields.List(
+        fields.Nested(ImportProcessServiceCreateSchema),
+        required=False,
+        load_default=list,
+    )
+
+    tags = fields.List(
+        fields.Nested(ImportProcessTagCreateSchema),
+        required=False,
+        load_default=list,
+    )
+
+    @validates_schema
+    def validate_unique_items(self, data, **kwargs):
+        services = data.get("services") or []
+        tags = data.get("tags") or []
+
+        service_types = [item["service_type"] for item in services]
+        tag_types = [item["tag_type"] for item in tags]
+
+        if len(service_types) != len(set(service_types)):
+            raise ValidationError(
+                {
+                    "services": [
+                        "Não é permitido enviar serviços duplicados para o mesmo processo."
+                    ]
+                }
+            )
+
+        if len(tag_types) != len(set(tag_types)):
+            raise ValidationError(
+                {
+                    "tags": [
+                        "Não é permitido enviar tags duplicadas para o mesmo processo."
+                    ]
+                }
+            )

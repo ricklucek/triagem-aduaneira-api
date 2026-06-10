@@ -77,7 +77,7 @@ class ImportProcess(Base):
         index=True,
     )
 
-    opened_at = Column(Date, nullable=False)
+    opened_at = Column(DateTime, nullable=False)
 
     current_stage = Column(
         Enum(
@@ -104,6 +104,8 @@ class ImportProcess(Base):
         default=datetime.utcnow,
         onupdate=datetime.utcnow,
     )
+
+    metadata_json = Column(JSON, nullable=False, default=dict)
 
     client = relationship(
         "Client",

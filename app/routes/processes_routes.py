@@ -1,8 +1,12 @@
 from flask import Blueprint, jsonify, request
 from marshmallow import ValidationError
 
+from sqlalchemy.exc import IntegrityError
+
+from app.extensions import db
+
 from app.schemas.process import (
-    ImportProcessListQuerySchema,
+    ImportProcessCreateSchema,
     ImportProcessSchema,
 )
 from app.services.processes import ImportProcessService
@@ -13,6 +17,54 @@ app = Blueprint(
     __name__,
     url_prefix="/tracker/import-processes",
 )
+
+@app.post("")
+def create_import_process():
+    try:
+        payload = ImportProcessCreateSchema().load(request.json or {})
+    except ValidationError as err:
+        return jsonify(
+            {
+                "message": "Invalid request payload.",
+                "errors": err.messages,
+            }
+        ), 400
+
+    try:
+        process = ImportProcessService.create_import_process(payload)
+
+        return jsonify(
+            ImportProcessSchema().dump(process)
+        ), 201
+
+    except ValueError as err:
+        db.session.rollback()
+
+        return jsonify(
+            {
+                "message": str(err),
+            }
+        ), 400
+
+    except IntegrityError as err:
+        db.session.rollback()
+
+        return jsonify(
+            {
+                "message": "Could not create import process due to duplicated or invalid database data.",
+                "detail": str(err.orig),
+            }
+        ), 409
+
+    except Exception as err:
+        db.session.rollback()
+
+        return jsonify(
+            {
+                "message": "Unexpected error while creating import process.",
+                "detail": str(err),
+            }
+        ), 500
 
 
 @app.get("")
