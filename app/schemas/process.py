@@ -9,7 +9,10 @@ from app.models import (
     ImportProcessTask,
     ImportProcessTag,
 )
+from app.models.process import ImportProcessStageEnum
 from app.schemas.client import ClientSchema
+
+from marshmallow_enum import EnumField
 
 IMPORT_PROCESS_STAGES = (
     "pre_shipment",
@@ -137,6 +140,8 @@ class ImportProcessSchema(SQLAlchemyAutoSchema):
         ClientSchema,
         dump_only=True,
     )
+
+    current_stage = EnumField(ImportProcessStageEnum, by_value=True)
 
 class ImportProcessListQuerySchema(Schema):
     q = fields.String(required=False)
