@@ -9,6 +9,7 @@ from app.models import (
     ImportProcessTask,
     ImportProcessTag,
 )
+from app.schemas.client import ClientSchema
 
 IMPORT_PROCESS_STAGES = (
     "pre_shipment",
@@ -96,6 +97,12 @@ class ImportProcessTagSchema(SQLAlchemyAutoSchema):
         include_fk = True
 
 class ImportProcessSchema(SQLAlchemyAutoSchema):
+    
+    class Meta:
+        model = ImportProcess
+        load_instance = True
+        include_fk = True
+
     shipments = fields.Nested(
         ImportProcessShipmentSchema,
         many=True,
@@ -126,10 +133,10 @@ class ImportProcessSchema(SQLAlchemyAutoSchema):
         dump_only=True,
     )
 
-    class Meta:
-        model = ImportProcess
-        load_instance = True
-        include_fk = True
+    client = fields.Nested(
+        ClientSchema,
+        dump_only=True,
+    )
 
 class ImportProcessListQuerySchema(Schema):
     q = fields.String(required=False)
