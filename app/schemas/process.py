@@ -7,6 +7,7 @@ from app.models import (
     ImportProcessFreight,
     ImportProcessService,
     ImportProcessTask,
+    ImportProcessTaskChecklistItem,
     ImportProcessTag,
 )
 from app.models.process import ImportProcessStageEnum
@@ -65,6 +66,19 @@ FREIGHT_QUOTE_STATUSES = (
     "cancelled",
 )
 
+IMPORT_PROCESS_SERVICE_RESPONSIBILITIES = (
+    "internal",
+    "client",
+    "third_party",
+    "not_applicable",
+)
+
+class ImportProcessTaskChecklistItemSchema(SQLAlchemyAutoSchema):
+    class Meta:
+        model = ImportProcessTaskChecklistItem
+        load_instance = True
+        include_fk = True
+
 class ImportProcessShipmentSchema(SQLAlchemyAutoSchema):
     class Meta:
         model = ImportProcessShipment
@@ -91,6 +105,12 @@ class ImportProcessTaskSchema(SQLAlchemyAutoSchema):
         model = ImportProcessTask
         load_instance = True
         include_fk = True
+
+    checklist_items = fields.Nested(
+        ImportProcessTaskChecklistItemSchema,
+        many=True,
+        dump_only=True,
+    )
 
 
 class ImportProcessTagSchema(SQLAlchemyAutoSchema):
@@ -421,12 +441,6 @@ class ImportProcessCreateSchema(Schema):
         load_default=list,
     )
 
-    tasks = fields.List(
-        fields.Nested(ImportProcessTaskCreateSchema),
-        required=False,
-        load_default=list,
-    )
-
     tags = fields.List(
         fields.Nested(ImportProcessTagCreateSchema),
         required=False,
@@ -544,6 +558,17 @@ class ImportProcessServiceUpdateSchema(Schema):
     service_type = fields.String(
         required=False,
         validate=validate.OneOf(IMPORT_PROCESS_SERVICE_TYPES),
+    )
+
+    responsibility = fields.String(
+        required=False,
+        validate=validate.OneOf(IMPORT_PROCESS_SERVICE_RESPONSIBILITIES),
+    )
+
+    responsible_name = fields.String(
+        allow_none=True,
+        required=False,
+        validate=validate.Length(max=255),
     )
 
     status = fields.String(
@@ -930,17 +955,40 @@ class ImportProcessServiceCreateSchema(Schema):
         validate=validate.OneOf(IMPORT_PROCESS_SERVICE_TYPES),
     )
 
+    responsibility = fields.String(
+        load_default="internal",
+        validate=validate.OneOf(IMPORT_PROCESS_SERVICE_RESPONSIBILITIES),
+    )
+
+    responsible_name = fields.String(
+        allow_none=True,
+        required=False,
+        validate=validate.Length(max=255),
+    )
+
     status = fields.String(
-        required=True,
+        load_default="pending",
         validate=validate.OneOf(IMPORT_PROCESS_SERVICE_STATUSES),
     )
 
-    started_at = fields.DateTime(required=False, allow_none=True)
-    completed_at = fields.DateTime(required=False, allow_none=True)
-    cancelled_at = fields.DateTime(required=False, allow_none=True)
+    started_at = fields.DateTime(allow_none=True, required=False)
+    completed_at = fields.DateTime(allow_none=True, required=False)
+    cancelled_at = fields.DateTime(allow_none=True, required=False)
 
-    notes = fields.String(required=False, allow_none=True)
+    notes = fields.String(allow_none=True, required=False)
 
+    @validates_schema
+    def validate_responsible_name(self, data, **kwargs):
+        responsibility = data.get("responsibility")
+
+        if responsibility == "third_party" and not data.get("responsible_name"):
+            raise ValidationError(
+                {
+                    "responsible_name": [
+                        "responsible_name is required when responsibility is third_party."
+                    ]
+                }
+            )
 
 class ImportProcessTagCreateSchema(Schema):
     tag_type = fields.String(
@@ -967,7 +1015,7 @@ class ImportProcessCreateSchema(Schema):
         validate=validate.Length(max=100),
     )
 
-    client_id = fields.String(required=True)
+    client_id = fields.UUID(required=True)
 
     opened_at = fields.DateTime(required=True)
 

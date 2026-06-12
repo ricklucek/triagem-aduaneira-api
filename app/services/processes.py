@@ -12,6 +12,30 @@ from app.models import (
     ImportProcessService as ImportProcessServiceModel,
     ImportProcessTag,
 )
+from app.models.process import ImportProcessTask
+from app.services.import_process_task_builder import create_tasks_for_process
+
+def normalize_services_payload(services_payload: list[dict]) -> list[dict]:
+    normalized_by_type = {
+        item["service_type"]: dict(item)
+        for item in services_payload
+    }
+
+    normalized_by_type["customs_clearance"] = {
+        **normalized_by_type.get("customs_clearance", {}),
+        "service_type": "customs_clearance",
+        "responsibility": "internal",
+        "status": normalized_by_type.get("customs_clearance", {}).get("status", "pending"),
+    }
+
+    normalized_by_type["financial"] = {
+        **normalized_by_type.get("financial", {}),
+        "service_type": "financial",
+        "responsibility": "internal",
+        "status": normalized_by_type.get("financial", {}).get("status", "pending"),
+    }
+
+    return list(normalized_by_type.values())
 
 
 class ImportProcessService:
@@ -43,7 +67,7 @@ class ImportProcessService:
             client_id=payload["client_id"],
             opened_at=payload["opened_at"],
             current_stage=payload.get("current_stage", "pre_shipment"),
-            metadata_json=payload.get("metadata_json"),
+            metadata_json=payload.get("metadata_json") or {},
             notes=payload.get("notes"),
         )
 
@@ -133,12 +157,14 @@ class ImportProcessService:
                 quote_status="not_requested",
             )
 
-        services_payload = payload.get("services") or []
+        services_payload = normalize_services_payload(payload.get("services") or [])
 
         for service_payload in services_payload:
             process.services.append(
                 ImportProcessServiceModel(
                     service_type=service_payload["service_type"],
+                    responsibility=service_payload.get("responsibility", "internal"),
+                    responsible_name=service_payload.get("responsible_name"),
                     status=service_payload.get("status", "pending"),
                     started_at=service_payload.get("started_at"),
                     completed_at=service_payload.get("completed_at"),
@@ -157,6 +183,10 @@ class ImportProcessService:
             )
 
         db.session.add(process)
+        db.session.flush()
+
+        create_tasks_for_process(process, payload)
+
         db.session.commit()
 
         created_process = (
@@ -166,7 +196,7 @@ class ImportProcessService:
                 selectinload(ImportProcess.shipments),
                 selectinload(ImportProcess.freight),
                 selectinload(ImportProcess.services),
-                selectinload(ImportProcess.tasks),
+                selectinload(ImportProcess.tasks).selectinload(ImportProcessTask.checklist_items),
                 selectinload(ImportProcess.tags),
             )
             .filter(ImportProcess.id == process.id)
@@ -192,7 +222,7 @@ class ImportProcessService:
                 selectinload(ImportProcess.shipments),
                 selectinload(ImportProcess.freight),
                 selectinload(ImportProcess.services),
-                selectinload(ImportProcess.tasks),
+                selectinload(ImportProcess.tasks).selectinload(ImportProcessTask.checklist_items),
                 selectinload(ImportProcess.tags),
             )
         )
@@ -253,7 +283,7 @@ class ImportProcessService:
                 selectinload(ImportProcess.shipments),
                 selectinload(ImportProcess.freight),
                 selectinload(ImportProcess.services),
-                selectinload(ImportProcess.tasks),
+                selectinload(ImportProcess.tasks).selectinload(ImportProcessTask.checklist_items),
                 selectinload(ImportProcess.tags),
             )
             .filter(ImportProcess.id == process_id)

@@ -60,6 +60,13 @@ class FreightQuoteStatusEnum(str, enum.Enum):
     REJECTED = "rejected"
     CANCELLED = "cancelled"
 
+@enum.unique
+class ImportProcessServiceResponsibilityEnum(str, enum.Enum):
+    INTERNAL = "internal"
+    CLIENT = "client"
+    THIRD_PARTY = "third_party"
+    NOT_APPLICABLE = "not_applicable"
+
 class ImportProcess(Base):
     __tablename__ = "import_processes"
 
@@ -342,6 +349,19 @@ class ImportProcessService(Base):
         back_populates="services",
     )
 
+    responsibility = Column(
+        Enum(
+            ImportProcessServiceResponsibilityEnum,
+            name="import_process_service_responsibility_enum",
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
+        ),
+        nullable=False,
+        default=ImportProcessServiceResponsibilityEnum.INTERNAL.value,
+        index=True,
+    )
+
+    responsible_name = Column(String(255), nullable=True)
+
     __table_args__ = (
         UniqueConstraint(
             "import_process_id",
@@ -370,6 +390,16 @@ class ImportProcessTask(Base):
         index=True,
     )
 
+    stage = Column(
+        Enum(
+            ImportProcessStageEnum,
+            name="import_process_task_stage_enum",
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
+        ),
+        nullable=False,
+        index=True,
+    )
+
     service_type = Column(
         Enum(
             ImportProcessServiceTypeEnum,
@@ -379,6 +409,8 @@ class ImportProcessTask(Base):
         nullable=False,
         index=True,
     )
+
+    task_key = Column(String(100), nullable=False, index=True)
 
     name = Column(String(255), nullable=False)
 
@@ -412,11 +444,7 @@ class ImportProcessTask(Base):
         index=True,
     )
 
-    created_at = Column(
-        DateTime,
-        nullable=False,
-        default=datetime.utcnow,
-    )
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     updated_at = Column(
         DateTime,
@@ -436,7 +464,25 @@ class ImportProcessTask(Base):
         lazy="joined",
     )
 
+    checklist_items = relationship(
+        "ImportProcessTaskChecklistItem",
+        back_populates="task",
+        cascade="all, delete-orphan",
+        order_by="ImportProcessTaskChecklistItem.position.asc()",
+        lazy="selectin",
+    )
+
     __table_args__ = (
+        UniqueConstraint(
+            "import_process_id",
+            "task_key",
+            name="uq_import_process_task_key",
+        ),
+        Index(
+            "ix_import_process_tasks_process_stage",
+            "import_process_id",
+            "stage",
+        ),
         Index(
             "ix_import_process_tasks_process_status",
             "import_process_id",
@@ -452,9 +498,6 @@ class ImportProcessTask(Base):
             "due_date",
         ),
     )
-
-    def __repr__(self):
-        return f"<ImportProcessTask id={self.id} name={self.name}>"
     
 class ImportProcessTag(Base):
     __tablename__ = "import_process_tags"
@@ -499,3 +542,46 @@ class ImportProcessTag(Base):
 
     def __repr__(self):
         return f"<ImportProcessTag id={self.id} tag_type={self.tag_type}>"
+    
+
+class ImportProcessTaskChecklistItem(Base):
+    __tablename__ = "import_process_task_checklist_items"
+
+    id = Column(Integer, primary_key=True)
+
+    task_id = Column(
+        Integer,
+        ForeignKey("import_process_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    item_key = Column(String(100), nullable=False, index=True)
+    label = Column(String(255), nullable=False)
+
+    status = Column(
+        Enum(
+            ImportProcessTaskStatusEnum,
+            name="import_process_task_checklist_item_status_enum",
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
+        ),
+        nullable=False,
+        default=ImportProcessTaskStatusEnum.PENDING.value,
+        index=True,
+    )
+
+    required = Column(Boolean, nullable=False, default=True)
+    position = Column(Integer, nullable=False, default=0)
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    task = relationship("ImportProcessTask", back_populates="checklist_items")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "task_id",
+            "item_key",
+            name="uq_import_process_task_checklist_item_key",
+        ),
+    )
