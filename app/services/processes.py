@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from sqlalchemy.orm import selectinload
 
 from app.extensions import db
@@ -14,6 +14,162 @@ from app.models import (
 )
 from app.models.process import ImportProcessTask
 from app.services.import_process_task_builder import create_tasks_for_process
+
+DEPARTMENT_LABELS = {
+    "customs_clearance": "Despacho Aduaneiro",
+    "international_freight": "Frete Internacional",
+    "international_insurance": "Seguro Internacional",
+    "road_freight": "Frete Rodoviário",
+    "financial": "Financeiro",
+}
+
+
+DEPARTMENT_BOARD_COLUMNS = {
+    # Conforme o rastreador principal e a visão do Despacho Aduaneiro
+    "customs_clearance": [
+        {
+            "key": "pre_shipment",
+            "label": "Pré Embarque",
+            "type": "stage",
+        },
+        {
+            "key": "shipment_in_transit",
+            "label": "Embarque e Trânsito",
+            "type": "stage",
+        },
+        {
+            "key": "customs_clearance",
+            "label": "Chegada e Alfândega",
+            "type": "stage",
+        },
+        {
+            "key": "released_for_delivery",
+            "label": "Liberação e Entrega",
+            "type": "stage",
+        },
+    ],
+
+    # Conforme fluxo do Lovable para FI
+    "international_freight": [
+        {
+            "key": "abertura_processo",
+            "label": "Abertura de Processo",
+            "type": "task_key",
+        },
+        {
+            "key": "booking",
+            "label": "Booking",
+            "type": "task_key",
+        },
+        {
+            "key": "confirmacao_embarque",
+            "label": "Confirmação de Embarque",
+            "type": "task_key",
+        },
+        {
+            "key": "follow_agente",
+            "label": "Follow Agente",
+            "type": "task_key",
+        },
+        {
+            "key": "recebimento_bl",
+            "label": "Recebimento BL",
+            "type": "task_key",
+        },
+        {
+            "key": "confirmacao_atracacao",
+            "label": "Confirmação de Atracação",
+            "type": "task_key",
+        },
+        {
+            "key": "presenca_carga",
+            "label": "Presença de Carga",
+            "type": "task_key",
+        },
+        {
+            "key": "pagamento_taxas_fi",
+            "label": "Pagamento Taxas FI",
+            "type": "task_key",
+        },
+    ],
+
+    # Conforme fluxo do Lovable para seguro
+    "international_insurance": [
+        {
+            "key": "averbar_seguro",
+            "label": "Averbar Seguro",
+            "type": "task_key",
+        },
+        {
+            "key": "verificar_avarias",
+            "label": "Verificar Avarias",
+            "type": "task_key",
+        },
+    ],
+
+    # Conforme fluxo do Lovable para Frete Rodoviário
+    "road_freight": [
+        {
+            "key": "recebimento_agendamento",
+            "label": "Recebimento / Agendamento",
+            "type": "task_key",
+        },
+        {
+            "key": "coleta",
+            "label": "Coleta",
+            "type": "task_key",
+        },
+        {
+            "key": "entrega",
+            "label": "Entrega",
+            "type": "task_key",
+        },
+        {
+            "key": "devolucao_container",
+            "label": "Devolução Container",
+            "type": "task_key",
+        },
+        {
+            "key": "finalizacao_processo",
+            "label": "Finalização do Processo",
+            "type": "task_key",
+        },
+    ],
+
+    # Conforme fluxo do Lovable para financeiro
+    "financial": [
+        {
+            "key": "em_processo_faturamento",
+            "label": "Em Processo de Faturamento",
+            "type": "task_key",
+        },
+        {
+            "key": "faturado",
+            "label": "Faturado",
+            "type": "task_key",
+        },
+        {
+            "key": "processo_encerrado",
+            "label": "Processo Encerrado",
+            "type": "task_key",
+        },
+    ],
+}
+
+# Mapeia algumas task_keys atuais do backend para colunas do Lovable.
+# Isso permite a API funcionar agora, mesmo antes de renomearmos todas as task_keys.
+DEPARTMENT_TASK_COLUMN_ALIASES = {
+    "road_freight": {
+        "contactar_transportadora": "recebimento_agendamento",
+        "agendamento_carregamento": "recebimento_agendamento",
+        "formalizar_entrega": "entrega",
+        "devolucao_container": "devolucao_container",
+    },
+    "financial": {},
+    "international_freight": {},
+    "international_insurance": {},
+    "customs_clearance": {},
+}
 
 def normalize_services_payload(services_payload: list[dict]) -> list[dict]:
     normalized_by_type = {
@@ -289,3 +445,103 @@ class ImportProcessService:
             .filter(ImportProcess.id == process_id)
             .first()
         )
+    
+    @staticmethod
+    def list_department_board(
+        *,
+        department: str,
+        search: str | None = None,
+        tag: str | None = None,
+        include_completed: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ):
+        if department not in DEPARTMENT_BOARD_COLUMNS:
+            raise ValueError("Invalid department.")
+
+        limit = int(limit)
+        offset = int(offset)
+
+        process_ids_query = (
+            db.session.query(ImportProcess.id)
+            .join(
+                ImportProcessTask,
+                ImportProcessTask.import_process_id == ImportProcess.id,
+            )
+            .filter(ImportProcessTask.service_type == department)
+        )
+
+        if not include_completed:
+            process_ids_query = process_ids_query.filter(
+                ImportProcessTask.status != "done"
+            )
+
+        if search:
+            normalized_search = f"%{search.strip()}%"
+
+            process_ids_query = (
+                process_ids_query
+                .join(Client, Client.id == ImportProcess.client_id)
+                .filter(
+                    or_(
+                        ImportProcess.process_number.ilike(normalized_search),
+                        ImportProcess.internal_reference.ilike(normalized_search),
+                        ImportProcess.client_reference.ilike(normalized_search),
+                        Client.razao_social.ilike(normalized_search),
+                        Client.nome_resumido.ilike(normalized_search),
+                    )
+                )
+            )
+
+        if tag:
+            process_ids_query = (
+                process_ids_query
+                .join(
+                    ImportProcessTag,
+                    ImportProcessTag.import_process_id == ImportProcess.id,
+                )
+                .filter(ImportProcessTag.tag_type == tag)
+            )
+
+        process_ids_subquery = (
+            process_ids_query
+            .group_by(ImportProcess.id)
+            .subquery()
+        )
+
+        total = (
+            db.session.query(func.count())
+            .select_from(process_ids_subquery)
+            .scalar()
+        )
+
+        paginated_ids = [
+            row.id
+            for row in (
+                db.session.query(process_ids_subquery.c.id)
+                .join(
+                    ImportProcess,
+                    ImportProcess.id == process_ids_subquery.c.id,
+                )
+                .order_by(
+                    ImportProcess.opened_at.desc(),
+                    ImportProcess.id.desc(),
+                )
+                .limit(limit)
+                .offset(offset)
+                .all()
+            )
+        ]
+
+        processes = (
+            ImportProcess.query
+            .filter(ImportProcess.id.in_(paginated_ids))
+            .all()
+        )
+
+        return {
+            "items": processes,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }

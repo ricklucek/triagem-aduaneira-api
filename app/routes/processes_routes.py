@@ -103,3 +103,39 @@ def get_import_process_by_id(process_id: int):
         ), 404
 
     return jsonify(ImportProcessSchema().dump(process)), 200
+
+@app.get("/department-board/<string:department>")
+def get_import_process_department_board(department: str):
+    filters = request.args
+
+    try:
+        result = ImportProcessService.list_department_board(
+            department=department,
+            search=filters.get("search"),
+            tag=filters.get("tag"),
+            include_completed=filters.get("includeCompleted", "false").lower() == "true",
+            limit=filters.get("limit", 100),
+            offset=filters.get("offset", 0),
+        )
+
+        return jsonify({
+            "items": ImportProcessSchema(many=True).dump(result["items"]),
+            "total": result["total"],
+            "limit": result["limit"],
+            "offset": result["offset"],
+        }), 200
+
+    except ValueError as err:
+        return jsonify(
+            {
+                "message": str(err),
+            }
+        ), 400
+
+    except Exception as err:
+        return jsonify(
+            {
+                "message": "Unexpected error while loading department board.",
+                "detail": str(err),
+            }
+        ), 500
