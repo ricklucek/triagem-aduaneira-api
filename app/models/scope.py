@@ -207,3 +207,30 @@ class ScopeService(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("scope_id", "service_catalog_id", name="uq_scope_service_unique"),
     )
+
+class ScopeTemplate(TimestampMixin, Base):
+    __tablename__ = "scope_template"
+
+    id = uuid_pk()
+
+    organization_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id"),
+        nullable=True,
+        index=True,
+    )
+
+    name = Column(String(128), nullable=False)
+
+    description = Column(String(1024), nullable=True)
+
+    draft = Column(JSON, nullable=False, default=dict)
+
+    created_by_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    created_by = relationship("User", foreign_keys=[created_by_id])

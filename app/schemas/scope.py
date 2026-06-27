@@ -7,6 +7,7 @@ from app.models import (
     ScopeService,
     ScopeVersion,
 )
+from app.models.scope import ScopeTemplate
 from app.schemas.client import ClientSchema
 from app.schemas.user import UserSchema
 
@@ -77,3 +78,10 @@ class ScopeBulkResponsibleSchema(Schema):
     apply_status = fields.List(fields.String(), load_default=[])
     only_active_assignments = fields.Boolean(load_default=True)
     dry_run = fields.Boolean(load_default=True)
+
+class ScopeTemplateSchema(SQLAlchemyAutoSchema):
+
+    class Meta:
+        model = ScopeTemplate
+        load_instance = True
+        include_fk = True

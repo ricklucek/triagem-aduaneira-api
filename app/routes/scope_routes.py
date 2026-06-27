@@ -3,6 +3,8 @@ from datetime import datetime
 from flask import Blueprint, g, jsonify, request
 from sqlalchemy import and_, or_
 
+from app.models.scope import ScopeTemplate
+from app.schemas.scope import ScopeTemplateSchema
 from app.scope_defaults import merge_scope_draft
 
 from ..auth import auth_required
@@ -219,6 +221,55 @@ def count_user_assigned_scopes():
             "count": query_assigned_user_id.count()
         }
     ])
+
+@scope_bp.get("/templates")
+@auth_required
+def get_scope_templates():
+    processor = _processor()
+
+    query = processor.list_organization_scope_templates()
+
+    templates = (
+        query.order_by(ScopeTemplate.updated_at.desc().nullslast(), ScopeTemplate.created_at.desc())
+        .all()
+    )
+
+    return jsonify(ScopeTemplateSchema(many=True).dump(templates))
+
+@scope_bp.post("/templates")
+@auth_required
+def create_scope_template():
+    payload = request.get_json(force=True)
+
+    processor = _processor()
+    draft = processor.normalize_draft(_load_scope_payload())
+
+    template = ScopeTemplate(
+        name=payload.get("name", "Sem Nome"),
+        description=payload.get("description", None),
+        organization_id=g.current_user.organization_id,
+        created_by_id=g.current_user.id,
+    )
+
+    template.draft = draft
+
+    db.session.add(template)
+    db.session.commit()
+
+    return jsonify(ScopeTemplateSchema().dump(template))
+
+@scope_bp.put("/templates/<template_id>")
+@auth_required
+def update_scope_template(template_id: int):
+    processor = _processor()
+    template = processor.template_query_for_current_user().filter(ScopeTemplate.id == template_id).first_or_404()
+    normalized_draft = processor.normalize_draft(_load_scope_payload())
+
+    template.draft = normalized_draft
+
+    db.session.commit()
+
+    return jsonify(ScopeTemplateSchema().dump(template))
 
 
 @scope_bp.get("/<scope_id>")

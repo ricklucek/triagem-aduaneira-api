@@ -9,6 +9,8 @@ from uuid import UUID
 
 from sqlalchemy import and_, distinct, func
 
+from app.models.scope import ScopeTemplate
+
 from ..extensions import db
 from ..models import (
     Client,
@@ -147,6 +149,12 @@ class ScopeDataProcessor:
         query = Scope.query
         if self.organization_id:
             query = query.filter(Scope.organization_id == self.organization_id)
+        return query
+    
+    def template_query_for_current_user(self):
+        query = ScopeTemplate.query
+        if self.organization_id:
+            query = query.filter(ScopeTemplate.organization_id == self.organization_id)
         return query
 
     def build_scope_summary(self, scope: Scope) -> dict:
@@ -998,3 +1006,9 @@ class ScopeDataProcessor:
 
     def sync_scopes(self, scopes: list[Scope], dry_run: bool = False) -> list[ScopeSyncResult]:
         return [self.sync_scope(scope, dry_run=dry_run) for scope in scopes]
+    
+    def list_organization_scope_templates(self):
+        query = ScopeTemplate.query
+        if self.organization_id:
+            query = query.filter(ScopeTemplate.organization_id == self.organization_id)
+        return query
