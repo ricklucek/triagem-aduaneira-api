@@ -67,8 +67,14 @@ def get_scope_metadata():
 @scope_bp.post("")
 @auth_required
 def create_scope():
+    template_id = request.args.get("templateId", None)
     processor = _processor()
-    draft = processor.normalize_draft(_load_scope_payload())
+
+    if template_id:
+        template = processor.template_query_for_current_user().filter(ScopeTemplate.id == template_id).first_or_404()
+        draft = template.draft
+    else:
+        draft = processor.normalize_draft(_load_scope_payload())
 
     scope = Scope(
         organization_id=g.current_user.organization_id,
@@ -257,6 +263,18 @@ def create_scope_template():
     db.session.commit()
 
     return jsonify(ScopeTemplateSchema().dump(template))
+
+@scope_bp.delete("/templates/<template_id>")
+@auth_required
+def delete_scope_template(template_id: int):
+    processor = _processor()
+    template = processor.template_query_for_current_user().filter(ScopeTemplate.id == template_id).first_or_404()
+    
+
+    db.session.delete(template)
+    db.session.commit()
+
+    return jsonify({'deleted': True})
 
 @scope_bp.put("/templates/<template_id>")
 @auth_required
