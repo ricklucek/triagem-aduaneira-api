@@ -275,14 +275,28 @@ def delete_scope_template(template_id: int):
 
     return jsonify({'deleted': True})
 
+@scope_bp.get("/templates/<template_id>")
+@auth_required
+def get_scope_template_by_id(template_id: int):
+    processor = _processor()
+    template = processor.template_query_for_current_user().filter(ScopeTemplate.id == template_id).first_or_404()
+
+    return jsonify(ScopeTemplateSchema().dump(template))
+
 @scope_bp.put("/templates/<template_id>")
 @auth_required
 def update_scope_template(template_id: int):
     processor = _processor()
     template = processor.template_query_for_current_user().filter(ScopeTemplate.id == template_id).first_or_404()
-    normalized_draft = processor.normalize_draft(_load_scope_payload())
 
-    template.draft = normalized_draft
+    payload = request.get_json(force=True)
+
+    processor = _processor()
+    draft = processor.normalize_draft(payload.get('draft', {}))
+
+    template.draft = draft
+    template.name = payload.get('name', "Sem Nome")
+    template.description = payload.get("description", None),
 
     db.session.commit()
 
