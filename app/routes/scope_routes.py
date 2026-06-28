@@ -248,16 +248,15 @@ def create_scope_template():
     payload = request.get_json(force=True)
 
     processor = _processor()
-    draft = processor.normalize_draft(_load_scope_payload())
+    draft = processor.normalize_draft(payload.get('draft', {}))
 
     template = ScopeTemplate(
         name=payload.get("name", "Sem Nome"),
         description=payload.get("description", None),
         organization_id=g.current_user.organization_id,
+        draft=draft,
         created_by_id=g.current_user.id,
     )
-
-    template.draft = draft
 
     db.session.add(template)
     db.session.commit()
