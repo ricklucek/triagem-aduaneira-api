@@ -28,8 +28,6 @@ def create_app(config_object=Config):
     from .routes.client_routes import client_bp
     from .routes.organization_routes import organization_bp
 
-    from .routes.processes_routes import app as processes_bp
-
     app.register_blueprint(auth_bp)
     app.register_blueprint(scope_bp)
     app.register_blueprint(dashboard_bp)
@@ -38,7 +36,6 @@ def create_app(config_object=Config):
     app.register_blueprint(prepostos_bp)
     app.register_blueprint(client_bp)
     app.register_blueprint(organization_bp)
-    app.register_blueprint(processes_bp)
 
     @app.get("/health")
     def health():

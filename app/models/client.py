@@ -47,12 +47,6 @@ class Client(TimestampMixin, Base):
 
     scopes = relationship("Scope", back_populates="client", lazy=True)
 
-    import_processes = relationship(
-        "ImportProcess",
-        back_populates="client",
-        lazy="selectin",
-    )
-
     __table_args__ = (
         UniqueConstraint("organization_id", "cnpj", name="uq_clients_org_cnpj"),
     )
