@@ -47,7 +47,9 @@ _DEFAULT_SERVICO_PREPOSTO = {
     "cidadesLiberacao": [],
     "outroPorto": None,
     "outraFronteira": None,
-    "prepostoSelecionado": None,
+    "prepostoSelecionado": {
+        "valor": None
+    },
 }
 
 _DEFAULT_SERVICO_FRETE_INTERNACIONAL = {
