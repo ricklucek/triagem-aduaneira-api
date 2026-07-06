@@ -189,6 +189,81 @@ def admin_scopes_for_user(user_id):
     return jsonify(data)
 
 
+@dashboard_bp.get("/admin/clients-by-user")
+@roles_required("comercial")
+def admin_clients_by_user():
+    service = DashboardMetricsService(g.current_user)
+    filters = _common_filters()
+
+    group_by = (
+        request.args.get("groupBy")
+        or request.args.get("group_by")
+        or "analista_da"
+    )
+
+    include_clients = _parse_bool(
+        request.args.get("includeClients") or request.args.get("include_clients"),
+        default=False,
+    )
+
+    clients_limit_per_user = _parse_int(
+        request.args.get("clientsLimitPerUser") or request.args.get("clients_limit_per_user"),
+        default=10,
+        min_value=1,
+        max_value=100,
+    )
+
+    data = service.get_clients_by_user(
+        group_by=group_by,
+        status=filters["status"],
+        date_from=filters["date_from"],
+        date_to=filters["date_to"],
+        include_clients=include_clients,
+        clients_limit_per_user=clients_limit_per_user,
+    )
+
+    return jsonify(data)
+
+
+@dashboard_bp.get("/admin/users/<user_id>/clients")
+@roles_required("comercial")
+def admin_clients_for_user(user_id):
+    service = DashboardMetricsService(g.current_user)
+    filters = _common_filters()
+
+    group_by = (
+        request.args.get("groupBy")
+        or request.args.get("group_by")
+        or "analista_da"
+    )
+
+    limit = _parse_int(
+        request.args.get("limit"),
+        default=50,
+        min_value=1,
+        max_value=500,
+    )
+
+    offset = _parse_int(
+        request.args.get("offset"),
+        default=0,
+        min_value=0,
+    )
+
+    data = service.get_clients_for_user(
+        user_id=user_id,
+        group_by=group_by,
+        status=filters["status"],
+        date_from=filters["date_from"],
+        date_to=filters["date_to"],
+        limit=limit,
+        offset=offset,
+    )
+
+    return jsonify(data)
+
+
+
 @dashboard_bp.get("/admin/services")
 @roles_required("comercial")
 def admin_services_summary():

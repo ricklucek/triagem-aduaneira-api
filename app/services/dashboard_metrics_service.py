@@ -372,6 +372,325 @@ class DashboardMetricsService:
             "offset": offset,
         }
 
+
+    def _client_dashboard_item(self, client: Client) -> dict:
+        return {
+            "id": str(client.id),
+            "organization_id": str(client.organization_id) if client.organization_id else None,
+            "cnpj": client.cnpj,
+            "razao_social": client.razao_social,
+            "nome_resumido": client.nome_resumido,
+            "inscricao_estadual": client.inscricao_estadual,
+            "inscricao_municipal": client.inscricao_municipal,
+            "endereco_completo_escritorio": client.endereco_completo_escritorio,
+            "endereco_completo_armazem": client.endereco_completo_armazem,
+            "cnae_principal": client.cnae_principal,
+            "cnae_secundario": client.cnae_secundario,
+            "regime_tributacao": client.regime_tributacao,
+            "ativo": client.ativo,
+            "created_at": self._dt(client.created_at),
+            "updated_at": self._dt(client.updated_at),
+        }
+
+    def _get_clients_by_assignment_roles(
+        self,
+        *,
+        group_by: str,
+        roles: list[str],
+        status: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        include_clients: bool = False,
+        clients_limit_per_user: int = 10,
+    ) -> dict:
+        base_query = (
+            db.session.query(
+                User.id.label("user_id"),
+                User.nome.label("user_name"),
+                User.email.label("user_email"),
+                User.role.label("user_role"),
+                User.setor.label("user_setor"),
+                func.count(distinct(Client.id)).label("total_clients"),
+            )
+            .join(ScopeAssignment, ScopeAssignment.user_id == User.id)
+            .join(Scope, Scope.id == ScopeAssignment.scope_id)
+            .join(Client, Client.id == Scope.client_id)
+            .filter(ScopeAssignment.active.is_(True))
+            .filter(ScopeAssignment.role.in_(roles))
+            .filter(Scope.client_id.isnot(None))
+        )
+
+        base_query = self._apply_common_scope_filters(
+            base_query,
+            status=status,
+            date_from=date_from,
+            date_to=date_to,
+        )
+
+        rows = (
+            base_query
+            .group_by(User.id, User.nome, User.email, User.role, User.setor)
+            .order_by(func.count(distinct(Client.id)).desc(), User.nome.asc())
+            .all()
+        )
+
+        items = []
+        clients_limit_per_user, _ = self._pagination(clients_limit_per_user, 0)
+
+        for row in rows:
+            item = {
+                "userId": str(row.user_id),
+                "userName": row.user_name,
+                "userEmail": row.user_email,
+                "userRole": row.user_role,
+                "userSetor": row.user_setor,
+                "assignmentRoles": roles,
+                "totalClients": int(row.total_clients or 0),
+            }
+
+            if include_clients:
+                user_clients = self.get_clients_for_user(
+                    user_id=str(row.user_id),
+                    group_by=group_by,
+                    status=status,
+                    date_from=date_from,
+                    date_to=date_to,
+                    limit=clients_limit_per_user,
+                    offset=0,
+                )
+
+                item["clients"] = user_clients["items"]
+                item["clientsLimit"] = clients_limit_per_user
+                item["clientsTruncated"] = user_clients["total"] > clients_limit_per_user
+
+            items.append(item)
+
+        return {
+            "groupBy": group_by,
+            "assignmentRoles": roles,
+            "items": items,
+            "totalUsers": len(items),
+            "totalClients": sum(item["totalClients"] for item in items),
+        }
+
+    def _get_clients_by_created_by(
+        self,
+        *,
+        status: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        include_clients: bool = False,
+        clients_limit_per_user: int = 10,
+    ) -> dict:
+        base_query = (
+            db.session.query(
+                User.id.label("user_id"),
+                User.nome.label("user_name"),
+                User.email.label("user_email"),
+                User.role.label("user_role"),
+                User.setor.label("user_setor"),
+                func.count(distinct(Client.id)).label("total_clients"),
+            )
+            .join(Scope, Scope.created_by_id == User.id)
+            .join(Client, Client.id == Scope.client_id)
+            .filter(Scope.client_id.isnot(None))
+        )
+
+        base_query = self._apply_common_scope_filters(
+            base_query,
+            status=status,
+            date_from=date_from,
+            date_to=date_to,
+        )
+
+        rows = (
+            base_query
+            .group_by(User.id, User.nome, User.email, User.role, User.setor)
+            .order_by(func.count(distinct(Client.id)).desc(), User.nome.asc())
+            .all()
+        )
+
+        items = []
+        clients_limit_per_user, _ = self._pagination(clients_limit_per_user, 0)
+
+        for row in rows:
+            item = {
+                "userId": str(row.user_id),
+                "userName": row.user_name,
+                "userEmail": row.user_email,
+                "userRole": row.user_role,
+                "userSetor": row.user_setor,
+                "assignmentRoles": [],
+                "totalClients": int(row.total_clients or 0),
+            }
+
+            if include_clients:
+                user_clients = self.get_clients_for_user(
+                    user_id=str(row.user_id),
+                    group_by="created_by",
+                    status=status,
+                    date_from=date_from,
+                    date_to=date_to,
+                    limit=clients_limit_per_user,
+                    offset=0,
+                )
+
+                item["clients"] = user_clients["items"]
+                item["clientsLimit"] = clients_limit_per_user
+                item["clientsTruncated"] = user_clients["total"] > clients_limit_per_user
+
+            items.append(item)
+
+        return {
+            "groupBy": "created_by",
+            "items": items,
+            "totalUsers": len(items),
+            "totalClients": sum(item["totalClients"] for item in items),
+        }
+
+    def get_clients_by_user(
+        self,
+        *,
+        group_by: str = "analista_da",
+        status: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        include_clients: bool = False,
+        clients_limit_per_user: int = 10,
+    ) -> dict:
+        """
+        Retorna clientes distintos agrupados por usuário.
+
+        group_by:
+        - created_by: clientes de escopos cadastrados pelo usuário;
+        - responsible: clientes de escopos onde o usuário é RESPONSAVEL_COMERCIAL;
+        - analista_da: clientes de escopos onde o usuário é ANALISTA_DA_IMPORT ou ANALISTA_DA_EXPORT;
+        - analista_ae: clientes de escopos onde o usuário é ANALISTA_AE_IMPORT ou ANALISTA_AE_EXPORT.
+        """
+
+        if group_by == "created_by":
+            return self._get_clients_by_created_by(
+                status=status,
+                date_from=date_from,
+                date_to=date_to,
+                include_clients=include_clients,
+                clients_limit_per_user=clients_limit_per_user,
+            )
+
+        roles = self.ASSIGNMENT_GROUPS.get(group_by)
+
+        if not roles:
+            return {
+                "items": [],
+                "totalUsers": 0,
+                "totalClients": 0,
+                "groupBy": group_by,
+                "error": f"Invalid group_by: {group_by}",
+            }
+
+        return self._get_clients_by_assignment_roles(
+            group_by=group_by,
+            roles=roles,
+            status=status,
+            date_from=date_from,
+            date_to=date_to,
+            include_clients=include_clients,
+            clients_limit_per_user=clients_limit_per_user,
+        )
+
+    def get_clients_for_user(
+        self,
+        *,
+        user_id: str,
+        group_by: str = "analista_da",
+        status: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        limit, offset = self._pagination(limit, offset)
+
+        if group_by == "created_by":
+            client_ids_query = (
+                db.session.query(
+                    Client.id.label("client_id"),
+                    func.max(Scope.created_at).label("last_scope_created_at"),
+                )
+                .join(Scope, Scope.client_id == Client.id)
+                .filter(Scope.created_by_id == user_id)
+                .filter(Scope.client_id.isnot(None))
+            )
+
+            client_ids_query = self._apply_common_scope_filters(
+                client_ids_query,
+                status=status,
+                date_from=date_from,
+                date_to=date_to,
+            )
+
+        else:
+            roles = self.ASSIGNMENT_GROUPS.get(group_by)
+
+            if not roles:
+                return {
+                    "items": [],
+                    "total": 0,
+                    "limit": limit,
+                    "offset": offset,
+                    "groupBy": group_by,
+                    "userId": str(user_id),
+                    "error": f"Invalid group_by: {group_by}",
+                }
+
+            client_ids_query = (
+                db.session.query(
+                    Client.id.label("client_id"),
+                    func.max(Scope.created_at).label("last_scope_created_at"),
+                )
+                .join(Scope, Scope.client_id == Client.id)
+                .join(ScopeAssignment, ScopeAssignment.scope_id == Scope.id)
+                .filter(ScopeAssignment.user_id == user_id)
+                .filter(ScopeAssignment.active.is_(True))
+                .filter(ScopeAssignment.role.in_(roles))
+                .filter(Scope.client_id.isnot(None))
+            )
+
+            client_ids_query = self._apply_common_scope_filters(
+                client_ids_query,
+                status=status,
+                date_from=date_from,
+                date_to=date_to,
+            )
+
+        client_ids_subquery = client_ids_query.group_by(Client.id).subquery()
+
+        total = db.session.query(func.count()).select_from(client_ids_subquery).scalar() or 0
+
+        rows = (
+            db.session.query(Client, client_ids_subquery.c.last_scope_created_at)
+            .join(client_ids_subquery, client_ids_subquery.c.client_id == Client.id)
+            .order_by(
+                client_ids_subquery.c.last_scope_created_at.desc().nullslast(),
+                Client.razao_social.asc(),
+            )
+            .limit(limit)
+            .offset(offset)
+            .all()
+        )
+
+        return {
+            "userId": str(user_id),
+            "groupBy": group_by,
+            "items": [
+                self._client_dashboard_item(client)
+                for client, _last_scope_created_at in rows
+            ],
+            "total": int(total),
+            "limit": limit,
+            "offset": offset,
+        }
+
     def get_services_summary(
         self,
         *,
