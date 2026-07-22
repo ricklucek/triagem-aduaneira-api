@@ -21,6 +21,7 @@ from ..models.import_process import (
 )
 from ..schemas.import_process import (
     CreateImportProcessSchema,
+    FetchDuimpSchema,
     CreateManualDuimpSnapshotSchema,
     CreateNfeDraftFromDuimpSchema,
     DuimpSnapshotSchema,
@@ -193,6 +194,43 @@ def list_duimp_snapshots(process_id: str):
         .all()
     )
     return jsonify(duimp_snapshot_schema.dump(rows, many=True))
+
+
+@import_process_bp.post("/<process_id>/duimp/fetch")
+@auth_required
+def fetch_process_duimp(process_id: str):
+    process_uuid = uuid_or_404(process_id)
+    service = _service()
+    process = (
+        service.import_process_query_for_current_user()
+        .filter_by(id=process_uuid)
+        .first_or_404()
+    )
+
+    try:
+        payload = FetchDuimpSchema().load(json_payload())
+        result = service.fetch_duimp_for_process(process, payload)
+        db.session.commit()
+        return (
+            jsonify(
+                {
+                    "snapshot": duimp_snapshot_schema.dump(result["snapshot"]),
+                    "normalized": result["normalized"],
+                }
+            ),
+            201,
+        )
+    except ValidationError as exc:
+        db.session.rollback()
+        return validation_error_response(exc)
+    except ValueError as exc:
+        db.session.rollback()
+        return bad_request_response(exc)
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify(
+            {"error": "external_integration_error", "message": str(exc)}
+        ), 502
 
 
 @import_process_bp.post("/<process_id>/nfe-draft/from-duimp")

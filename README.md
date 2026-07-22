@@ -33,3 +33,4 @@ flask --app wsgi.py run --host 0.0.0.0 --port 5000
 ### Documentação
 - Endpoints: `docs/ENDPOINTS.md`
 - Contexto da transformação backend/frontend: `docs/BACKEND_TRANSFORMATION.md`
+- Teste da NF-e de importação: `docs/NFE_IMPORT_TESTING.md`

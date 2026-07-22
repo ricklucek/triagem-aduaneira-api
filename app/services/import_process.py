@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
-from xml.sax.saxutils import escape
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_
 
 from ..extensions import db
+from ..integrations.portal_unico import (
+    EnvironmentPortalCredentialResolver,
+    PortalUnicoDuimpGateway,
+    PortalUnicoIntegrationError,
+)
 from ..models import Client
 from ..models import (
     ClientFiscalProfile,
@@ -36,6 +42,9 @@ from ..models import (
 
 from app.services.nfe_access_key_service import NfeAccessKeyService
 from app.services.nfe_number_service import NfeNumberSequenceService
+from app.services.duimp_normalizer import DuimpNormalizer
+from app.services.import_tax_calculator import ImportTaxCalculator
+from app.services.nfe_xml_builder import NfeXmlBuilder
 
 
 @dataclass
@@ -87,11 +96,22 @@ class MockDuimpGateway:
 
 
 class ImportNfeService:
-    def __init__(self, current_user, duimp_gateway: MockDuimpGateway | None = None):
+    def __init__(
+        self,
+        current_user,
+        duimp_gateway: Any | None = None,
+        credential_resolver: Any | None = None,
+    ):
         self.current_user = current_user
         self.organization_id = getattr(current_user, "organization_id", None)
         self.user_id = getattr(current_user, "id", None)
-        self.duimp_gateway = duimp_gateway or MockDuimpGateway()
+        self.duimp_gateway = duimp_gateway
+        self.credential_resolver = (
+            credential_resolver or EnvironmentPortalCredentialResolver()
+        )
+        self.duimp_normalizer = DuimpNormalizer()
+        self.tax_calculator = ImportTaxCalculator()
+        self.xml_builder = NfeXmlBuilder()
 
     # ------------------------------------------------------------------
     # Query helpers
@@ -140,7 +160,8 @@ class ImportNfeService:
                 f"Status atual do rascunho não permite geração da chave de acesso: {draft.status}"
             )
 
-        validation = self.validate_nfe_draft_payload(draft.fiscal_payload)
+        validation_result = self.validate_nfe_payload(draft.fiscal_payload)
+        validation = validation_result.to_dict()
 
         if not validation["valid"]:
             draft.status = "validation_failed"
@@ -152,7 +173,7 @@ class ImportNfeService:
                 "Rascunho fiscal inválido. Corrija os erros antes de gerar a chave de acesso."
             )
 
-        now = datetime.now()
+        now = datetime.now(ZoneInfo("America/Sao_Paulo"))
 
         if not draft.number:
             sequence_service = NfeNumberSequenceService(current_user=self.current_user)
@@ -172,7 +193,7 @@ class ImportNfeService:
             tp_emis="1",
         )
 
-        fiscal_payload = draft.fiscal_payload or {}
+        fiscal_payload = deepcopy(draft.fiscal_payload or {})
         document = fiscal_payload.get("document") or {}
 
         document.update(
@@ -472,32 +493,38 @@ class ImportNfeService:
         db.session.flush()
         return snapshot
 
-    # ------------------------------------------------------------------
-    # NFe draft
-    # ------------------------------------------------------------------
-    def create_nfe_draft_from_duimp(self, process: ImportProcess, payload: dict[str, Any]) -> dict[str, Any]:
+    def fetch_duimp_for_process(
+        self, process: ImportProcess, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         if not process.duimp_number and not payload.get("duimp_payload"):
-            raise ValueError("Processo não possui duimp_number e nenhum duimp_payload foi enviado.")
+            raise ValueError(
+                "Processo não possui duimp_number e nenhum duimp_payload foi enviado."
+            )
 
-        fiscal_profile = self.get_importer_fiscal_profile(process.importer_id)
-
+        provider = payload.get("source_provider") or ExternalProvider.PORTAL_UNICO.value
+        gateway = self._duimp_gateway_for(process=process, payload=payload)
         started_at = datetime.utcnow()
         process.status = ImportProcessStatus.DUIMP_FETCHING.value
         process.updated_at = started_at
         db.session.flush()
 
+        manual_payload = payload.get("duimp_payload")
+        duimp_number = process.duimp_number
+        if not duimp_number and manual_payload:
+            duimp_number = manual_payload.get("numero") or manual_payload.get("number")
+
         try:
-            raw_duimp = self.duimp_gateway.fetch_duimp(
-                duimp_number=process.duimp_number or payload["duimp_payload"].get("numero") or payload["duimp_payload"].get("number"),
-                duimp_payload=payload.get("duimp_payload"),
+            raw_duimp = gateway.fetch_duimp(
+                duimp_number=duimp_number,
+                duimp_payload=manual_payload,
             )
             finished_at = datetime.utcnow()
             self._log_external_request(
                 process=process,
-                provider=payload.get("source_provider") or ExternalProvider.PORTAL_UNICO.value,
+                provider=provider,
                 endpoint_name="duimp.fetch",
                 method=HttpMethod.GET.value,
-                request_payload={"duimp_number": process.duimp_number},
+                request_payload={"duimp_number": duimp_number},
                 response_payload=raw_duimp,
                 success=True,
                 status_code=200,
@@ -510,14 +537,15 @@ class ImportNfeService:
             process.updated_at = finished_at
             self._log_external_request(
                 process=process,
-                provider=payload.get("source_provider") or ExternalProvider.PORTAL_UNICO.value,
+                provider=provider,
                 endpoint_name="duimp.fetch",
                 method=HttpMethod.GET.value,
-                request_payload={"duimp_number": process.duimp_number},
+                request_payload={"duimp_number": duimp_number},
                 response_payload=None,
                 success=False,
-                status_code=None,
-                error_code=exc.__class__.__name__,
+                status_code=getattr(exc, "status_code", None),
+                error_code=getattr(exc, "error_code", None)
+                or exc.__class__.__name__,
                 error_message=str(exc),
                 started_at=started_at,
                 finished_at=finished_at,
@@ -531,8 +559,104 @@ class ImportNfeService:
             duimp_version=normalized.get("version"),
             raw_payload=raw_duimp,
             normalized_payload=normalized,
-            source_provider=payload.get("source_provider") or ExternalProvider.PORTAL_UNICO.value,
+            source_provider=provider,
         )
+        process.duimp_number = normalized["number"]
+        process.duimp_version = normalized.get("version")
+        process.status = ImportProcessStatus.DUIMP_FETCHED.value
+        process.updated_at = datetime.utcnow()
+        db.session.flush()
+        return {"snapshot": snapshot, "normalized": normalized}
+
+    def _duimp_gateway_for(
+        self, *, process: ImportProcess, payload: dict[str, Any]
+    ) -> Any:
+        if self.duimp_gateway is not None:
+            return self.duimp_gateway
+        if payload.get("duimp_payload") is not None:
+            return MockDuimpGateway()
+
+        provider = payload.get("source_provider") or ExternalProvider.PORTAL_UNICO.value
+        if provider != ExternalProvider.PORTAL_UNICO.value:
+            raise ValueError(
+                f"Não existe gateway configurado para o provider {provider}."
+            )
+
+        environment = payload.get("provider_environment") or payload.get("environment")
+        if environment not in FiscalEnvironment.values():
+            raise ValueError("Ambiente do provider é obrigatório para consultar a DUIMP.")
+
+        connection = self._find_provider_connection(
+            process=process,
+            provider=provider,
+            environment=environment,
+        )
+        config = connection.config_json or {}
+        role_type = config.get("role_type") or "IMPEXP"
+        credentials = self.credential_resolver.resolve(
+            connection.credentials_ref,
+            role_type=role_type,
+        )
+        return PortalUnicoDuimpGateway(
+            credentials=credentials,
+            environment=environment,
+            base_url=config.get("base_url"),
+            timeout_seconds=float(config.get("timeout_seconds") or 30),
+        )
+
+    def _find_provider_connection(
+        self,
+        *,
+        process: ImportProcess,
+        provider: str,
+        environment: str,
+    ) -> ExternalProviderConnection:
+        base_query = self.provider_connection_query_for_current_user().filter(
+            ExternalProviderConnection.provider == provider,
+            ExternalProviderConnection.environment == environment,
+            ExternalProviderConnection.status == "active",
+        )
+        connection = base_query.filter(
+            ExternalProviderConnection.importer_id == process.importer_id
+        ).first()
+        if connection is None:
+            connection = base_query.filter(
+                ExternalProviderConnection.importer_id.is_(None)
+            ).first()
+        if connection is None:
+            raise PortalUnicoIntegrationError(
+                "Conexão ativa com o Portal Único não configurada para o cliente e ambiente."
+            )
+        if not connection.credentials_ref:
+            raise PortalUnicoIntegrationError(
+                "A conexão com o Portal Único não possui credentials_ref."
+            )
+        return connection
+
+    # ------------------------------------------------------------------
+    # NFe draft
+    # ------------------------------------------------------------------
+    def create_nfe_draft_from_duimp(self, process: ImportProcess, payload: dict[str, Any]) -> dict[str, Any]:
+        fiscal_profile = self.get_importer_fiscal_profile(process.importer_id)
+        snapshot_id = payload.get("duimp_snapshot_id")
+        if snapshot_id:
+            snapshot = (
+                self.snapshot_query_for_current_user()
+                .filter(
+                    DuimpSnapshot.id == snapshot_id,
+                    DuimpSnapshot.import_process_id == process.id,
+                )
+                .first()
+            )
+            if snapshot is None:
+                raise ValueError("Snapshot da DUIMP não encontrado para este processo.")
+            normalized = snapshot.normalized_payload or self.normalize_duimp_payload(
+                snapshot.raw_payload
+            )
+        else:
+            fetch_result = self.fetch_duimp_for_process(process, payload)
+            normalized = fetch_result["normalized"]
+            snapshot = fetch_result["snapshot"]
 
         fiscal_payload = self.map_duimp_to_nfe_payload(
             duimp=normalized,
@@ -542,6 +666,13 @@ class ImportNfeService:
             series=payload["series"],
             number=payload.get("number"),
             import_purpose=payload["import_purpose"],
+            tax_configuration=payload["tax_configuration"],
+            additional_costs=payload.get("additional_costs"),
+            foreign_supplier=payload.get("foreign_supplier"),
+            duimp_overrides=payload.get("duimp_overrides"),
+            transport=payload.get("transport"),
+            payment=payload.get("payment"),
+            additional_info=payload.get("additional_info"),
         )
 
         validation = self.validate_nfe_payload(fiscal_payload)
@@ -655,7 +786,10 @@ class ImportNfeService:
         if not validation.is_valid:
             raise ValueError("Rascunho fiscal inválido. Corrija os erros antes de gerar XML.")
 
-        xml_content = self._build_unsigned_xml_preview(draft)
+        xml_content = self.xml_builder.build(
+            draft.fiscal_payload,
+            access_key=draft.access_key,
+        )
         latest_version = (
             NfeXmlVersion.query.filter(
                 NfeXmlVersion.nfe_draft_id == draft.id,
@@ -693,62 +827,7 @@ class ImportNfeService:
     # Normalization / mapping / validation
     # ------------------------------------------------------------------
     def normalize_duimp_payload(self, raw_payload: dict[str, Any]) -> dict[str, Any]:
-        raw_items = raw_payload.get("itens") or raw_payload.get("items") or []
-        normalized_items = []
-
-        for index, raw_item in enumerate(raw_items, start=1):
-            quantity = self._decimal(raw_item.get("quantidade") or raw_item.get("quantity") or 0)
-            product_value = self._decimal(
-                raw_item.get("valorProduto")
-                or raw_item.get("productValue")
-                or raw_item.get("valor")
-                or 0
-            )
-            unit_value = self._decimal(raw_item.get("valorUnitario") or raw_item.get("unitValue") or 0)
-            if unit_value == 0 and quantity > 0 and product_value > 0:
-                unit_value = product_value / quantity
-
-            normalized_items.append(
-                {
-                    "number": str(raw_item.get("numeroItem") or raw_item.get("number") or index),
-                    "product_code": str(raw_item.get("codigoProduto") or raw_item.get("productCode") or index),
-                    "description": raw_item.get("descricao") or raw_item.get("description") or "Mercadoria importada",
-                    "ncm": self._digits(raw_item.get("ncm") or raw_item.get("NCM") or ""),
-                    "commercial_unit": raw_item.get("unidade") or raw_item.get("commercialUnit") or "UN",
-                    "quantity": str(quantity),
-                    "unit_value": str(unit_value),
-                    "product_value": str(product_value),
-                    "taxable_unit": raw_item.get("unidadeTributavel") or raw_item.get("taxableUnit") or raw_item.get("unidade") or "UN",
-                    "taxable_quantity": str(self._decimal(raw_item.get("quantidadeTributavel") or raw_item.get("taxableQuantity") or quantity)),
-                    "taxable_unit_value": str(self._decimal(raw_item.get("valorUnitarioTributavel") or raw_item.get("taxableUnitValue") or unit_value)),
-                    "addition_number": raw_item.get("numeroAdicao") or raw_item.get("additionNumber"),
-                    "sequence_number": raw_item.get("sequenciaAdicao") or raw_item.get("sequenceNumber"),
-                    "manufacturer_code": raw_item.get("codigoFabricante") or raw_item.get("manufacturerCode"),
-                    "exporter_code": raw_item.get("codigoExportador") or raw_item.get("exporterCode"),
-                    "drawback_number": raw_item.get("numeroDrawback") or raw_item.get("drawbackNumber"),
-                    "freight_value": str(self._decimal(raw_item.get("valorFrete") or raw_item.get("freightValue") or 0)),
-                    "insurance_value": str(self._decimal(raw_item.get("valorSeguro") or raw_item.get("insuranceValue") or 0)),
-                    "discount_value": str(self._decimal(raw_item.get("valorDesconto") or raw_item.get("discountValue") or 0)),
-                    "other_value": str(self._decimal(raw_item.get("valorOutrasDespesas") or raw_item.get("otherValue") or 0)),
-                    "taxes": raw_item.get("tributos") or raw_item.get("taxes") or {},
-                    "raw": raw_item,
-                }
-            )
-
-        return {
-            "number": raw_payload.get("numero") or raw_payload.get("number"),
-            "version": raw_payload.get("versao") or raw_payload.get("version"),
-            "registration_date": raw_payload.get("dataRegistro") or raw_payload.get("registrationDate"),
-            "clearance_location": raw_payload.get("localDesembaraco") or raw_payload.get("clearanceLocation"),
-            "clearance_state": raw_payload.get("ufDesembaraco") or raw_payload.get("clearanceState"),
-            "clearance_date": raw_payload.get("dataDesembaraco") or raw_payload.get("clearanceDate"),
-            "transport_mode_code": raw_payload.get("viaTransporteCodigo") or raw_payload.get("transportModeCode"),
-            "afrmm_value": str(self._decimal(raw_payload.get("valorAfrmm") or raw_payload.get("afrmmValue") or 0)),
-            "intermediation_type": raw_payload.get("tipoIntermedio") or raw_payload.get("intermediationType") or "1",
-            "exporter_code": raw_payload.get("codigoExportador") or raw_payload.get("exporterCode"),
-            "items": normalized_items,
-            "raw": raw_payload,
-        }
+        return self.duimp_normalizer.normalize(raw_payload)
 
     def map_duimp_to_nfe_payload(
         self,
@@ -760,13 +839,44 @@ class ImportNfeService:
         series: str,
         number: int | None,
         import_purpose: str,
+        tax_configuration: dict[str, Any],
+        additional_costs: dict[str, Any] | None = None,
+        foreign_supplier: dict[str, Any] | None = None,
+        duimp_overrides: dict[str, Any] | None = None,
+        transport: dict[str, Any] | None = None,
+        payment: dict[str, Any] | None = None,
+        additional_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         items = self.map_duimp_items_to_nfe_items(
             duimp=duimp,
             import_purpose=import_purpose,
         )
-        totals = self.calculate_nfe_totals(items)
-        party = self.build_fiscal_party_from_profile(fiscal_profile)
+        items, totals = self.tax_calculator.calculate(
+            items,
+            configuration=tax_configuration,
+            additional_costs=additional_costs,
+        )
+        issuer = self.build_fiscal_party_from_profile(fiscal_profile)
+        recipient = self.build_foreign_party_from_duimp(
+            duimp,
+            override=foreign_supplier,
+        )
+        duimp_data = {
+            "number": duimp["number"],
+            "api_number": duimp.get("api_number"),
+            "version": duimp.get("version"),
+            "registration_date": duimp.get("registration_date"),
+            "clearance_location": duimp.get("clearance_location"),
+            "clearance_state": duimp.get("clearance_state"),
+            "clearance_date": duimp.get("clearance_date"),
+            "transport_mode_code": duimp.get("transport_mode_code"),
+            "afrmm_value": duimp.get("afrmm_value", "0"),
+            "intermediation_type": duimp.get("intermediation_type") or "1",
+            "exporter_code": duimp.get("exporter_code"),
+            "import_modality": duimp.get("import_modality"),
+            "third_party_tax_id": duimp.get("third_party_tax_id"),
+        }
+        duimp_data.update(duimp_overrides or {})
 
         return {
             "document": {
@@ -778,30 +888,23 @@ class ImportNfeService:
                 "number": number,
                 "operation_nature": "Importação de mercadoria",
                 "import_purpose": import_purpose,
+                "import_modality": duimp.get("import_modality"),
                 "currency": "BRL",
             },
             "import_process": {
                 "id": str(process.id),
                 "reference_code": process.reference_code,
             },
-            "duimp": {
-                "number": duimp["number"],
-                "version": duimp.get("version"),
-                "registration_date": duimp.get("registration_date"),
-                "clearance_location": duimp.get("clearance_location"),
-                "clearance_state": duimp.get("clearance_state"),
-                "clearance_date": duimp.get("clearance_date"),
-                "transport_mode_code": duimp.get("transport_mode_code"),
-                "afrmm_value": duimp.get("afrmm_value", "0"),
-                "intermediation_type": duimp.get("intermediation_type") or "1",
-                "exporter_code": duimp.get("exporter_code"),
-            },
-            "issuer": party,
-            "recipient": party,
+            "duimp": duimp_data,
+            "issuer": issuer,
+            "recipient": recipient,
             "items": items,
             "totals": totals,
+            "transport": transport or {"freight_mode": "9"},
+            "payment": payment or {"method": "90", "value": "0.00"},
             "additional_info": {
                 "complementary": f"NF-e de entrada de importação gerada com base na DUIMP {duimp['number']}.",
+                **(additional_info or {}),
             },
             "source": {
                 "import_process_id": str(process.id),
@@ -834,6 +937,52 @@ class ImportNfeService:
             "contact": {
                 "phone": self._digits(profile.phone),
                 "email": profile.email,
+            },
+        }
+
+    def build_foreign_party_from_duimp(
+        self,
+        duimp: dict[str, Any],
+        *,
+        override: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        supplier = dict(duimp.get("foreign_supplier") or {})
+        supplier.update(override or {})
+        address = supplier.get("address") or {}
+        if isinstance(address, str):
+            address = {"street": address}
+
+        country = supplier.get("country") or {}
+        return {
+            "party_type": "foreign",
+            "foreign_id": supplier.get("foreign_id")
+            or supplier.get("foreign_tax_id"),
+            "legal_name": supplier.get("legal_name") or supplier.get("name"),
+            "ind_ie_dest": "9",
+            "address": {
+                "street": address.get("street")
+                or address.get("logradouro")
+                or "EXTERIOR",
+                "number": address.get("number") or address.get("numero") or "0",
+                "complement": address.get("complement")
+                or address.get("complemento"),
+                "district": address.get("district")
+                or address.get("bairro")
+                or "EXTERIOR",
+                "city_code": "9999999",
+                "city_name": address.get("city_name")
+                or address.get("municipio")
+                or "EXTERIOR",
+                "state": "EX",
+                "zip_code": None,
+                "country_code": supplier.get("country_code")
+                or country.get("code")
+                or country.get("codigo"),
+                "country_name": supplier.get("country_name")
+                or supplier.get("country_name_pt")
+                or country.get("name")
+                or country.get("descricao"),
+                "country_iso_alpha_2": supplier.get("country_iso_alpha_2"),
             },
         }
 
@@ -880,63 +1029,14 @@ class ImportNfeService:
                         "drawback_number": item.get("drawback_number"),
                     },
                     "tax_payload": item.get("taxes") or {},
+                    "tax_classification_code": item.get("tax_classification_code"),
                     "raw_source_payload": item.get("raw"),
                 }
             )
         return mapped_items
 
     def calculate_nfe_totals(self, items: list[dict[str, Any]]) -> dict[str, Any]:
-        products_value = Decimal("0")
-        freight_value = Decimal("0")
-        insurance_value = Decimal("0")
-        discount_value = Decimal("0")
-        other_value = Decimal("0")
-        ii_value = Decimal("0")
-        ipi_value = Decimal("0")
-        pis_value = Decimal("0")
-        cofins_value = Decimal("0")
-        icms_value = Decimal("0")
-
-        for item in items:
-            products_value += self._decimal(item.get("product_value"))
-            freight_value += self._decimal(item.get("freight_value"))
-            insurance_value += self._decimal(item.get("insurance_value"))
-            discount_value += self._decimal(item.get("discount_value"))
-            other_value += self._decimal(item.get("other_value"))
-
-            taxes = item.get("tax_payload") or {}
-            ii_value += self._decimal((taxes.get("ii") or {}).get("value"))
-            ipi_value += self._decimal((taxes.get("ipi") or {}).get("value"))
-            pis_value += self._decimal((taxes.get("pis") or {}).get("value"))
-            cofins_value += self._decimal((taxes.get("cofins") or {}).get("value"))
-            icms_value += self._decimal((taxes.get("icms") or {}).get("value"))
-
-        invoice_value = (
-            products_value
-            + freight_value
-            + insurance_value
-            + other_value
-            + ii_value
-            + ipi_value
-            + pis_value
-            + cofins_value
-            + icms_value
-            - discount_value
-        )
-
-        return {
-            "products_value": str(products_value),
-            "freight_value": str(freight_value),
-            "insurance_value": str(insurance_value),
-            "discount_value": str(discount_value),
-            "other_value": str(other_value),
-            "ii_value": str(ii_value),
-            "ipi_value": str(ipi_value),
-            "pis_value": str(pis_value),
-            "cofins_value": str(cofins_value),
-            "icms_value": str(icms_value),
-            "invoice_value": str(invoice_value),
-        }
+        return self.tax_calculator.calculate_totals(items)
 
     def validate_nfe_payload(self, payload: dict[str, Any]) -> ValidationResult:
         errors: list[dict[str, Any]] = []
@@ -955,9 +1055,33 @@ class ImportNfeService:
         duimp = payload.get("duimp") or {}
         if not duimp.get("number"):
             errors.append({"field": "duimp.number", "message": "Número da DUIMP é obrigatório."})
+        for field, message in {
+            "registration_date": "Data de registro da DUIMP é obrigatória.",
+            "clearance_location": "Local de desembaraço é obrigatório.",
+            "clearance_state": "UF de desembaraço é obrigatória.",
+            "clearance_date": "Data de desembaraço é obrigatória.",
+            "transport_mode_code": "Via de transporte é obrigatória.",
+        }.items():
+            if not duimp.get(field):
+                errors.append({"field": f"duimp.{field}", "message": message})
+        if duimp.get("intermediation_type") in {"2", "3"}:
+            if len(self._digits(duimp.get("third_party_tax_id"))) not in {11, 14}:
+                errors.append(
+                    {
+                        "field": "duimp.third_party_tax_id",
+                        "message": "CPF/CNPJ do adquirente ou encomendante é obrigatório.",
+                    }
+                )
+            if len(str(duimp.get("third_party_state") or "")) != 2:
+                errors.append(
+                    {
+                        "field": "duimp.third_party_state",
+                        "message": "UF do adquirente ou encomendante é obrigatória.",
+                    }
+                )
 
         self._validate_fiscal_party(payload.get("issuer") or {}, errors, "issuer")
-        self._validate_fiscal_party(payload.get("recipient") or {}, errors, "recipient")
+        self._validate_recipient(payload.get("recipient") or {}, errors)
 
         items = payload.get("items") or []
         if not items:
@@ -977,13 +1101,23 @@ class ImportNfeService:
                 errors.append({"field": f"{prefix}.product_value", "message": "Valor do produto deve ser maior que zero."})
             if not item.get("import_payload"):
                 errors.append({"field": f"{prefix}.import_payload", "message": "Dados de importação são obrigatórios."})
-            if not item.get("tax_payload"):
-                warnings.append({"field": f"{prefix}.tax_payload", "message": "Tributos ainda não foram preenchidos."})
+            taxes = item.get("tax_payload") or {}
+            missing_taxes = [
+                tax for tax in ("icms", "ipi", "ii", "pis", "cofins")
+                if not taxes.get(tax)
+            ]
+            if missing_taxes:
+                errors.append(
+                    {
+                        "field": f"{prefix}.tax_payload",
+                        "message": "Tributos obrigatórios ausentes: " + ", ".join(missing_taxes) + ".",
+                    }
+                )
 
         warnings.append(
             {
                 "field": "tax_rules",
-                "message": "Revisar CST/CSOSN, ICMS, II, IPI, PIS e COFINS antes da autorização da NF-e.",
+                "message": "Revisar a parametrização tributária e as regras estaduais antes da autorização da NF-e.",
             }
         )
         return ValidationResult(errors=errors, warnings=warnings)
@@ -1016,6 +1150,46 @@ class ImportNfeService:
             errors.append({"field": f"{prefix}.address.zip_code", "message": "CEP deve conter 8 dígitos."})
         if address.get("state") and len(str(address.get("state"))) != 2:
             errors.append({"field": f"{prefix}.address.state", "message": "UF deve conter 2 caracteres."})
+
+    def _validate_recipient(
+        self, party: dict[str, Any], errors: list[dict[str, Any]]
+    ) -> None:
+        if party.get("party_type") != "foreign":
+            self._validate_fiscal_party(party, errors, "recipient")
+            return
+
+        if not party.get("legal_name"):
+            errors.append(
+                {
+                    "field": "recipient.legal_name",
+                    "message": "Nome do fornecedor estrangeiro é obrigatório.",
+                }
+            )
+        address = party.get("address") or {}
+        for field, message in {
+            "street": "Endereço do fornecedor estrangeiro é obrigatório.",
+            "number": "Número do endereço estrangeiro é obrigatório.",
+            "district": "Bairro/distrito estrangeiro é obrigatório.",
+            "city_name": "Cidade estrangeira é obrigatória.",
+            "country_code": "Código BACEN do país é obrigatório.",
+            "country_name": "Nome do país é obrigatório.",
+        }.items():
+            if not address.get(field):
+                errors.append({"field": f"recipient.address.{field}", "message": message})
+        if address.get("state") != "EX":
+            errors.append(
+                {
+                    "field": "recipient.address.state",
+                    "message": "UF de destinatário estrangeiro deve ser EX.",
+                }
+            )
+        if address.get("city_code") != "9999999":
+            errors.append(
+                {
+                    "field": "recipient.address.city_code",
+                    "message": "Código de município do exterior deve ser 9999999.",
+                }
+            )
 
     # ------------------------------------------------------------------
     # Internal builders
@@ -1112,85 +1286,6 @@ class ImportNfeService:
             "tax_payload": item.tax_payload,
             "raw_source_payload": item.raw_source_payload,
         }
-
-    def _build_unsigned_xml_preview(self, draft: NfeDraft) -> str:
-        payload = draft.fiscal_payload
-        document = payload["document"]
-        duimp = payload["duimp"]
-        issuer = payload.get("issuer") or {}
-        recipient = payload.get("recipient") or {}
-        items = payload.get("items") or []
-
-        det_xml = []
-        for item in items:
-            det_xml.append(
-                f"""
-    <det nItem=\"{item['item_number']}\">
-      <prod>
-        <cProd>{escape(str(item['product_code']))}</cProd>
-        <xProd>{escape(str(item['description']))}</xProd>
-        <NCM>{escape(str(item['ncm']))}</NCM>
-        <CFOP>{escape(str(item['cfop']))}</CFOP>
-        <uCom>{escape(str(item['commercial_unit']))}</uCom>
-        <qCom>{item['commercial_quantity']}</qCom>
-        <vUnCom>{item['commercial_unit_value']}</vUnCom>
-        <vProd>{item['product_value']}</vProd>
-        <DI>
-          <nDI>{escape(str(duimp.get('number') or ''))}</nDI>
-          <dDI>{escape(str(duimp.get('registration_date') or ''))}</dDI>
-          <xLocDesemb>{escape(str(duimp.get('clearance_location') or ''))}</xLocDesemb>
-          <UFDesemb>{escape(str(duimp.get('clearance_state') or ''))}</UFDesemb>
-          <dDesemb>{escape(str(duimp.get('clearance_date') or ''))}</dDesemb>
-        </DI>
-      </prod>
-      <imposto />
-    </det>""".strip()
-            )
-
-        return f"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<NFe xmlns=\"http://www.portalfiscal.inf.br/nfe\">
-  <infNFe versao=\"4.00\">
-    <ide>
-      <natOp>{escape(str(document.get('operation_nature') or 'Importação de mercadoria'))}</natOp>
-      <mod>55</mod>
-      <serie>{escape(str(document.get('series') or ''))}</serie>
-      <nNF>{escape(str(document.get('number') or ''))}</nNF>
-      <tpNF>0</tpNF>
-      <idDest>3</idDest>
-      <tpAmb>{'1' if document.get('environment') == FiscalEnvironment.PRODUCTION.value else '2'}</tpAmb>
-    </ide>
-    <emit>
-      <CNPJ>{escape(str(issuer.get('cnpj') or ''))}</CNPJ>
-      <xNome>{escape(str(issuer.get('legal_name') or ''))}</xNome>
-      <IE>{escape(str(issuer.get('state_registration') or ''))}</IE>
-      <CRT>{escape(str(issuer.get('tax_regime') or ''))}</CRT>
-    </emit>
-    <dest>
-      <CNPJ>{escape(str(recipient.get('cnpj') or ''))}</CNPJ>
-      <xNome>{escape(str(recipient.get('legal_name') or ''))}</xNome>
-      <indIEDest>1</indIEDest>
-      <IE>{escape(str(recipient.get('state_registration') or ''))}</IE>
-    </dest>
-    {chr(10).join(det_xml)}
-    <total>
-      <ICMSTot>
-        <vProd>{payload.get('totals', {}).get('products_value', '0.00')}</vProd>
-        <vFrete>{payload.get('totals', {}).get('freight_value', '0.00')}</vFrete>
-        <vSeg>{payload.get('totals', {}).get('insurance_value', '0.00')}</vSeg>
-        <vDesc>{payload.get('totals', {}).get('discount_value', '0.00')}</vDesc>
-        <vII>{payload.get('totals', {}).get('ii_value', '0.00')}</vII>
-        <vIPI>{payload.get('totals', {}).get('ipi_value', '0.00')}</vIPI>
-        <vPIS>{payload.get('totals', {}).get('pis_value', '0.00')}</vPIS>
-        <vCOFINS>{payload.get('totals', {}).get('cofins_value', '0.00')}</vCOFINS>
-        <vOutro>{payload.get('totals', {}).get('other_value', '0.00')}</vOutro>
-        <vNF>{payload.get('totals', {}).get('invoice_value', '0.00')}</vNF>
-      </ICMSTot>
-    </total>
-    <infAdic>
-      <infCpl>{escape(str((payload.get('additional_info') or {}).get('complementary') or ''))}</infCpl>
-    </infAdic>
-  </infNFe>
-</NFe>"""
 
     def _log_external_request(
         self,

@@ -1,6 +1,6 @@
 import random
 from datetime import datetime
-from decimal import Decimal
+from enum import Enum
 
 
 class NfeAccessKeyService:
@@ -186,6 +186,8 @@ class NfeAccessKeyService:
     def _only_digits(self, value) -> str:
         if value is None:
             return ""
+        if isinstance(value, Enum):
+            value = value.value
         return "".join(filter(str.isdigit, str(value)))
 
     def _left_pad_numeric(self, value, size: int) -> str:

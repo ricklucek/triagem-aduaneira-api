@@ -158,6 +158,18 @@ class CreateManualDuimpSnapshotSchema(Schema):
     )
 
 
+class FetchDuimpSchema(Schema):
+    provider_environment = fields.String(
+        required=True,
+        validate=validate.OneOf(FiscalEnvironment.values()),
+    )
+    source_provider = fields.String(
+        load_default=ExternalProvider.PORTAL_UNICO.value,
+        validate=validate.OneOf([ExternalProvider.PORTAL_UNICO.value]),
+    )
+    duimp_payload = fields.Dict(load_default=None, allow_none=True)
+
+
 class CreateNfeDraftFromDuimpSchema(Schema):
     environment = fields.String(required=True, validate=validate.OneOf(FiscalEnvironment.values()))
     series = fields.String(required=True, validate=validate.Length(min=1, max=10))
@@ -167,7 +179,20 @@ class CreateNfeDraftFromDuimpSchema(Schema):
         load_default=ExternalProvider.PORTAL_UNICO.value,
         validate=validate.OneOf(ExternalProvider.values()),
     )
+    provider_environment = fields.String(
+        load_default=None,
+        allow_none=True,
+        validate=validate.OneOf(FiscalEnvironment.values()),
+    )
     duimp_payload = fields.Dict(load_default=None, allow_none=True)
+    duimp_snapshot_id = fields.UUID(load_default=None, allow_none=True)
+    tax_configuration = fields.Dict(required=True)
+    additional_costs = fields.Dict(load_default=dict)
+    foreign_supplier = fields.Dict(load_default=None, allow_none=True)
+    duimp_overrides = fields.Dict(load_default=dict)
+    transport = fields.Dict(load_default=dict)
+    payment = fields.Dict(load_default=dict)
+    additional_info = fields.Dict(load_default=dict)
 
 
 class UpdateNfeDraftItemSchema(Schema):
