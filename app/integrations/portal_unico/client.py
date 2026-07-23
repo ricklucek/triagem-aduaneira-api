@@ -103,6 +103,120 @@ class EnvironmentPortalCredentialResolver:
         )
 
 
+class GcpSecretManagerPortalCredentialResolver:
+    """Resolve o par de chaves do Portal Único no Secret Manager.
+
+    ``credentials_ref=gcp:PORTAL_UNICO`` acessa os secrets
+    ``PORTAL_UNICO_CLIENT_ID`` e ``PORTAL_UNICO_CLIENT_SECRET`` no projeto
+    indicado por ``GOOGLE_CLOUD_PROJECT`` ou ``GCP_PROJECT_ID``.
+    """
+
+    def __init__(
+        self,
+        *,
+        client: Any | None = None,
+        project_id: str | None = None,
+        secret_version: str | None = None,
+    ) -> None:
+        self._client = client
+        self.project_id = (
+            project_id
+            or os.getenv("GOOGLE_CLOUD_PROJECT")
+            or os.getenv("GCP_PROJECT_ID")
+        )
+        self.secret_version = secret_version or os.getenv(
+            "PORTAL_UNICO_SECRET_VERSION", "1"
+        )
+
+    def resolve(self, credentials_ref: str, *, role_type: str) -> PortalUnicoCredentials:
+        prefix = str(credentials_ref or "")
+        if not prefix.startswith("gcp:"):
+            raise PortalUnicoIntegrationError(
+                "credentials_ref inválido. Para o Secret Manager use gcp:NOME."
+            )
+
+        secret_prefix = prefix.removeprefix("gcp:").strip()
+        if not secret_prefix or not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_-]*", secret_prefix
+        ):
+            raise PortalUnicoIntegrationError(
+                "O prefixo dos secrets contém caracteres inválidos."
+            )
+        if not self.project_id:
+            raise PortalUnicoIntegrationError(
+                "GOOGLE_CLOUD_PROJECT ou GCP_PROJECT_ID é obrigatório."
+            )
+        if not re.fullmatch(r"[1-9][0-9]*|latest", self.secret_version):
+            raise PortalUnicoIntegrationError(
+                "PORTAL_UNICO_SECRET_VERSION deve ser um número ou latest."
+            )
+
+        client_id = self._access_secret(f"{secret_prefix}_CLIENT_ID")
+        client_secret = self._access_secret(f"{secret_prefix}_CLIENT_SECRET")
+        return PortalUnicoCredentials(
+            client_id=client_id,
+            client_secret=client_secret,
+            role_type=role_type,
+        )
+
+    def _access_secret(self, secret_id: str) -> str:
+        client = self._secret_manager_client()
+        resource = (
+            f"projects/{self.project_id}/secrets/{secret_id}/versions/"
+            f"{self.secret_version}"
+        )
+        try:
+            response = client.access_secret_version(request={"name": resource})
+            value = response.payload.data.decode("utf-8").strip()
+        except Exception as exc:
+            raise PortalUnicoIntegrationError(
+                f"Não foi possível acessar o secret {secret_id}."
+            ) from exc
+        if not value:
+            raise PortalUnicoIntegrationError(
+                f"O secret {secret_id} está vazio."
+            )
+        return value
+
+    def _secret_manager_client(self) -> Any:
+        if self._client is None:
+            try:
+                from google.cloud import secretmanager
+            except ImportError as exc:
+                raise PortalUnicoIntegrationError(
+                    "A dependência google-cloud-secret-manager não está instalada."
+                ) from exc
+            self._client = secretmanager.SecretManagerServiceClient()
+        return self._client
+
+
+class DefaultPortalCredentialResolver:
+    """Seleciona o provider a partir do prefixo salvo em credentials_ref."""
+
+    def __init__(
+        self,
+        *,
+        environment_resolver: PortalCredentialResolver | None = None,
+        gcp_resolver: PortalCredentialResolver | None = None,
+    ) -> None:
+        self.environment_resolver = (
+            environment_resolver or EnvironmentPortalCredentialResolver()
+        )
+        self.gcp_resolver = (
+            gcp_resolver or GcpSecretManagerPortalCredentialResolver()
+        )
+
+    def resolve(self, credentials_ref: str, *, role_type: str) -> PortalUnicoCredentials:
+        reference = str(credentials_ref or "")
+        if reference.startswith("env:"):
+            return self.environment_resolver.resolve(reference, role_type=role_type)
+        if reference.startswith("gcp:"):
+            return self.gcp_resolver.resolve(reference, role_type=role_type)
+        raise PortalUnicoIntegrationError(
+            "credentials_ref deve começar com env: ou gcp:."
+        )
+
+
 @dataclass(frozen=True)
 class PortalUnicoResponse:
     status_code: int

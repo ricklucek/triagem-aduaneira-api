@@ -13,7 +13,7 @@ from sqlalchemy import or_
 
 from ..extensions import db
 from ..integrations.portal_unico import (
-    EnvironmentPortalCredentialResolver,
+    DefaultPortalCredentialResolver,
     PortalUnicoDuimpGateway,
     PortalUnicoIntegrationError,
 )
@@ -107,7 +107,7 @@ class ImportNfeService:
         self.user_id = getattr(current_user, "id", None)
         self.duimp_gateway = duimp_gateway
         self.credential_resolver = (
-            credential_resolver or EnvironmentPortalCredentialResolver()
+            credential_resolver or DefaultPortalCredentialResolver()
         )
         self.duimp_normalizer = DuimpNormalizer()
         self.tax_calculator = ImportTaxCalculator()

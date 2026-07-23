@@ -6,11 +6,35 @@ from typing import Any, Mapping
 import pytest
 
 from app.integrations.portal_unico import (
+    DefaultPortalCredentialResolver,
     DuimpIdentifier,
+    GcpSecretManagerPortalCredentialResolver,
+    PortalUnicoIntegrationError,
     PortalUnicoCredentials,
     PortalUnicoDuimpGateway,
     PortalUnicoResponse,
 )
+
+
+class SecretPayload:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+
+
+class SecretResponse:
+    def __init__(self, data: bytes) -> None:
+        self.payload = SecretPayload(data)
+
+
+class FakeSecretManagerClient:
+    def __init__(self, values: dict[str, bytes]) -> None:
+        self.values = values
+        self.requests: list[str] = []
+
+    def access_secret_version(self, *, request: dict[str, str]) -> SecretResponse:
+        name = request["name"]
+        self.requests.append(name)
+        return SecretResponse(self.values[name])
 
 
 @dataclass
@@ -66,6 +90,56 @@ def test_duimp_identifier_accepts_operator_and_api_formats(raw, compact, formatt
 def test_duimp_identifier_rejects_invalid_values(raw):
     with pytest.raises(ValueError, match="Número da DUIMP inválido"):
         DuimpIdentifier.parse(raw)
+
+
+def test_gcp_resolver_reads_separate_versioned_secrets():
+    client = FakeSecretManagerClient(
+        {
+            "projects/project-test/secrets/PORTAL_UNICO_CLIENT_ID/versions/7": b"id-1\n",
+            "projects/project-test/secrets/PORTAL_UNICO_CLIENT_SECRET/versions/7": (
+                b"secret-1\n"
+            ),
+        }
+    )
+    resolver = GcpSecretManagerPortalCredentialResolver(
+        client=client,
+        project_id="project-test",
+        secret_version="7",
+    )
+
+    credentials = resolver.resolve("gcp:PORTAL_UNICO", role_type="IMPEXP")
+
+    assert credentials.client_id == "id-1"
+    assert credentials.client_secret == "secret-1"
+    assert client.requests == [
+        "projects/project-test/secrets/PORTAL_UNICO_CLIENT_ID/versions/7",
+        "projects/project-test/secrets/PORTAL_UNICO_CLIENT_SECRET/versions/7",
+    ]
+
+
+def test_gcp_resolver_does_not_expose_secret_value_on_failure():
+    class FailingClient:
+        def access_secret_version(self, *, request):
+            raise RuntimeError("provider failure containing-sensitive-value")
+
+    resolver = GcpSecretManagerPortalCredentialResolver(
+        client=FailingClient(),
+        project_id="project-test",
+        secret_version="1",
+    )
+
+    with pytest.raises(PortalUnicoIntegrationError) as exc_info:
+        resolver.resolve("gcp:PORTAL_UNICO", role_type="IMPEXP")
+
+    assert "containing-sensitive-value" not in str(exc_info.value)
+    assert "PORTAL_UNICO_CLIENT_ID" in str(exc_info.value)
+
+
+def test_default_resolver_rejects_unknown_provider():
+    resolver = DefaultPortalCredentialResolver()
+
+    with pytest.raises(PortalUnicoIntegrationError, match="env: ou gcp:"):
+        resolver.resolve("database:PORTAL_UNICO", role_type="IMPEXP")
 
 
 def test_gateway_authenticates_gets_current_version_and_paginates_items():

@@ -1,6 +1,8 @@
 from .client import (
+    DefaultPortalCredentialResolver,
     DuimpIdentifier,
     EnvironmentPortalCredentialResolver,
+    GcpSecretManagerPortalCredentialResolver,
     PortalUnicoApiError,
     PortalUnicoCredentials,
     PortalUnicoDuimpGateway,
@@ -10,8 +12,10 @@ from .client import (
 )
 
 __all__ = [
+    "DefaultPortalCredentialResolver",
     "DuimpIdentifier",
     "EnvironmentPortalCredentialResolver",
+    "GcpSecretManagerPortalCredentialResolver",
     "PortalUnicoApiError",
     "PortalUnicoCredentials",
     "PortalUnicoDuimpGateway",
