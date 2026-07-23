@@ -17,4 +17,4 @@ jobs:
       - name: Install test dependencies
         run: pip install -r requirements-dev.txt
       - name: Run unit and API integration tests
-        run: pytest -q
+        run: python -m pytest -q
