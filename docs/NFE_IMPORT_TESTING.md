@@ -148,9 +148,20 @@ DUIMP nem sempre fornece código BACEN e endereço suficientes para a NF-e. A
 integração futura com Catálogo de Produtos/Tabelas Aduaneiras deve substituir
 essa entrada manual.
 
-As despesas adicionais são rateadas proporcionalmente ao valor aduaneiro dos
-itens, com ajuste determinístico de centavos no último item. O ICMS é calculado
-"por dentro". Os valores de II, IPI, PIS e COFINS vêm da DUIMP.
+O valor do produto na NF-e é o valor aduaneiro da DUIMP, que já contém frete e
+seguro. Por isso, `vFrete` e `vSeg` não são somados novamente. Siscomex, THC e
+outras despesas são rateadas proporcionalmente ao valor aduaneiro; o AFRMM é
+rateado pelo peso líquido. Quando houver AFRMM e mais de um item, todos os itens
+precisam ter peso líquido positivo.
+
+Os rateios fecham exatamente no total informado usando distribuição do resíduo
+pelas maiores frações de centavo. O ICMS é calculado "por dentro". Os valores
+de II, IPI, PIS e COFINS dos itens vêm da DUIMP e não são recalculados.
+
+O payload fiscal inclui `reconciliation`. O status `balanced` confirma que os
+totais oficiais disponíveis na DUIMP e todos os custos informados fecharam; o
+status `requires_review` bloqueia a geração da chave e do XML até a divergência
+ser corrigida.
 
 ## 6. Gerar chave e XML
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 from typing import Any
 
 
@@ -30,23 +30,80 @@ class ImportTaxCalculator:
             )
 
         costs = additional_costs or {}
-        afrmm_total = self._money(costs.get("afrmm"))
-        other_total = self._money(
-            self._decimal(costs.get("siscomex_fee"))
-            + self._decimal(costs.get("thc"))
-            + self._decimal(costs.get("other"))
+        cost_totals = {
+            "afrmm": self._money(costs.get("afrmm")),
+            "siscomex_fee": self._money(costs.get("siscomex_fee")),
+            "thc": self._money(costs.get("thc")),
+            "other": self._money(costs.get("other")),
+        }
+        negative_costs = [
+            name for name, value in cost_totals.items() if value < 0
+        ]
+        if negative_costs:
+            raise ImportTaxCalculationError(
+                "Despesas adicionais não podem ser negativas: "
+                + ", ".join(negative_costs)
+                + "."
+            )
+        customs_value_weights = [
+            self._decimal(item.get("customs_value") or item.get("product_value"))
+            for item in items
+        ]
+        net_weight_weights = [
+            self._decimal(item.get("net_weight") or item.get("allocation_weight"))
+            for item in items
+        ]
+
+        customs_cost_total = sum(
+            (
+                cost_totals["siscomex_fee"],
+                cost_totals["thc"],
+                cost_totals["other"],
+            ),
+            Decimal("0"),
         )
-        weights = [self._money(item.get("product_value")) for item in items]
-        afrmm_allocations = self.allocate(afrmm_total, weights)
-        other_allocations = self.allocate(other_total, weights)
+        if customs_cost_total and any(
+            weight <= 0 for weight in customs_value_weights
+        ):
+            raise ImportTaxCalculationError(
+                "O valor aduaneiro positivo de todos os itens é obrigatório "
+                "para ratear as despesas adicionais."
+            )
+
+        if cost_totals["afrmm"] and len(items) > 1 and any(
+            weight <= 0 for weight in net_weight_weights
+        ):
+            raise ImportTaxCalculationError(
+                "O peso líquido positivo de todos os itens é obrigatório para "
+                "ratear o AFRMM."
+            )
+
+        allocations = {
+            "afrmm": self.allocate(
+                cost_totals["afrmm"],
+                net_weight_weights if len(items) > 1 else [Decimal("1")],
+            ),
+            "siscomex_fee": self.allocate(
+                cost_totals["siscomex_fee"], customs_value_weights
+            ),
+            "thc": self.allocate(cost_totals["thc"], customs_value_weights),
+            "other": self.allocate(cost_totals["other"], customs_value_weights),
+        }
 
         calculated_items: list[dict[str, Any]] = []
         for index, source in enumerate(items):
             item = deepcopy(source)
             existing_other = self._money(item.get("other_value"))
-            item_afrmm = afrmm_allocations[index]
-            item_other = existing_other + item_afrmm + other_allocations[index]
+            item_costs = {
+                name: values[index] for name, values in allocations.items()
+            }
+            item_afrmm = item_costs["afrmm"]
+            item_other = existing_other + sum(item_costs.values(), Decimal("0"))
             item["other_value"] = self._format_money(item_other)
+            item["cost_allocation"] = {
+                name: self._format_money(value)
+                for name, value in item_costs.items()
+            }
 
             taxes = deepcopy(item.get("tax_payload") or item.get("taxes") or {})
             ii = self._tax(taxes, "ii")
@@ -175,6 +232,10 @@ class ImportTaxCalculator:
             "ibs_mun_value": Decimal("0"),
             "ibs_value": Decimal("0"),
             "cbs_value": Decimal("0"),
+            "afrmm_value": Decimal("0"),
+            "siscomex_fee": Decimal("0"),
+            "thc_value": Decimal("0"),
+            "additional_other_value": Decimal("0"),
         }
         for item in items:
             fields["products_value"] += self._money(item.get("product_value"))
@@ -182,6 +243,18 @@ class ImportTaxCalculator:
             fields["insurance_value"] += self._money(item.get("insurance_value"))
             fields["discount_value"] += self._money(item.get("discount_value"))
             fields["other_value"] += self._money(item.get("other_value"))
+            import_payload = item.get("import_payload") or {}
+            fields["afrmm_value"] += self._money(
+                import_payload.get("afrmm_value")
+            )
+            cost_allocation = item.get("cost_allocation") or {}
+            fields["siscomex_fee"] += self._money(
+                cost_allocation.get("siscomex_fee")
+            )
+            fields["thc_value"] += self._money(cost_allocation.get("thc"))
+            fields["additional_other_value"] += self._money(
+                cost_allocation.get("other")
+            )
             taxes = item.get("tax_payload") or {}
             for tax, field in {
                 "ii": "ii_value",
@@ -250,16 +323,106 @@ class ImportTaxCalculator:
                 "Não é possível ratear despesas sem valores de produto positivos."
             )
 
-        allocations: list[Decimal] = []
-        allocated = Decimal("0")
-        for index, weight in enumerate(weights):
-            if index == len(weights) - 1:
-                value = total - allocated
-            else:
-                value = self._money(total * weight / weight_total)
-                allocated += value
-            allocations.append(self._money(value))
+        total_cents = int(total / self.MONEY)
+        exact_shares = [
+            Decimal(total_cents) * weight / weight_total for weight in weights
+        ]
+        allocation_cents = [
+            int(share.quantize(Decimal("1"), rounding=ROUND_DOWN))
+            for share in exact_shares
+        ]
+        remainder = total_cents - sum(allocation_cents)
+        remainder_order = sorted(
+            range(len(weights)),
+            key=lambda index: (
+                exact_shares[index] - Decimal(allocation_cents[index]),
+                -index,
+            ),
+            reverse=True,
+        )
+        for index in remainder_order[:remainder]:
+            allocation_cents[index] += 1
+        allocations = [
+            Decimal(cents) * self.MONEY for cents in allocation_cents
+        ]
         return allocations
+
+    def reconcile(
+        self,
+        items: list[dict[str, Any]],
+        totals: dict[str, str],
+        *,
+        expected_tax_totals: dict[str, Any] | None = None,
+        expected_additional_costs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        checks: list[dict[str, str | bool]] = []
+        tolerance = self.MONEY
+
+        for tax_name, total_field in {
+            "ii": "ii_value",
+            "ipi": "ipi_value",
+            "pis": "pis_value",
+            "cofins": "cofins_value",
+        }.items():
+            expected_tax = (expected_tax_totals or {}).get(tax_name)
+            if expected_tax is None:
+                continue
+            if isinstance(expected_tax, dict):
+                expected_tax = expected_tax.get("value")
+            self._append_reconciliation_check(
+                checks,
+                name=f"duimp_{tax_name}",
+                expected=expected_tax,
+                calculated=totals.get(total_field),
+                tolerance=tolerance,
+            )
+
+        for cost_name, total_field in {
+            "afrmm": "afrmm_value",
+            "siscomex_fee": "siscomex_fee",
+            "thc": "thc_value",
+            "other": "additional_other_value",
+        }.items():
+            self._append_reconciliation_check(
+                checks,
+                name=f"allocation_{cost_name}",
+                expected=(expected_additional_costs or {}).get(cost_name),
+                calculated=totals.get(total_field),
+                tolerance=Decimal("0"),
+            )
+
+        failed = [check for check in checks if not check["matches"]]
+        return {
+            "status": "balanced" if not failed else "requires_review",
+            "tolerance": self._format_money(tolerance),
+            "checks": checks,
+            "failed_checks": len(failed),
+            "item_count": len(items),
+        }
+
+    def _append_reconciliation_check(
+        self,
+        checks: list[dict[str, str | bool]],
+        *,
+        name: str,
+        expected: Any,
+        calculated: Any,
+        tolerance: Decimal,
+    ) -> None:
+        if expected in (None, ""):
+            return
+        expected_value = self._money(expected)
+        calculated_value = self._money(calculated)
+        difference = calculated_value - expected_value
+        checks.append(
+            {
+                "name": name,
+                "expected": self._format_money(expected_value),
+                "calculated": self._format_money(calculated_value),
+                "difference": self._format_money(difference),
+                "matches": abs(difference) <= tolerance,
+            }
+        )
 
     def _tax(self, taxes: dict[str, Any], name: str) -> dict[str, Decimal]:
         data = taxes.get(name) or {}

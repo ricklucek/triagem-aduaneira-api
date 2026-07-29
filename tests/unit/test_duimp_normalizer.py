@@ -27,6 +27,15 @@ def portal_payload():
                 },
             },
             "quantidadeItens": 1,
+            "tributos": {
+                "tributosCalculados": [
+                    {
+                        "tipo": "II",
+                        "valoresBRL": {"devido": 180},
+                        "memoriaCalculo": {"baseCalculoBRL": 1000},
+                    }
+                ]
+            },
         },
         "itens": [
             {
@@ -45,6 +54,7 @@ def portal_payload():
                 "mercadoria": {
                     "unidadeComercial": "PECAS",
                     "quantidadeComercial": 12,
+                    "pesoLiquido": 25.5,
                     "descricao": "Modelo de teste",
                 },
                 "condicaoVenda": {
@@ -88,10 +98,17 @@ def test_normalizes_official_portal_payload_using_customs_value():
     assert result["afrmm_value"] == "12.34"
     assert result["import_modality"] == "direct"
     assert result["foreign_supplier"]["name"] == "Fornecedor Exterior"
+    assert result["tax_totals"]["ii"]["value"] == "180"
 
     item = result["items"][0]
+    assert item["customs_value"] == "1000"
     assert item["product_value"] == "1000"
     assert Decimal(item["unit_value"]) == Decimal("83.33333333333333333333333333")
+    assert item["freight_value"] == "0"
+    assert item["insurance_value"] == "0"
+    assert item["customs_freight_value"] == "90"
+    assert item["customs_insurance_value"] == "10"
+    assert item["net_weight"] == "25.5"
     assert item["taxes"]["ii"] == {
         "value": "180",
         "base": "1000",

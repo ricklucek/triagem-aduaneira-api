@@ -856,6 +856,12 @@ class ImportNfeService:
             configuration=tax_configuration,
             additional_costs=additional_costs,
         )
+        reconciliation = self.tax_calculator.reconcile(
+            items,
+            totals,
+            expected_tax_totals=duimp.get("tax_totals"),
+            expected_additional_costs=additional_costs,
+        )
         issuer = self.build_fiscal_party_from_profile(fiscal_profile)
         recipient = self.build_foreign_party_from_duimp(
             duimp,
@@ -900,6 +906,7 @@ class ImportNfeService:
             "recipient": recipient,
             "items": items,
             "totals": totals,
+            "reconciliation": reconciliation,
             "transport": transport or {"freight_mode": "9"},
             "payment": payment or {"method": "90", "value": "0.00"},
             "additional_info": {
@@ -1013,6 +1020,9 @@ class ImportNfeService:
                     "taxable_quantity": item["taxable_quantity"],
                     "taxable_unit_value": item["taxable_unit_value"],
                     "product_value": str(product_value),
+                    "customs_value": item.get("customs_value")
+                    or str(product_value),
+                    "net_weight": item.get("net_weight", "0"),
                     "freight_value": item.get("freight_value", "0"),
                     "insurance_value": item.get("insurance_value", "0"),
                     "discount_value": item.get("discount_value", "0"),
@@ -1113,6 +1123,23 @@ class ImportNfeService:
                         "message": "Tributos obrigatórios ausentes: " + ", ".join(missing_taxes) + ".",
                     }
                 )
+
+        reconciliation = payload.get("reconciliation") or {}
+        if reconciliation.get("status") == "requires_review":
+            failed_names = ", ".join(
+                str(check.get("name"))
+                for check in reconciliation.get("checks") or []
+                if not check.get("matches")
+            )
+            errors.append(
+                {
+                    "field": "reconciliation",
+                    "message": (
+                        "A reconciliação fiscal encontrou divergências"
+                        + (f": {failed_names}." if failed_names else ".")
+                    ),
+                }
+            )
 
         warnings.append(
             {

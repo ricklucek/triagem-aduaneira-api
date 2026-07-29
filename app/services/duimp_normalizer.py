@@ -31,6 +31,9 @@ class DuimpNormalizer:
         general = payload.get("dadosGerais") or {}
         identification = general.get("identificacao") or {}
         cargo = general.get("carga") or {}
+        general_taxes = (general.get("tributos") or {}).get(
+            "tributosCalculados"
+        ) or []
         importer = identification.get("importador") or {}
         raw_items = payload.get("itens") or []
 
@@ -81,6 +84,7 @@ class DuimpNormalizer:
                 cargo.get("viaTransporteCodigo") or general.get("viaTransporteCodigo")
             ),
             "afrmm_value": str(self._extract_afrmm(cargo)),
+            "tax_totals": self._normalize_taxes(general_taxes),
             "intermediation_type": self._string(
                 general.get("tipoIntermedio") or "1"
             ),
@@ -116,6 +120,11 @@ class DuimpNormalizer:
             or sale.get("valorBRL")
         )
         unit_value = customs_value / quantity if quantity else Decimal("0")
+        source_freight = self._decimal((sale.get("frete") or {}).get("valorBRL"))
+        source_insurance = self._decimal(
+            (sale.get("seguro") or {}).get("valorBRL")
+        )
+        net_weight = self._decimal(merchandise.get("pesoLiquido"))
         modality_code = self._string(characterization.get("indicador"))
 
         return {
@@ -133,6 +142,7 @@ class DuimpNormalizer:
             "commercial_unit": self._string(merchandise.get("unidadeComercial") or "UN"),
             "quantity": str(quantity),
             "unit_value": str(unit_value),
+            "customs_value": str(customs_value),
             "product_value": str(customs_value),
             "taxable_unit": self._string(merchandise.get("unidadeComercial") or "UN"),
             "taxable_quantity": str(quantity),
@@ -146,12 +156,13 @@ class DuimpNormalizer:
                     "numeroAtoDuimpInsumo"
                 )
             ),
-            "freight_value": str(
-                self._decimal((sale.get("frete") or {}).get("valorBRL"))
-            ),
-            "insurance_value": str(
-                self._decimal((sale.get("seguro") or {}).get("valorBRL"))
-            ),
+            # O valor aduaneiro já contém frete e seguro. Estes campos fiscais
+            # permanecem zerados para que a NF-e não some os componentes duas vezes.
+            "freight_value": "0",
+            "insurance_value": "0",
+            "customs_freight_value": str(source_freight),
+            "customs_insurance_value": str(source_insurance),
+            "net_weight": str(net_weight),
             "discount_value": str(self._sale_adjustment(sale, "DEDUCAO")),
             "other_value": str(self._sale_adjustment(sale, "ACRESCIMO")),
             "import_modality": self.MODALITY_MAP.get(modality_code, modality_code.lower() or None),
@@ -196,6 +207,13 @@ class DuimpNormalizer:
                     "quantity": str(quantity),
                     "unit_value": str(unit_value),
                     "product_value": str(product_value),
+                    "customs_value": str(
+                        self._decimal(
+                            raw_item.get("valorAduaneiro")
+                            or raw_item.get("customsValue")
+                            or product_value
+                        )
+                    ),
                     "taxable_unit": raw_item.get("unidadeTributavel")
                     or raw_item.get("taxableUnit")
                     or raw_item.get("unidade")
@@ -238,6 +256,12 @@ class DuimpNormalizer:
                             raw_item.get("valorOutrasDespesas") or raw_item.get("otherValue")
                         )
                     ),
+                    "net_weight": str(
+                        self._decimal(
+                            raw_item.get("pesoLiquido")
+                            or raw_item.get("netWeight")
+                        )
+                    ),
                     "taxes": raw_item.get("tributos") or raw_item.get("taxes") or {},
                     "raw": raw_item,
                 }
@@ -264,6 +288,9 @@ class DuimpNormalizer:
             "afrmm_value": str(
                 self._decimal(raw_payload.get("valorAfrmm") or raw_payload.get("afrmmValue"))
             ),
+            "tax_totals": raw_payload.get("totaisTributos")
+            or raw_payload.get("taxTotals")
+            or {},
             "intermediation_type": raw_payload.get("tipoIntermedio")
             or raw_payload.get("intermediationType")
             or "1",

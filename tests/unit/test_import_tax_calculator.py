@@ -1,6 +1,11 @@
 from decimal import Decimal
 
-from app.services.import_tax_calculator import ImportTaxCalculator
+import pytest
+
+from app.services.import_tax_calculator import (
+    ImportTaxCalculationError,
+    ImportTaxCalculator,
+)
 
 
 def reference_item():
@@ -60,9 +65,130 @@ def test_reproduces_reference_import_tax_bases_for_first_item():
     assert totals["rtc_invoice_value"] == "7465.19"
 
 
-def test_allocates_costs_and_puts_rounding_remainder_in_last_item():
+def test_allocates_costs_by_largest_remainder_with_exact_cent_total():
     calculator = ImportTaxCalculator()
     allocations = calculator.allocate(
         Decimal("10.00"), [Decimal("1"), Decimal("1"), Decimal("1")]
     )
-    assert allocations == [Decimal("3.33"), Decimal("3.33"), Decimal("3.34")]
+    assert allocations == [Decimal("3.34"), Decimal("3.33"), Decimal("3.33")]
+    assert sum(allocations) == Decimal("10.00")
+
+
+def test_allocates_afrmm_by_net_weight_and_other_costs_by_customs_value():
+    first = reference_item()
+    first.update(
+        {
+            "product_value": "100.00",
+            "customs_value": "100.00",
+            "net_weight": "90",
+        }
+    )
+    second = reference_item()
+    second.update(
+        {
+            "product_value": "300.00",
+            "customs_value": "300.00",
+            "net_weight": "10",
+        }
+    )
+
+    items, totals = ImportTaxCalculator().calculate(
+        [first, second],
+        configuration=configuration(),
+        additional_costs={
+            "afrmm": "100.00",
+            "siscomex_fee": "40.00",
+            "thc": "20.00",
+            "other": "4.00",
+        },
+    )
+
+    assert items[0]["cost_allocation"] == {
+        "afrmm": "90.00",
+        "siscomex_fee": "10.00",
+        "thc": "5.00",
+        "other": "1.00",
+    }
+    assert items[1]["cost_allocation"] == {
+        "afrmm": "10.00",
+        "siscomex_fee": "30.00",
+        "thc": "15.00",
+        "other": "3.00",
+    }
+    assert totals["afrmm_value"] == "100.00"
+    assert totals["siscomex_fee"] == "40.00"
+    assert totals["thc_value"] == "20.00"
+    assert totals["additional_other_value"] == "4.00"
+
+
+def test_requires_item_net_weight_to_allocate_afrmm_across_multiple_items():
+    with pytest.raises(ImportTaxCalculationError, match="peso líquido"):
+        ImportTaxCalculator().calculate(
+            [reference_item(), reference_item()],
+            configuration=configuration(),
+            additional_costs={"afrmm": "1.00"},
+        )
+
+
+def test_rejects_negative_additional_costs():
+    with pytest.raises(
+        ImportTaxCalculationError, match="não podem ser negativas"
+    ):
+        ImportTaxCalculator().calculate(
+            [reference_item()],
+            configuration=configuration(),
+            additional_costs={"thc": "-0.01"},
+        )
+
+
+def test_reconciles_official_duimp_taxes_and_allocated_costs():
+    calculator = ImportTaxCalculator()
+    items, totals = calculator.calculate(
+        [reference_item()],
+        configuration=configuration(),
+        additional_costs={
+            "afrmm": "53.46",
+            "siscomex_fee": "10.00",
+            "thc": "20.00",
+            "other": "5.36",
+        },
+    )
+
+    result = calculator.reconcile(
+        items,
+        totals,
+        expected_tax_totals={
+            "ii": {"value": "1089.79"},
+            "ipi": {"value": "232.19"},
+            "pis": {"value": "188.90"},
+            "cofins": {"value": "870.02"},
+        },
+        expected_additional_costs={
+            "afrmm": "53.46",
+            "siscomex_fee": "10.00",
+            "thc": "20.00",
+            "other": "5.36",
+        },
+    )
+
+    assert result["status"] == "balanced"
+    assert result["failed_checks"] == 0
+    assert len(result["checks"]) == 8
+
+
+def test_marks_reconciliation_for_review_when_official_total_diverges():
+    calculator = ImportTaxCalculator()
+    items, totals = calculator.calculate(
+        [reference_item()],
+        configuration=configuration(),
+    )
+
+    result = calculator.reconcile(
+        items,
+        totals,
+        expected_tax_totals={"ii": {"value": "1090.00"}},
+    )
+
+    assert result["status"] == "requires_review"
+    assert result["failed_checks"] == 1
+    assert result["checks"][0]["difference"] == "-0.21"
