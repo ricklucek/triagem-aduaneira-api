@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -134,6 +135,15 @@ class DuimpNormalizer:
         )
         net_weight = self._decimal(merchandise.get("pesoLiquido"))
         modality_code = self._string(characterization.get("indicador"))
+        catalog = product.get("catalogo") or {}
+        if not isinstance(catalog, dict):
+            catalog = {}
+        description = self._nfe_product_description(
+            product.get("denominacao")
+            or product.get("descricao")
+            or merchandise.get("descricao"),
+            catalog.get("descricao"),
+        )
 
         return {
             "number": str(identification.get("numeroItem") or ""),
@@ -145,12 +155,7 @@ class DuimpNormalizer:
                 or ""
             ),
             "product_version": self._string(product.get("versao")),
-            "description": self._string(
-                product.get("descricao")
-                or product.get("denominacao")
-                or merchandise.get("descricao")
-                or "Mercadoria importada"
-            ),
+            "description": description,
             "complementary_description": self._string(merchandise.get("descricao")),
             "ncm": self._digits(product.get("ncm")),
             "commercial_unit": self._string(merchandise.get("unidadeComercial") or "UN"),
@@ -414,6 +419,30 @@ class DuimpNormalizer:
             "country_name": self._string(country.get("descricao")),
             "address": address or None,
         }
+
+    @staticmethod
+    def _nfe_product_description(
+        denomination: Any,
+        complementary_detail: Any = None,
+    ) -> str:
+        parts = []
+        for value in (denomination, complementary_detail):
+            normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+            if normalized and normalized not in parts:
+                parts.append(normalized)
+
+        description = " ".join(parts) or "Mercadoria importada"
+        if len(description) <= 120:
+            return description
+
+        truncated = description[:120].rstrip()
+        if (
+            len(truncated) == 120
+            and not description[120].isspace()
+            and " " in truncated
+        ):
+            truncated = truncated.rsplit(" ", 1)[0]
+        return truncated
 
     @staticmethod
     def _date_part(value: Any) -> str | None:

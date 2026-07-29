@@ -857,6 +857,10 @@ class ImportNfeService:
         payment: dict[str, Any] | None = None,
         additional_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        resolved_additional_costs = self.resolve_additional_costs(
+            duimp=duimp,
+            additional_costs=additional_costs,
+        )
         items = self.map_duimp_items_to_nfe_items(
             duimp=duimp,
             import_purpose=import_purpose,
@@ -864,13 +868,13 @@ class ImportNfeService:
         items, totals = self.tax_calculator.calculate(
             items,
             configuration=tax_configuration,
-            additional_costs=additional_costs,
+            additional_costs=resolved_additional_costs,
         )
         reconciliation = self.tax_calculator.reconcile(
             items,
             totals,
             expected_tax_totals=duimp.get("tax_totals"),
-            expected_additional_costs=additional_costs,
+            expected_additional_costs=resolved_additional_costs,
         )
         issuer = self.build_fiscal_party_from_profile(fiscal_profile)
         recipient = self.build_foreign_party_from_duimp(
@@ -916,6 +920,7 @@ class ImportNfeService:
             "recipient": recipient,
             "items": items,
             "totals": totals,
+            "additional_costs": resolved_additional_costs,
             "reconciliation": reconciliation,
             "transport": transport or {"freight_mode": "9"},
             "payment": payment or {"method": "90", "value": "0.00"},
@@ -929,6 +934,41 @@ class ImportNfeService:
                 "fiscal_profile_id": str(fiscal_profile.id),
             },
         }
+
+    def resolve_additional_costs(
+        self,
+        *,
+        duimp: dict[str, Any],
+        additional_costs: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        resolved = dict(additional_costs or {})
+        defaults = {
+            "afrmm": duimp.get("afrmm_value") or "0",
+            "siscomex_fee": self._duimp_siscomex_fee(duimp),
+            "thc": "0",
+            "other": "0",
+        }
+        for name, default in defaults.items():
+            if resolved.get(name) in (None, ""):
+                resolved[name] = default
+        return resolved
+
+    @staticmethod
+    def _duimp_siscomex_fee(duimp: dict[str, Any]) -> Any:
+        tax_totals = duimp.get("tax_totals") or {}
+        for name in (
+            "taxa_utilizacao",
+            "taxa_utilizacao_siscomex",
+            "taxa_siscomex",
+        ):
+            tax = tax_totals.get(name)
+            if isinstance(tax, dict):
+                value = tax.get("value")
+            else:
+                value = tax
+            if value not in (None, ""):
+                return value
+        return "0"
 
     def build_fiscal_party_from_profile(self, profile: ClientFiscalProfile) -> dict[str, Any]:
         return {

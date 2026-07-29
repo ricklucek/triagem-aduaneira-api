@@ -144,22 +144,13 @@ Exemplo mínimo para importação própria:
     "cbs_rate": "0.9"
   },
   "additional_costs": {
-    "siscomex_fee": "0.00",
-    "thc": "0.00",
-    "afrmm": "0.00",
+    "afrmm": "100.00",
+    "thc": "50.00",
     "other": "0.00"
   },
   "foreign_supplier": {
-    "name": "FOREIGN SUPPLIER LTD",
-    "foreign_id": "",
     "country_code": "1600",
-    "country_name": "CHINA",
-    "address": {
-      "street": "EXTERIOR",
-      "number": "0",
-      "district": "EXTERIOR",
-      "city_name": "EXTERIOR"
-    }
+    "country_name": "CHINA, REPUBLICA POPULAR"
   }
 }
 ```
@@ -168,6 +159,18 @@ Exemplo mínimo para importação própria:
 operador estrangeiro não tiver código BACEN ou endereço suficientes para a
 NF-e. Nome e endereço são preenchidos automaticamente pelo Catálogo quando
 estiverem disponíveis.
+
+Quando `afrmm` e `siscomex_fee` não forem enviados em `additional_costs`, o
+backend utiliza respectivamente `normalized_payload.afrmm_value` e o tributo
+`taxa_utilizacao` da DUIMP. Valores enviados explicitamente, inclusive
+`0.00`, sempre prevalecem. THC e outras despesas continuam sendo informados
+manualmente e assumem zero quando omitidos. Alguns retornos do Portal Único
+não informam AFRMM e são normalizados com valor zero; nesses casos o valor deve
+ser enviado explicitamente com base no comprovante ou espelho da operação.
+
+O `xProd` é composto pela denominação e pelo detalhamento complementar do
+Catálogo, com espaços normalizados e corte na última palavra dentro do limite
+de 120 caracteres da NF-e.
 
 O valor do produto na NF-e é o valor aduaneiro da DUIMP, que já contém frete e
 seguro. Por isso, `vFrete` e `vSeg` não são somados novamente. Siscomex, THC e
