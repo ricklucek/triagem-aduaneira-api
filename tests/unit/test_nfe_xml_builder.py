@@ -1,6 +1,7 @@
 from xml.etree import ElementTree as ET
 
 from app.services.nfe_xml_builder import NfeXmlBuilder
+from app.services.nfe_xsd_validator import NfeXsdValidator
 
 
 NS = {"nfe": "http://www.portalfiscal.inf.br/nfe"}
@@ -132,3 +133,49 @@ def test_builds_unsigned_import_nfe_with_foreign_recipient_and_duimp():
     assert root.findtext(".//nfe:IBSCBS/nfe:cClassTrib", namespaces=NS) == "000001"
     assert root.findtext(".//nfe:total/nfe:vNFTot", namespaces=NS) == "7465.19"
     assert root.find(".//{http://www.w3.org/2000/09/xmldsig#}Signature") is None
+
+
+def test_normalizes_nfe_datetime_to_seconds():
+    data = payload()
+    data["document"]["issue_datetime"] = "2026-07-16T11:18:38.123456-03:00"
+
+    xml = NfeXmlBuilder().build(
+        data,
+        access_key="41260700000000000191550010000144221763362375",
+    )
+    root = ET.fromstring(xml)
+
+    assert (
+        root.findtext(".//nfe:ide/nfe:dhEmi", namespaces=NS)
+        == "2026-07-16T11:18:38-03:00"
+    )
+
+
+def test_unsigned_xml_passes_official_xsd_with_validation_signature():
+    xml = NfeXmlBuilder().build(
+        payload(),
+        access_key="41260700000000000191550010000144221763362375",
+    )
+
+    result = NfeXsdValidator().validate(xml, allow_unsigned=True)
+
+    assert result.is_valid is True
+    assert result.errors == []
+    assert result.schema_package == "PL_010e_v1.02"
+    assert "<Signature" not in xml
+
+
+def test_xsd_validator_reports_invalid_issue_datetime():
+    xml = NfeXmlBuilder().build(
+        payload(),
+        access_key="41260700000000000191550010000144221763362375",
+    )
+    xml = xml.replace(
+        "2026-07-16T11:18:38-03:00",
+        "2026-07-16T11:18:38.123456-03:00",
+    )
+
+    result = NfeXsdValidator().validate(xml, allow_unsigned=True)
+
+    assert result.is_valid is False
+    assert any("dhEmi" in error["message"] for error in result.errors)

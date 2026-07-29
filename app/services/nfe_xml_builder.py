@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -67,9 +68,13 @@ class NfeXmlBuilder:
         self._text(ide, "mod", "55")
         self._text(ide, "serie", str(document["series"]).lstrip("0") or "0")
         self._text(ide, "nNF", document["number"])
-        self._text(ide, "dhEmi", document["issue_datetime"])
+        self._text(ide, "dhEmi", self._datetime(document["issue_datetime"]))
         if document.get("exit_entry_datetime"):
-            self._text(ide, "dhSaiEnt", document["exit_entry_datetime"])
+            self._text(
+                ide,
+                "dhSaiEnt",
+                self._datetime(document["exit_entry_datetime"]),
+            )
         self._text(ide, "tpNF", "0")
         self._text(ide, "idDest", "3")
         self._text(ide, "cMunFG", issuer_address["city_code"])
@@ -350,3 +355,15 @@ class NfeXmlBuilder:
 
     def _unit_value(self, value: Any) -> str:
         return f"{self._decimal(value):.10f}"
+
+    @staticmethod
+    def _datetime(value: Any) -> str:
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            text = str(value or "")
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return text
+        return parsed.isoformat(timespec="seconds")

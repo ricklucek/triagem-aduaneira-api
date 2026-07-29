@@ -1,4 +1,4 @@
-from flask import Blueprint, g, jsonify
+from flask import Blueprint, Response, current_app, g, jsonify
 from marshmallow import ValidationError
 
 from ..auth import auth_required
@@ -12,6 +12,10 @@ from ..schemas.import_process import (
     UpdateNfeDraftItemSchema,
 )
 from ..services.import_process import ImportNfeService
+from ..services.nfe_xsd_validator import (
+    NfeXsdConfigurationError,
+    NfeXsdValidator,
+)
 from .route_helpers import (
     bad_request_response,
     json_payload,
@@ -28,7 +32,28 @@ nfe_xml_version_schema = NfeXmlVersionSchema()
 
 
 def _service() -> ImportNfeService:
-    return ImportNfeService(current_user=g.current_user)
+    return ImportNfeService(
+        current_user=g.current_user,
+        xsd_validator=NfeXsdValidator(
+            schema_path=current_app.config.get("NFE_XSD_PATH")
+        ),
+    )
+
+
+def _draft_and_xml_version(draft_id: str, xml_version_id: str):
+    draft_uuid = uuid_or_404(draft_id)
+    xml_version_uuid = uuid_or_404(xml_version_id)
+    service = _service()
+    draft = (
+        service.nfe_draft_query_for_current_user()
+        .filter_by(id=draft_uuid)
+        .first_or_404()
+    )
+    xml_version = NfeXmlVersion.query.filter_by(
+        id=xml_version_uuid,
+        nfe_draft_id=draft.id,
+    ).first_or_404()
+    return service, draft, xml_version
 
 
 @nfe_draft_bp.get("/<draft_id>")
@@ -171,3 +196,70 @@ def list_nfe_xml_versions(draft_id: str):
         .all()
     )
     return jsonify(nfe_xml_version_schema.dump(rows, many=True))
+
+
+@nfe_draft_bp.get(
+    "/<draft_id>/xml-versions/<xml_version_id>/download"
+)
+@auth_required
+def download_nfe_xml_version(draft_id: str, xml_version_id: str):
+    _, _, xml_version = _draft_and_xml_version(draft_id, xml_version_id)
+    xml_type = getattr(xml_version.xml_type, "value", xml_version.xml_type)
+    xml_type = str(xml_type).lower()
+    identifier = xml_version.access_key or str(xml_version.id)
+    filename = (
+        f"NFe-{identifier}-{xml_type}-v{xml_version.version_number}.xml"
+    )
+    return Response(
+        xml_version.xml_content,
+        status=200,
+        content_type="application/xml; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-NFe-Xml-Version": str(xml_version.version_number),
+        },
+    )
+
+
+@nfe_draft_bp.post(
+    "/<draft_id>/xml-versions/<xml_version_id>/validate-xsd"
+)
+@auth_required
+def validate_nfe_xml_version_xsd(draft_id: str, xml_version_id: str):
+    service, draft, xml_version = _draft_and_xml_version(
+        draft_id,
+        xml_version_id,
+    )
+    try:
+        result = service.validate_xml_version(draft, xml_version)
+        db.session.commit()
+    except NfeXsdConfigurationError as exc:
+        db.session.rollback()
+        return (
+            jsonify(
+                {
+                    "error": "xsd_schema_unavailable",
+                    "message": str(exc),
+                }
+            ),
+            503,
+        )
+    except ValueError as exc:
+        db.session.rollback()
+        return bad_request_response(exc)
+
+    return jsonify(
+        {
+            "xml_version_id": str(xml_version.id),
+            "nfe_draft_id": str(draft.id),
+            "version_number": xml_version.version_number,
+            "xml_type": getattr(
+                xml_version.xml_type,
+                "value",
+                xml_version.xml_type,
+            ),
+            "xsd_valid": xml_version.xsd_valid,
+            "xsd_errors": xml_version.xsd_errors,
+            **result.to_dict(),
+        }
+    )

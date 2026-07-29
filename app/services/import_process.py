@@ -45,6 +45,10 @@ from app.services.nfe_number_service import NfeNumberSequenceService
 from app.services.duimp_normalizer import DuimpNormalizer
 from app.services.import_tax_calculator import ImportTaxCalculator
 from app.services.nfe_xml_builder import NfeXmlBuilder
+from app.services.nfe_xsd_validator import (
+    NfeXsdValidationResult,
+    NfeXsdValidator,
+)
 
 
 @dataclass
@@ -107,6 +111,7 @@ class ImportNfeService:
         current_user,
         duimp_gateway: Any | None = None,
         credential_resolver: Any | None = None,
+        xsd_validator: NfeXsdValidator | None = None,
     ):
         self.current_user = current_user
         self.organization_id = getattr(current_user, "organization_id", None)
@@ -118,6 +123,7 @@ class ImportNfeService:
         self.duimp_normalizer = DuimpNormalizer()
         self.tax_calculator = ImportTaxCalculator()
         self.xml_builder = NfeXmlBuilder()
+        self.xsd_validator = xsd_validator or NfeXsdValidator()
 
     # ------------------------------------------------------------------
     # Query helpers
@@ -179,7 +185,7 @@ class ImportNfeService:
                 "Rascunho fiscal inválido. Corrija os erros antes de gerar a chave de acesso."
             )
 
-        now = datetime.now(ZoneInfo("America/Sao_Paulo"))
+        now = datetime.now(ZoneInfo("America/Sao_Paulo")).replace(microsecond=0)
 
         if not draft.number:
             sequence_service = NfeNumberSequenceService(current_user=self.current_user)
@@ -832,6 +838,57 @@ class ImportNfeService:
 
         db.session.flush()
         return row
+
+    def validate_xml_version(
+        self,
+        draft: NfeDraft,
+        xml_version: NfeXmlVersion,
+    ) -> NfeXsdValidationResult:
+        if xml_version.nfe_draft_id != draft.id:
+            raise ValueError("Versão XML não pertence ao rascunho informado.")
+
+        xml_type = getattr(xml_version.xml_type, "value", xml_version.xml_type)
+        xml_type = str(xml_type).lower()
+        if xml_type not in {
+            NfeXmlType.UNSIGNED.value,
+            NfeXmlType.SIGNED.value,
+        }:
+            raise ValueError(
+                "A validação XSD desta etapa suporta somente XML de NF-e "
+                "não assinado ou assinado."
+            )
+
+        result = self.xsd_validator.validate(
+            xml_version.xml_content,
+            allow_unsigned=xml_type == NfeXmlType.UNSIGNED.value,
+        )
+        xml_version.xsd_valid = result.is_valid
+        xml_version.xsd_errors = result.errors
+
+        latest_version = (
+            NfeXmlVersion.query.filter(
+                NfeXmlVersion.nfe_draft_id == draft.id,
+                NfeXmlVersion.xml_type == xml_type,
+            )
+            .order_by(NfeXmlVersion.version_number.desc())
+            .first()
+        )
+        if latest_version and latest_version.id == xml_version.id:
+            process = (
+                self.import_process_query_for_current_user()
+                .filter(ImportProcess.id == draft.import_process_id)
+                .first()
+            )
+            if process:
+                process.status = (
+                    ImportProcessStatus.XML_VALIDATED.value
+                    if result.is_valid
+                    else ImportProcessStatus.XML_VALIDATION_FAILED.value
+                )
+                process.updated_at = datetime.utcnow()
+
+        db.session.flush()
+        return result
 
     # ------------------------------------------------------------------
     # Normalization / mapping / validation

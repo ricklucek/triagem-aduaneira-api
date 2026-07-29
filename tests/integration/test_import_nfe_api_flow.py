@@ -180,7 +180,45 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
         json={},
     )
     assert xml_response.status_code == 201, xml_response.get_json()
-    xml = xml_response.get_json()["xml_content"]
+    xml_body = xml_response.get_json()
+    xml_version_id = xml_body["id"]
+    xml = xml_body["xml_content"]
     assert "<nDI>26BR00000000001</nDI>" in xml
     assert "<UF>EX</UF>" in xml
     assert "<Signature" not in xml
+    assert ".000000-03:00" not in xml
+
+    download_response = client.get(
+        f"/nfe-drafts/{draft_id}/xml-versions/{xml_version_id}/download",
+        headers=headers,
+    )
+    assert download_response.status_code == 200
+    assert download_response.content_type == "application/xml; charset=utf-8"
+    assert download_response.data.startswith(b"<?xml")
+    assert b'"xml_content"' not in download_response.data
+    assert (
+        f"NFe-{xml_body['access_key']}-unsigned-v1.xml"
+        in download_response.headers["Content-Disposition"]
+    )
+
+    xsd_response = client.post(
+        f"/nfe-drafts/{draft_id}/xml-versions/{xml_version_id}/validate-xsd",
+        headers=headers,
+        json={},
+    )
+    assert xsd_response.status_code == 200, xsd_response.get_json()
+    xsd_body = xsd_response.get_json()
+    assert xsd_body["xsd_valid"] is True
+    assert xsd_body["xsd_errors"] == []
+    assert xsd_body["schema"] == {
+        "package": "PL_010e_v1.02",
+        "file": "nfe_v4.00.xsd",
+    }
+
+    versions_response = client.get(
+        f"/nfe-drafts/{draft_id}/xml-versions",
+        headers=headers,
+    )
+    assert versions_response.status_code == 200
+    assert versions_response.get_json()[0]["xsd_valid"] is True
+    assert versions_response.get_json()[0]["xsd_errors"] == []

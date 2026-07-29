@@ -1,9 +1,8 @@
 # Teste da NF-e de importação até o XML não assinado
 
 Este fluxo cobre a consulta da DUIMP, criação do rascunho fiscal, cálculo dos
-tributos, geração da chave e geração da NF-e 4.00. Assinatura com certificado,
-validação XSD oficial e transmissão à SEFAZ ficam propositalmente fora desta
-etapa.
+tributos, geração da chave, geração da NF-e 4.00 e validação XSD. Assinatura
+com certificado e transmissão à SEFAZ ficam propositalmente fora desta etapa.
 
 Todos os endpoints exigem `Authorization: Bearer <accessToken>`.
 
@@ -212,6 +211,59 @@ O segundo endpoint persiste uma versão `unsigned`. Verifique no XML:
 - totais de ICMS, II, IPI, PIS, COFINS e, quando configurado, IBS/CBS;
 - ausência do grupo XMLDSig `Signature`.
 
+Copie o campo `id` retornado pelo endpoint de geração. Não salve a resposta
+JSON inteira como `.xml`: `xml_content` é uma string escapada dentro do JSON.
+Para baixar o XML bruto, use:
+
+```http
+GET /nfe-drafts/{draft_id}/xml-versions/{xml_version_id}/download
+```
+
+A resposta tem `Content-Type: application/xml` e
+`Content-Disposition: attachment`, podendo ser salva diretamente pelo cliente
+HTTP ou pelo frontend.
+
+## 7. Validar o XML no XSD oficial
+
+```http
+POST /nfe-drafts/{draft_id}/xml-versions/{xml_version_id}/validate-xsd
+Content-Type: application/json
+
+{}
+```
+
+Resposta esperada:
+
+```json
+{
+  "valid": true,
+  "xsd_valid": true,
+  "errors": [],
+  "xsd_errors": [],
+  "schema": {
+    "package": "PL_010e_v1.02",
+    "file": "nfe_v4.00.xsd"
+  }
+}
+```
+
+A validação usa o pacote oficial `PL_010e_v1.02`, publicado em 10/07/2026,
+compatível com os grupos IBS/CBS da NT 2025.002 v1.40. O resultado é persistido
+em `nfe_xml_versions.xsd_valid` e `nfe_xml_versions.xsd_errors`.
+
+Como o XSD de `NFe` exige `Signature`, a validação da versão `unsigned` cria
+uma assinatura estrutural apenas em uma cópia em memória. O XML armazenado não
+é alterado e continua sem assinatura digital. A assinatura temporária não
+realiza validação criptográfica; isso será feito posteriormente com o
+certificado A1.
+
+Quando válido, o processo passa para `xml_validated`. Quando inválido, passa
+para `xml_validation_failed` e a resposta informa linha, coluna, tipo e mensagem
+de cada erro.
+
+O schema já acompanha a aplicação. `NFE_XSD_PATH` só precisa ser configurada
+para testar outro pacote de schemas de forma controlada.
+
 ## Modalidades
 
 O normalizador reconhece `direct`, `on_behalf` e `by_order`. Para conta e ordem
@@ -232,9 +284,9 @@ fiscal, com regras próprias.
 
 ## Limites desta etapa
 
-- Ainda não há assinatura A1/A3, transmissão, recibo, protocolo ou eventos.
-- A validação estrutural está coberta por testes, mas `xsd_valid` permanece
-  indefinido até a inclusão do pacote oficial de schemas vigente.
+- Ainda não há assinatura A1, transmissão, recibo, protocolo ou eventos.
+- A aprovação no XSD comprova a conformidade estrutural, mas não executa as
+  regras de negócio aplicadas pela autorização da SEFAZ.
 - O cálculo usa parâmetros explícitos porque ICMS e benefícios dependem da UF,
   NCM, finalidade, regime e enquadramento do cliente.
 - Antes de produção, compare uma amostra representativa com o cálculo do

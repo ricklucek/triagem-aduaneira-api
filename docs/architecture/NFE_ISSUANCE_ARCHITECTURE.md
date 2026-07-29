@@ -1,6 +1,6 @@
 # Arquitetura da emissão de NF-e de importação
 
-Status: checkpoint 1 - sem assinatura ou transmissão.
+Status: checkpoint 2 - XML não assinado validado no XSD oficial.
 
 ## Objetivo
 
@@ -15,8 +15,8 @@ documentos reais usados para conferência não fazem parte do repositório.
 1. `PortalUnicoDuimpGateway`: consulta e captura imutável da DUIMP.
 2. `ImportTaxCalculator`: produz valores fiscais revisáveis e determinísticos.
 3. `NfeXmlBuilder`: monta versões de XML; não acessa certificados nem a rede.
-4. `NfeXsdValidator`: futuro componente que valida contra um pacote oficial
-   versionado.
+4. `NfeXsdValidator`: valida contra o pacote oficial versionado
+   `PL_010e_v1.02`, com suporte aos grupos IBS/CBS.
 5. `CertificateVault`: futura interface que entrega PKCS#12 e senha somente ao
    processo assinador.
 6. `NfeSigner`: futuro componente offline que confere CNPJ/validade e assina.
