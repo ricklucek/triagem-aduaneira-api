@@ -84,13 +84,34 @@ POST /import-processes/{process_id}/duimp/fetch
 ```json
 {
   "provider_environment": "production",
-  "source_provider": "portal_unico"
+  "source_provider": "portal_unico",
+  "enrich_catalog": true
 }
 ```
 
 O backend aceita a forma digitada (`26BR0000000000-1`) e envia à API a forma
 compacta (`26BR00000000001`). A resposta guarda tanto o JSON bruto quanto o
-contrato normalizado e seu checksum.
+contrato normalizado e seu checksum. Com `enrich_catalog=true`, cada produto e
+operador estrangeiro referenciado nos itens também é consultado no Catálogo de
+Produtos do Portal Único. Consultas repetidas são reaproveitadas durante a
+mesma captura.
+
+Confira `normalized_payload.catalog_enrichment` antes de criar o rascunho:
+
+```json
+{
+  "products_requested": 72,
+  "products_enriched": 72,
+  "operators_requested": 1,
+  "operators_enriched": 1,
+  "failures": []
+}
+```
+
+Os totais `*_enriched` devem coincidir com `*_requested` e `failures` deve
+estar vazio. O rascunho fiscal rejeita a descrição genérica
+`Mercadoria importada`, evitando gerar chave ou XML com um item ainda não
+enriquecido.
 
 ## 5. Criar o rascunho fiscal
 
@@ -143,10 +164,10 @@ Exemplo mínimo para importação própria:
 }
 ```
 
-`foreign_supplier` é uma complementação temporária: o endpoint privado da
-DUIMP nem sempre fornece código BACEN e endereço suficientes para a NF-e. A
-integração futura com Catálogo de Produtos/Tabelas Aduaneiras deve substituir
-essa entrada manual.
+`foreign_supplier` continua disponível como sobrescrita quando o cadastro do
+operador estrangeiro não tiver código BACEN ou endereço suficientes para a
+NF-e. Nome e endereço são preenchidos automaticamente pelo Catálogo quando
+estiverem disponíveis.
 
 O valor do produto na NF-e é o valor aduaneiro da DUIMP, que já contém frete e
 seguro. Por isso, `vFrete` e `vSeg` não são somados novamente. Siscomex, THC e

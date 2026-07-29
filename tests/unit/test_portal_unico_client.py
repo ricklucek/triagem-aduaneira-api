@@ -164,7 +164,10 @@ def test_gateway_authenticates_gets_current_version_and_paginates_items():
         transport=transport,
     )
 
-    result = gateway.fetch_duimp(duimp_number="26BR0000000000-1")
+    result = gateway.fetch_duimp(
+        duimp_number="26BR0000000000-1",
+        enrich_catalog=False,
+    )
 
     assert result["numero"] == "26BR0000000000-1"
     assert result["numeroApi"] == "26BR00000000001"
@@ -214,4 +217,99 @@ def test_gateway_rejects_item_count_mismatch():
     )
 
     with pytest.raises(Exception, match="informa 2 itens, mas a API retornou 1"):
-        gateway.fetch_duimp(duimp_number="26BR00000000001")
+        gateway.fetch_duimp(
+            duimp_number="26BR00000000001",
+            enrich_catalog=False,
+        )
+
+
+def test_gateway_enriches_products_and_operators_from_catalog():
+    item = {
+        "identificacao": {"numeroItem": 1},
+        "produto": {
+            "codigo": "215",
+            "versao": "1",
+            "ncm": "87087090",
+            "niResponsavel": "00000000",
+        },
+        "exportador": {
+            "codigo": "OPE_TEST_1",
+            "versao": "1",
+            "niOperador": "00000000",
+            "pais": {"codigo": "CN"},
+        },
+        "fabricante": {
+            "codigo": "OPE_TEST_1",
+            "versao": "1",
+            "niOperador": "00000000",
+            "pais": {"codigo": "CN"},
+        },
+    }
+    transport = FakeTransport(
+        [
+            response({}, **{"Set-Token": "jwt", "X-CSRF-Token": "csrf-1"}),
+            response({"versao": "1"}, csrf="csrf-2"),
+            response(
+                {
+                    "quantidadeItens": 1,
+                    "identificacao": {
+                        "importador": {"ni": "00000000000191"},
+                    },
+                },
+                csrf="csrf-3",
+            ),
+            response([item], csrf="csrf-4"),
+            response(
+                {
+                    "denominacao": "Roda automotiva detalhada",
+                    "codigosInterno": ["PROD-INT-001"],
+                },
+                csrf="csrf-5",
+            ),
+            response(
+                {
+                    "nome": "FOREIGN SUPPLIER TEST LTD",
+                    "tin": "FOREIGN-TAX-ID-001",
+                    "logradouro": "TEST STREET 100",
+                    "nomeCidade": "TEST CITY",
+                    "codigoPais": "CN",
+                },
+                csrf="csrf-6",
+            ),
+        ]
+    )
+    gateway = PortalUnicoDuimpGateway(
+        credentials=PortalUnicoCredentials("id", "secret"),
+        environment="production",
+        transport=transport,
+    )
+
+    result = gateway.fetch_duimp(duimp_number="26BR0000000000-1")
+
+    enriched = result["itens"][0]
+    assert enriched["produto"]["denominacao"] == "Roda automotiva detalhada"
+    assert (
+        enriched["produto"]["codigoInternoNfe"]
+        == "PROD-INT-001"
+    )
+    assert enriched["exportador"]["nome"] == (
+        "FOREIGN SUPPLIER TEST LTD"
+    )
+    assert enriched["exportador"]["endereco"]["city_name"] == "TEST CITY"
+    assert enriched["exportador"]["pais"]["codigo"] == "CN"
+    assert enriched["fabricante"]["nome"] == (
+        "FOREIGN SUPPLIER TEST LTD"
+    )
+    assert result["catalogEnrichment"] == {
+        "products_requested": 1,
+        "products_enriched": 1,
+        "operators_requested": 1,
+        "operators_enriched": 1,
+        "failures": [],
+    }
+    assert transport.requests[4].url.endswith(
+        "/catp/api/ext/produto/00000000/215/1"
+    )
+    assert transport.requests[5].url.endswith(
+        "/catp/api/ext/operador-estrangeiro/00000000/CN/OPE_TEST_1/1"
+    )

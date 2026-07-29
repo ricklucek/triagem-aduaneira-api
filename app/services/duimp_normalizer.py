@@ -100,6 +100,14 @@ class DuimpNormalizer:
             },
             "foreign_supplier": exporters[0] if exporters else None,
             "items": items,
+            "catalog_enrichment": payload.get("catalogEnrichment")
+            or {
+                "products_requested": 0,
+                "products_enriched": 0,
+                "operators_requested": 0,
+                "operators_enriched": 0,
+                "failures": [],
+            },
             "raw": payload,
         }
 
@@ -129,7 +137,13 @@ class DuimpNormalizer:
 
         return {
             "number": str(identification.get("numeroItem") or ""),
-            "product_code": str(product.get("codigo") or identification.get("numeroItem") or ""),
+            "product_code": str(
+                product.get("codigoInternoNfe")
+                or product.get("codigoInterno")
+                or product.get("codigo")
+                or identification.get("numeroItem")
+                or ""
+            ),
             "product_version": self._string(product.get("versao")),
             "description": self._string(
                 product.get("descricao")
@@ -315,7 +329,15 @@ class DuimpNormalizer:
             value = (
                 values.get("devido")
                 if values.get("devido") is not None
-                else values.get("calculado")
+                else (
+                    values.get("calculado")
+                    if values.get("calculado") is not None
+                    else (
+                        values.get("aRecolher")
+                        if values.get("aRecolher") is not None
+                        else values.get("recolhido")
+                    )
+                )
             )
             taxes[tax_type] = {
                 "value": str(self._decimal(value)),
@@ -366,6 +388,19 @@ class DuimpNormalizer:
 
     def _foreign_operator(self, payload: dict[str, Any]) -> dict[str, Any]:
         country = payload.get("pais") or {}
+        if not isinstance(country, dict):
+            country = {}
+        address = payload.get("endereco") or {}
+        if not isinstance(address, dict):
+            address = {}
+        if payload.get("logradouro"):
+            address["logradouro"] = payload["logradouro"]
+        if payload.get("nomeCidade"):
+            address["city_name"] = payload["nomeCidade"]
+        if payload.get("codigoSubdivisaoPais"):
+            address["subdivision_code"] = payload["codigoSubdivisaoPais"]
+        if payload.get("cep"):
+            address["zip_code"] = payload["cep"]
         return {
             "code": self._string(payload.get("codigo")),
             "version": self._string(payload.get("versao")),
@@ -373,9 +408,11 @@ class DuimpNormalizer:
             "foreign_tax_id": self._string(
                 payload.get("tin") or payload.get("numeroIdentificacao")
             ),
-            "country_iso_alpha_2": self._string(country.get("codigo")),
+            "country_iso_alpha_2": self._string(
+                country.get("codigo") or payload.get("codigoPais")
+            ),
             "country_name": self._string(country.get("descricao")),
-            "address": payload.get("endereco"),
+            "address": address or None,
         }
 
     @staticmethod

@@ -168,6 +168,7 @@ class FetchDuimpSchema(Schema):
         validate=validate.OneOf([ExternalProvider.PORTAL_UNICO.value]),
     )
     duimp_payload = fields.Dict(load_default=None, allow_none=True)
+    enrich_catalog = fields.Boolean(load_default=True)
 
 
 class CreateNfeDraftFromDuimpSchema(Schema):

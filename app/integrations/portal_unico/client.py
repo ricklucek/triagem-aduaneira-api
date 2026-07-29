@@ -7,7 +7,7 @@ import socket
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
@@ -317,6 +317,7 @@ class UrllibJsonTransport:
 class PortalUnicoDuimpGateway:
     AUTH_PATH = "/portal/api/autenticar/chave-acesso"
     DUIMP_BASE_PATH = "/duimp-api/api/ext"
+    CATALOG_BASE_PATH = "/catp/api/ext"
     ENVIRONMENT_HOSTS = {
         "homologation": "https://val.portalunico.siscomex.gov.br",
         "validation": "https://val.portalunico.siscomex.gov.br",
@@ -374,6 +375,7 @@ class PortalUnicoDuimpGateway:
         *,
         duimp_number: str,
         duimp_payload: dict[str, Any] | None = None,
+        enrich_catalog: bool = True,
     ) -> dict[str, Any]:
         if duimp_payload is not None:
             raise ValueError("O gateway real não aceita duimp_payload manual.")
@@ -392,6 +394,14 @@ class PortalUnicoDuimpGateway:
                 f"A DUIMP informa {expected_items} itens, mas a API retornou {len(items)}."
             )
 
+        catalog_enrichment = self._empty_catalog_enrichment()
+        if enrich_catalog:
+            importer = (general.get("identificacao") or {}).get("importador") or {}
+            catalog_enrichment = self._enrich_catalog(
+                items,
+                importer_tax_id=importer.get("ni"),
+            )
+
         return {
             "provider": "portal_unico",
             "numero": identifier.formatted,
@@ -399,11 +409,55 @@ class PortalUnicoDuimpGateway:
             "versao": str(version),
             "dadosGerais": general,
             "itens": items,
+            "catalogEnrichment": catalog_enrichment,
         }
 
     def healthcheck(self) -> dict[str, str]:
         self.authenticate()
         return {"status": "ok", "environment": self.environment}
+
+    def fetch_catalog_product(
+        self,
+        *,
+        cpf_cnpj_root: str,
+        product_code: str,
+        product_version: str,
+    ) -> dict[str, Any]:
+        self._ensure_authenticated()
+        root = self._tax_id_root(cpf_cnpj_root)
+        payload = self._get_api(
+            self.CATALOG_BASE_PATH,
+            (
+                f"/produto/{self._path_segment(root, 'CPF/CNPJ raiz')}"
+                f"/{self._path_segment(product_code, 'código do produto')}"
+                f"/{self._path_segment(product_version, 'versão do produto')}"
+            ),
+        )
+        return self._catalog_detail(payload, wrapper_keys=("produto",))
+
+    def fetch_foreign_operator(
+        self,
+        *,
+        cpf_cnpj_root: str,
+        country_code: str,
+        operator_code: str,
+        operator_version: str,
+    ) -> dict[str, Any]:
+        self._ensure_authenticated()
+        root = self._tax_id_root(cpf_cnpj_root)
+        payload = self._get_api(
+            self.CATALOG_BASE_PATH,
+            (
+                f"/operador-estrangeiro/{self._path_segment(root, 'CPF/CNPJ raiz')}"
+                f"/{self._path_segment(country_code, 'país do operador')}"
+                f"/{self._path_segment(operator_code, 'código do operador')}"
+                f"/{self._path_segment(operator_version, 'versão do operador')}"
+            ),
+        )
+        return self._catalog_detail(
+            payload,
+            wrapper_keys=("operadorEstrangeiro", "operador"),
+        )
 
     def _fetch_items(
         self, compact_number: str, version: int, expected_items: int
@@ -433,12 +487,21 @@ class PortalUnicoDuimpGateway:
         return items
 
     def _get(self, path: str, *, query: Mapping[str, Any] | None = None) -> Any:
+        return self._get_api(self.DUIMP_BASE_PATH, path, query=query)
+
+    def _get_api(
+        self,
+        base_path: str,
+        path: str,
+        *,
+        query: Mapping[str, Any] | None = None,
+    ) -> Any:
         if not self._authorization or not self._csrf_token:
             raise PortalUnicoIntegrationError("Sessão do Portal Único não autenticada.")
 
         response = self.transport.request(
             "GET",
-            f"{self.base_url}{self.DUIMP_BASE_PATH}{path}",
+            f"{self.base_url}{base_path}{path}",
             headers={
                 "Authorization": self._authorization,
                 "X-CSRF-Token": self._csrf_token,
@@ -450,6 +513,263 @@ class PortalUnicoDuimpGateway:
         if renewed_csrf:
             self._csrf_token = renewed_csrf
         return response.payload
+
+    def _ensure_authenticated(self) -> None:
+        if not self._authorization or not self._csrf_token:
+            self.authenticate()
+
+    def _enrich_catalog(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        importer_tax_id: Any,
+    ) -> dict[str, Any]:
+        summary = self._empty_catalog_enrichment()
+        product_cache: dict[tuple[str, str, str], dict[str, Any] | None] = {}
+        operator_cache: dict[
+            tuple[str, str, str, str], dict[str, Any] | None
+        ] = {}
+
+        for item in items:
+            product = item.get("produto") or {}
+            responsible_tax_id = product.get("niResponsavel") or importer_tax_id
+            try:
+                root = self._tax_id_root(responsible_tax_id)
+            except PortalUnicoIntegrationError as exc:
+                root = ""
+                summary["failures"].append(
+                    {
+                        "resource": "product",
+                        "code": str(product.get("codigo") or "").strip(),
+                        "version": str(product.get("versao") or "").strip(),
+                        "message": str(exc),
+                    }
+                )
+            product_code = str(product.get("codigo") or "").strip()
+            product_version = str(product.get("versao") or "").strip()
+            product_key = (root, product_code, product_version)
+
+            if all(product_key) and product_key not in product_cache:
+                summary["products_requested"] += 1
+                try:
+                    product_cache[product_key] = self.fetch_catalog_product(
+                        cpf_cnpj_root=root,
+                        product_code=product_code,
+                        product_version=product_version,
+                    )
+                    summary["products_enriched"] += 1
+                except PortalUnicoIntegrationError as exc:
+                    product_cache[product_key] = None
+                    summary["failures"].append(
+                        {
+                            "resource": "product",
+                            "code": product_code,
+                            "version": product_version,
+                            "message": str(exc),
+                        }
+                    )
+
+            product_detail = product_cache.get(product_key)
+            if product_detail:
+                self._merge_catalog_product(product, product_detail)
+                item["produto"] = product
+
+            for field in ("exportador", "fabricante"):
+                operator = item.get(field) or {}
+                country = operator.get("pais") or {}
+                if not isinstance(country, dict):
+                    country = {}
+                try:
+                    operator_root = self._tax_id_root(
+                        operator.get("niOperador") or root
+                    )
+                except PortalUnicoIntegrationError as exc:
+                    summary["failures"].append(
+                        {
+                            "resource": "foreign_operator",
+                            "code": str(operator.get("codigo") or "").strip(),
+                            "version": str(operator.get("versao") or "").strip(),
+                            "message": str(exc),
+                        }
+                    )
+                    continue
+                country_code = str(country.get("codigo") or "").strip().upper()
+                operator_code = str(operator.get("codigo") or "").strip()
+                operator_version = str(operator.get("versao") or "").strip()
+                operator_key = (
+                    operator_root,
+                    country_code,
+                    operator_code,
+                    operator_version,
+                )
+                if not all(operator_key):
+                    continue
+
+                if operator_key not in operator_cache:
+                    summary["operators_requested"] += 1
+                    try:
+                        operator_cache[
+                            operator_key
+                        ] = self.fetch_foreign_operator(
+                            cpf_cnpj_root=operator_root,
+                            country_code=country_code,
+                            operator_code=operator_code,
+                            operator_version=operator_version,
+                        )
+                        summary["operators_enriched"] += 1
+                    except PortalUnicoIntegrationError as exc:
+                        operator_cache[operator_key] = None
+                        summary["failures"].append(
+                            {
+                                "resource": "foreign_operator",
+                                "country_code": country_code,
+                                "code": operator_code,
+                                "version": operator_version,
+                                "message": str(exc),
+                            }
+                        )
+
+                operator_detail = operator_cache.get(operator_key)
+                if operator_detail:
+                    self._merge_catalog_operator(operator, operator_detail)
+                    item[field] = operator
+
+        return summary
+
+    @staticmethod
+    def _empty_catalog_enrichment() -> dict[str, Any]:
+        return {
+            "products_requested": 0,
+            "products_enriched": 0,
+            "operators_requested": 0,
+            "operators_enriched": 0,
+            "failures": [],
+        }
+
+    @classmethod
+    def _merge_catalog_product(
+        cls,
+        product: dict[str, Any],
+        detail: dict[str, Any],
+    ) -> None:
+        product["catalogo"] = detail
+        denomination = (
+            detail.get("denominacao")
+            or detail.get("descricao")
+            or detail.get("nome")
+        )
+        if denomination:
+            product["denominacao"] = denomination
+
+        internal_code = cls._catalog_internal_code(detail)
+        if internal_code:
+            product["codigoInternoNfe"] = internal_code
+
+    @staticmethod
+    def _merge_catalog_operator(
+        operator: dict[str, Any],
+        detail: dict[str, Any],
+    ) -> None:
+        original_code = operator.get("codigo")
+        original_version = operator.get("versao")
+        original_country = operator.get("pais")
+        original_address = operator.get("endereco")
+        operator["catalogo"] = detail
+
+        for key, value in detail.items():
+            if value not in (None, "", [], {}):
+                operator[key] = value
+
+        operator["codigo"] = original_code or operator.get("codigo")
+        operator["versao"] = original_version or operator.get("versao")
+
+        country = (
+            dict(original_country)
+            if isinstance(original_country, dict)
+            else {}
+        )
+        if detail.get("codigoPais"):
+            country["codigo"] = detail["codigoPais"]
+        operator["pais"] = country
+
+        address = (
+            dict(original_address)
+            if isinstance(original_address, dict)
+            else {}
+        )
+        for source_key, target_key in {
+            "logradouro": "logradouro",
+            "nomeCidade": "city_name",
+            "codigoSubdivisaoPais": "subdivision_code",
+            "cep": "zip_code",
+        }.items():
+            if detail.get(source_key):
+                address[target_key] = detail[source_key]
+        if address:
+            operator["endereco"] = address
+
+    @staticmethod
+    def _catalog_internal_code(detail: dict[str, Any]) -> str | None:
+        direct = (
+            detail.get("codigoInterno")
+            or detail.get("codigoInternoProduto")
+        )
+        if direct not in (None, ""):
+            return str(direct).strip()
+
+        values = (
+            detail.get("codigosInterno")
+            or detail.get("codigosInternos")
+            or []
+        )
+        if not isinstance(values, list):
+            values = [values]
+        for value in values:
+            if isinstance(value, dict):
+                value = (
+                    value.get("codigo")
+                    or value.get("valor")
+                    or value.get("codigoInterno")
+                )
+            if value not in (None, ""):
+                return str(value).strip()
+        return None
+
+    @staticmethod
+    def _catalog_detail(
+        payload: Any,
+        *,
+        wrapper_keys: tuple[str, ...],
+    ) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise PortalUnicoIntegrationError(
+                "O Catálogo do Portal Único não retornou um objeto JSON."
+            )
+        for key in wrapper_keys:
+            wrapped = payload.get(key)
+            if isinstance(wrapped, dict):
+                return wrapped
+        return payload
+
+    @staticmethod
+    def _tax_id_root(value: Any) -> str:
+        digits = "".join(filter(str.isdigit, str(value or "")))
+        if len(digits) == 14:
+            return digits[:8]
+        if len(digits) in {8, 11}:
+            return digits
+        raise PortalUnicoIntegrationError(
+            "CPF/CNPJ responsável pelo Catálogo de Produtos é inválido."
+        )
+
+    @staticmethod
+    def _path_segment(value: Any, label: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            raise PortalUnicoIntegrationError(
+                f"{label.capitalize()} é obrigatório para consultar o Catálogo."
+            )
+        return quote(text, safe="")
 
     @staticmethod
     def _extract_version(payload: Any) -> int:

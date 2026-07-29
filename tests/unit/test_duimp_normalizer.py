@@ -33,7 +33,14 @@ def portal_payload():
                         "tipo": "II",
                         "valoresBRL": {"devido": 180},
                         "memoriaCalculo": {"baseCalculoBRL": 1000},
-                    }
+                    },
+                    {
+                        "tipo": "TAXA_UTILIZACAO_SISCOMEX",
+                        "valoresBRL": {
+                            "aRecolher": 154.23,
+                            "recolhido": 154.23,
+                        },
+                    },
                 ]
             },
         },
@@ -99,6 +106,10 @@ def test_normalizes_official_portal_payload_using_customs_value():
     assert result["import_modality"] == "direct"
     assert result["foreign_supplier"]["name"] == "Fornecedor Exterior"
     assert result["tax_totals"]["ii"]["value"] == "180"
+    assert (
+        result["tax_totals"]["taxa_utilizacao_siscomex"]["value"]
+        == "154.23"
+    )
 
     item = result["items"][0]
     assert item["customs_value"] == "1000"
@@ -121,6 +132,47 @@ def test_normalizes_official_portal_payload_using_customs_value():
         },
     }
     assert item["tax_classification_code"] == "000001"
+
+
+def test_normalizes_catalog_enrichment_into_fiscal_product_fields():
+    payload = portal_payload()
+    payload["catalogEnrichment"] = {
+        "products_requested": 1,
+        "products_enriched": 1,
+        "operators_requested": 1,
+        "operators_enriched": 1,
+        "failures": [],
+    }
+    payload["itens"][0]["produto"].update(
+        {
+            "descricao": None,
+            "denominacao": "Roda automotiva detalhada",
+            "codigoInternoNfe": "PROD-INT-001",
+        }
+    )
+    payload["itens"][0]["exportador"] = {
+        "codigo": "OPE_TEST_1",
+        "versao": "1",
+        "nome": "FOREIGN SUPPLIER TEST LTD",
+        "tin": "FOREIGN-TAX-ID-001",
+        "logradouro": "TEST STREET 100",
+        "nomeCidade": "TEST CITY",
+        "codigoPais": "CN",
+    }
+
+    result = DuimpNormalizer().normalize(payload)
+
+    assert result["catalog_enrichment"]["products_enriched"] == 1
+    assert result["items"][0]["product_code"] == "PROD-INT-001"
+    assert result["items"][0]["description"] == "Roda automotiva detalhada"
+    assert result["foreign_supplier"]["foreign_tax_id"] == (
+        "FOREIGN-TAX-ID-001"
+    )
+    assert result["foreign_supplier"]["country_iso_alpha_2"] == "CN"
+    assert result["foreign_supplier"]["address"] == {
+        "logradouro": "TEST STREET 100",
+        "city_name": "TEST CITY",
+    }
 
 
 def test_rejects_mixed_modalities_in_same_duimp():

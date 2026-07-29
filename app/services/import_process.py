@@ -63,7 +63,13 @@ class ValidationResult:
 class MockDuimpGateway:
     """Gateway temporário para desenvolvimento sem dependência do Portal Único."""
 
-    def fetch_duimp(self, *, duimp_number: str, duimp_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def fetch_duimp(
+        self,
+        *,
+        duimp_number: str,
+        duimp_payload: dict[str, Any] | None = None,
+        enrich_catalog: bool = True,
+    ) -> dict[str, Any]:
         if duimp_payload:
             return duimp_payload
 
@@ -517,6 +523,7 @@ class ImportNfeService:
             raw_duimp = gateway.fetch_duimp(
                 duimp_number=duimp_number,
                 duimp_payload=manual_payload,
+                enrich_catalog=payload.get("enrich_catalog", True),
             )
             finished_at = datetime.utcnow()
             self._log_external_request(
@@ -524,7 +531,10 @@ class ImportNfeService:
                 provider=provider,
                 endpoint_name="duimp.fetch",
                 method=HttpMethod.GET.value,
-                request_payload={"duimp_number": duimp_number},
+                request_payload={
+                    "duimp_number": duimp_number,
+                    "enrich_catalog": payload.get("enrich_catalog", True),
+                },
                 response_payload=raw_duimp,
                 success=True,
                 status_code=200,
@@ -1099,8 +1109,18 @@ class ImportNfeService:
 
         for index, item in enumerate(items, start=1):
             prefix = f"items[{index}]"
-            if not item.get("description"):
+            description = str(item.get("description") or "").strip()
+            if not description:
                 errors.append({"field": f"{prefix}.description", "message": "Descrição do item é obrigatória."})
+            elif description.casefold() == "mercadoria importada":
+                errors.append(
+                    {
+                        "field": f"{prefix}.description",
+                        "message": (
+                            "Produto não enriquecido pelo Catálogo de Produtos."
+                        ),
+                    }
+                )
             if len(self._digits(item.get("ncm"))) != 8:
                 errors.append({"field": f"{prefix}.ncm", "message": "NCM deve conter 8 dígitos."})
             if not str(item.get("cfop", "")).startswith("3"):
