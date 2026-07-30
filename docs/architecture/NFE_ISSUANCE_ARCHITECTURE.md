@@ -1,6 +1,6 @@
 # Arquitetura da emissão de NF-e de importação
 
-Status: checkpoint 2 - XML não assinado validado no XSD oficial.
+Status: checkpoint 3 - XML assinado com A1 e validado no XSD oficial.
 
 ## Objetivo
 
@@ -17,9 +17,10 @@ documentos reais usados para conferência não fazem parte do repositório.
 3. `NfeXmlBuilder`: monta versões de XML; não acessa certificados nem a rede.
 4. `NfeXsdValidator`: valida contra o pacote oficial versionado
    `PL_010e_v1.02`, com suporte aos grupos IBS/CBS.
-5. `CertificateVault`: futura interface que entrega PKCS#12 e senha somente ao
-   processo assinador.
-6. `NfeSigner`: futuro componente offline que confere CNPJ/validade e assina.
+5. `CertificateVault`: entrega PKCS#12 e senha somente ao processo assinador,
+   a partir de referências versionadas.
+6. `NfeXmlSigner`: confere CNPJ, validade e uso da chave, assina e verifica a
+   XMLDSig antes de persistir a versão `signed`.
 7. `SefazGateway`: futura interface SOAP/mTLS com resolução de autorizador por
    UF e ambiente.
 

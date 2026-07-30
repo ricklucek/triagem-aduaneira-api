@@ -43,11 +43,30 @@ from ..models import (
 from app.services.nfe_access_key_service import NfeAccessKeyService
 from app.services.nfe_number_service import NfeNumberSequenceService
 from app.services.duimp_normalizer import DuimpNormalizer
+from app.services.fiscal_certificate import (
+    CertificateVault,
+    DefaultCertificateVault,
+    FiscalCertificateError,
+)
+from app.services.fiscal_certificate_registry import FiscalCertificateRegistry
 from app.services.import_tax_calculator import ImportTaxCalculator
+from app.services.nfe_issuance_state import NfeIdempotency
 from app.services.nfe_xml_builder import NfeXmlBuilder
+from app.services.nfe_xml_signer import (
+    NfeXmlSignatureError,
+    NfeXmlSigner,
+)
 from app.services.nfe_xsd_validator import (
+    NfeXsdConfigurationError,
     NfeXsdValidationResult,
     NfeXsdValidator,
+)
+from app.models.nfe_issuance import (
+    NfeAttemptOperation,
+    NfeAttemptStatus,
+    NfeIssuance,
+    NfeIssuanceAttempt,
+    NfeIssuanceEvent,
 )
 
 
@@ -112,6 +131,8 @@ class ImportNfeService:
         duimp_gateway: Any | None = None,
         credential_resolver: Any | None = None,
         xsd_validator: NfeXsdValidator | None = None,
+        certificate_vault: CertificateVault | None = None,
+        xml_signer: NfeXmlSigner | None = None,
     ):
         self.current_user = current_user
         self.organization_id = getattr(current_user, "organization_id", None)
@@ -124,6 +145,14 @@ class ImportNfeService:
         self.tax_calculator = ImportTaxCalculator()
         self.xml_builder = NfeXmlBuilder()
         self.xsd_validator = xsd_validator or NfeXsdValidator()
+        self.certificate_vault = (
+            certificate_vault or DefaultCertificateVault()
+        )
+        self.certificate_registry = FiscalCertificateRegistry(
+            current_user=current_user,
+            vault=self.certificate_vault,
+        )
+        self.xml_signer = xml_signer or NfeXmlSigner()
 
     # ------------------------------------------------------------------
     # Query helpers
@@ -889,6 +918,281 @@ class ImportNfeService:
 
         db.session.flush()
         return result
+
+    def sign_xml_version(
+        self,
+        draft: NfeDraft,
+        xml_version: NfeXmlVersion,
+        *,
+        certificate_id=None,
+    ) -> dict[str, Any]:
+        if xml_version.nfe_draft_id != draft.id:
+            raise ValueError("Versão XML não pertence ao rascunho informado.")
+        xml_type = getattr(xml_version.xml_type, "value", xml_version.xml_type)
+        if str(xml_type).lower() != NfeXmlType.UNSIGNED.value:
+            raise ValueError(
+                "Somente uma versão XML não assinada pode ser assinada."
+            )
+        if xml_version.xsd_valid is not True:
+            raise ValueError(
+                "O XML não assinado deve ser aprovado no XSD antes da assinatura."
+            )
+        latest_unsigned = (
+            NfeXmlVersion.query.filter(
+                NfeXmlVersion.nfe_draft_id == draft.id,
+                NfeXmlVersion.xml_type == NfeXmlType.UNSIGNED.value,
+            )
+            .order_by(NfeXmlVersion.version_number.desc())
+            .first()
+        )
+        if not latest_unsigned or latest_unsigned.id != xml_version.id:
+            raise ValueError(
+                "Somente a versão XML não assinada mais recente pode ser assinada."
+            )
+
+        existing_signed = NfeXmlVersion.query.filter(
+            NfeXmlVersion.nfe_draft_id == draft.id,
+            NfeXmlVersion.xml_type == NfeXmlType.SIGNED.value,
+            NfeXmlVersion.version_number == xml_version.version_number,
+        ).first()
+        existing_issuance = NfeIssuance.query.filter(
+            NfeIssuance.organization_id == draft.organization_id,
+            NfeIssuance.nfe_draft_id == draft.id,
+        ).first()
+        if existing_signed:
+            if not existing_issuance or existing_issuance.status != "signed":
+                raise ValueError(
+                    "Já existe XML assinado, mas o estado da emissão está inconsistente."
+                )
+            if (
+                certificate_id is not None
+                and existing_issuance.certificate_id != certificate_id
+            ):
+                raise ValueError(
+                    "O XML já foi assinado com outro certificado."
+                )
+            certificate = self.certificate_registry.get(
+                existing_issuance.certificate_id,
+                client_id=draft.importer_id,
+            )
+            return {
+                "xml_version": existing_signed,
+                "certificate": certificate,
+                "issuance": existing_issuance,
+                "replayed": True,
+            }
+
+        environment = getattr(draft.environment, "value", draft.environment)
+        certificate = self.certificate_registry.active_for(
+            client_id=draft.importer_id,
+            environment=str(environment),
+            certificate_id=certificate_id,
+        )
+        issuance = self._issuance_for_signature(
+            draft=draft,
+            xml_version=xml_version,
+            certificate=certificate,
+        )
+
+        attempt = self._start_signature_attempt(
+            issuance=issuance,
+            xml_version=xml_version,
+        )
+        try:
+            provider = getattr(certificate.provider, "value", certificate.provider)
+            material = self.certificate_vault.resolve(
+                provider=str(provider),
+                certificate_ref=certificate.certificate_ref,
+                password_ref=certificate.password_ref,
+            )
+            signature_result = self.xml_signer.sign(
+                xml_version.xml_content,
+                material=material,
+                expected_cnpj=certificate.issuer_cnpj,
+            )
+            xsd_result = self.xsd_validator.validate(
+                signature_result.signed_xml,
+                allow_unsigned=False,
+            )
+            if not xsd_result.is_valid:
+                raise NfeXmlSignatureError(
+                    "O XML assinado não foi aprovado no XSD oficial."
+                )
+        except (
+            FiscalCertificateError,
+            NfeXmlSignatureError,
+            NfeXsdConfigurationError,
+        ) as exc:
+            now = datetime.utcnow()
+            attempt.status = NfeAttemptStatus.FAILED.value
+            attempt.error_code = type(exc).__name__
+            attempt.error_message = str(exc)
+            attempt.finished_at = now
+            issuance.last_error_code = type(exc).__name__
+            issuance.last_error_message = str(exc)
+            issuance.updated_at = now
+            db.session.flush()
+            raise
+
+        self.certificate_registry.apply_loaded_metadata(
+            certificate,
+            signature_result.certificate,
+        )
+        now = datetime.utcnow()
+        signed_version = NfeXmlVersion(
+            nfe_draft_id=draft.id,
+            version_number=xml_version.version_number,
+            xml_type=NfeXmlType.SIGNED.value,
+            xml_content=signature_result.signed_xml,
+            xsd_valid=True,
+            xsd_errors=[],
+            access_key=draft.access_key,
+            generated_by_user_id=self.user_id,
+            generated_at=now,
+        )
+        db.session.add(signed_version)
+        db.session.flush()
+
+        previous_status = issuance.status
+        issuance.certificate_id = certificate.id
+        issuance.status = "signed"
+        issuance.last_error_code = None
+        issuance.last_error_message = None
+        issuance.updated_at = now
+
+        attempt.status = NfeAttemptStatus.SUCCEEDED.value
+        attempt.response_checksum = signature_result.signed_checksum_sha256
+        attempt.response_code = "signed"
+        attempt.response_message = "XML assinado e validado no XSD oficial."
+        attempt.finished_at = now
+
+        event = NfeIssuanceEvent(
+            nfe_issuance_id=issuance.id,
+            previous_status=str(
+                getattr(previous_status, "value", previous_status)
+            ),
+            current_status="signed",
+            reason="Assinatura XMLDSig concluída.",
+            event_metadata={
+                "unsigned_xml_version_id": str(xml_version.id),
+                "signed_xml_version_id": str(signed_version.id),
+                "certificate_fingerprint_sha256": (
+                    certificate.certificate_fingerprint_sha256
+                ),
+                "unsigned_checksum_sha256": (
+                    signature_result.unsigned_checksum_sha256
+                ),
+                "signed_checksum_sha256": (
+                    signature_result.signed_checksum_sha256
+                ),
+            },
+            actor_user_id=self.user_id,
+            created_at=now,
+        )
+        db.session.add(event)
+
+        draft.status = NfeDraftStatus.SIGNED.value
+        draft.updated_at = now
+        process = (
+            self.import_process_query_for_current_user()
+            .filter(ImportProcess.id == draft.import_process_id)
+            .first()
+        )
+        if process:
+            process.status = ImportProcessStatus.XML_SIGNED.value
+            process.updated_at = now
+
+        db.session.flush()
+        return {
+            "xml_version": signed_version,
+            "certificate": certificate,
+            "issuance": issuance,
+            "replayed": False,
+        }
+
+    def _issuance_for_signature(
+        self,
+        *,
+        draft: NfeDraft,
+        xml_version: NfeXmlVersion,
+        certificate,
+    ) -> NfeIssuance:
+        payload = {
+            "draft_id": str(draft.id),
+            "unsigned_xml_version_id": str(xml_version.id),
+            "unsigned_checksum_sha256": hashlib.sha256(
+                xml_version.xml_content.encode("utf-8")
+            ).hexdigest(),
+            "certificate_id": str(certificate.id),
+        }
+        idempotency_key = (
+            f"sign:{draft.id}:{xml_version.id}:{certificate.id}"
+        )
+        request_hash = NfeIdempotency.request_hash(payload)
+        issuance = NfeIssuance.query.filter(
+            NfeIssuance.organization_id == draft.organization_id,
+            NfeIssuance.nfe_draft_id == draft.id,
+        ).first()
+        if issuance:
+            if issuance.request_hash != request_hash:
+                raise ValueError(
+                    "A emissão existente está vinculada a outro XML ou certificado."
+                )
+            return issuance
+
+        now = datetime.utcnow()
+        issuance = NfeIssuance(
+            organization_id=draft.organization_id,
+            import_process_id=draft.import_process_id,
+            nfe_draft_id=draft.id,
+            importer_id=draft.importer_id,
+            certificate_id=certificate.id,
+            environment=draft.environment,
+            status="xsd_validated",
+            model=getattr(draft.model, "value", draft.model),
+            series=str(draft.series).zfill(3),
+            number=draft.number,
+            access_key=draft.access_key,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            created_by_user_id=self.user_id,
+            created_at=now,
+            updated_at=now,
+        )
+        db.session.add(issuance)
+        db.session.flush()
+        return issuance
+
+    def _start_signature_attempt(
+        self,
+        *,
+        issuance: NfeIssuance,
+        xml_version: NfeXmlVersion,
+    ) -> NfeIssuanceAttempt:
+        latest_attempt = (
+            NfeIssuanceAttempt.query.filter(
+                NfeIssuanceAttempt.nfe_issuance_id == issuance.id,
+                NfeIssuanceAttempt.operation
+                == NfeAttemptOperation.SIGNATURE.value,
+            )
+            .order_by(NfeIssuanceAttempt.attempt_number.desc())
+            .first()
+        )
+        attempt = NfeIssuanceAttempt(
+            nfe_issuance_id=issuance.id,
+            attempt_number=(
+                latest_attempt.attempt_number + 1 if latest_attempt else 1
+            ),
+            operation=NfeAttemptOperation.SIGNATURE.value,
+            status=NfeAttemptStatus.STARTED.value,
+            request_checksum=hashlib.sha256(
+                xml_version.xml_content.encode("utf-8")
+            ).hexdigest(),
+            started_at=datetime.utcnow(),
+        )
+        db.session.add(attempt)
+        db.session.flush()
+        return attempt
 
     # ------------------------------------------------------------------
     # Normalization / mapping / validation

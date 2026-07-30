@@ -29,13 +29,19 @@
 Preferência: certificado e senha como secrets distintos no Secret Manager,
 desde que o PKCS#12 esteja dentro do limite aceito pelo serviço.
 
+O secret do certificado armazena os bytes originais do PFX/P12. As referências
+usam `gcp:NOME@VERSAO`; a versão pode ser omitida para usar `latest`. A senha é
+resolvida por outra referência e nunca compõe payloads, logs ou respostas.
+
 Alternativa para PKCS#12 maior: objeto privado no Cloud Storage, com senha no
 Secret Manager, acesso uniforme, bloqueio público, versionamento e CMEK. O banco
 armazena somente referências e metadados.
 
 ## Acesso
 
-Papéis separados:
+No checkpoint atual, todas as mutações de certificado e a assinatura exigem o
+papel `admin`. A separação abaixo deverá ser aplicada quando os papéis fiscais
+específicos forem introduzidos:
 
 - operador cadastra uma nova versão sem conseguir emitir;
 - aprovador ativa o certificado depois da validação;

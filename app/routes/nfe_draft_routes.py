@@ -1,7 +1,7 @@
 from flask import Blueprint, Response, current_app, g, jsonify
 from marshmallow import ValidationError
 
-from ..auth import auth_required
+from ..auth import admin_required, auth_required
 from ..extensions import db
 from ..models.import_process import NfeDraftItem, NfeXmlVersion
 from ..schemas.import_process import (
@@ -11,7 +11,13 @@ from ..schemas.import_process import (
     NfeXmlVersionSchema,
     UpdateNfeDraftItemSchema,
 )
+from ..schemas.fiscal_certificate import SignNfeXmlSchema
+from ..services.fiscal_certificate import (
+    DefaultCertificateVault,
+    FiscalCertificateError,
+)
 from ..services.import_process import ImportNfeService
+from ..services.nfe_xml_signer import NfeXmlSignatureError, NfeXmlSigner
 from ..services.nfe_xsd_validator import (
     NfeXsdConfigurationError,
     NfeXsdValidator,
@@ -36,6 +42,14 @@ def _service() -> ImportNfeService:
         current_user=g.current_user,
         xsd_validator=NfeXsdValidator(
             schema_path=current_app.config.get("NFE_XSD_PATH")
+        ),
+        certificate_vault=(
+            current_app.config.get("NFE_CERTIFICATE_VAULT")
+            or DefaultCertificateVault()
+        ),
+        xml_signer=(
+            current_app.config.get("NFE_XML_SIGNER")
+            or NfeXmlSigner()
         ),
     )
 
@@ -262,4 +276,86 @@ def validate_nfe_xml_version_xsd(draft_id: str, xml_version_id: str):
             "xsd_errors": xml_version.xsd_errors,
             **result.to_dict(),
         }
+    )
+
+
+@nfe_draft_bp.post(
+    "/<draft_id>/xml-versions/<xml_version_id>/sign"
+)
+@admin_required
+def sign_nfe_xml_version(draft_id: str, xml_version_id: str):
+    service, draft, xml_version = _draft_and_xml_version(
+        draft_id,
+        xml_version_id,
+    )
+    try:
+        payload = SignNfeXmlSchema().load(json_payload())
+        result = service.sign_xml_version(
+            draft,
+            xml_version,
+            certificate_id=payload.get("certificate_id"),
+        )
+        db.session.commit()
+    except ValidationError as exc:
+        db.session.rollback()
+        return validation_error_response(exc)
+    except NfeXsdConfigurationError as exc:
+        db.session.commit()
+        return (
+            jsonify(
+                {
+                    "error": "xsd_schema_unavailable",
+                    "message": str(exc),
+                }
+            ),
+            503,
+        )
+    except (
+        FiscalCertificateError,
+        NfeXmlSignatureError,
+    ) as exc:
+        db.session.commit()
+        return (
+            jsonify(
+                {
+                    "error": "nfe_signature_error",
+                    "message": str(exc),
+                }
+            ),
+            422,
+        )
+    except ValueError as exc:
+        db.session.rollback()
+        return bad_request_response(exc)
+
+    signed_version = result["xml_version"]
+    issuance = result["issuance"]
+    certificate = result["certificate"]
+    status_code = 200 if result["replayed"] else 201
+    return (
+        jsonify(
+            {
+                "xml_version": nfe_xml_version_schema.dump(signed_version),
+                "issuance": {
+                    "id": str(issuance.id),
+                    "status": issuance.status,
+                    "certificate_id": str(certificate.id),
+                    "access_key": issuance.access_key,
+                },
+                "certificate": {
+                    "id": str(certificate.id),
+                    "issuer_cnpj": certificate.issuer_cnpj,
+                    "fingerprint_sha256": (
+                        certificate.certificate_fingerprint_sha256
+                    ),
+                    "valid_until": (
+                        certificate.valid_until.isoformat()
+                        if certificate.valid_until
+                        else None
+                    ),
+                },
+                "replayed": result["replayed"],
+            }
+        ),
+        status_code,
     )

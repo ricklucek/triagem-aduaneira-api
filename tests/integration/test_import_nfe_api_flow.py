@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from uuid import UUID
 
 import jwt
 import pytest
@@ -6,6 +7,13 @@ import pytest
 from app import create_app
 from app.extensions import db
 from app.models import Client, Organization, User
+from app.models.nfe_issuance import (
+    NfeAttemptStatus,
+    NfeIssuance,
+    NfeIssuanceAttempt,
+    NfeIssuanceEvent,
+)
+from tests.helpers import StaticCertificateVault, certificate_material
 
 
 class TestConfig:
@@ -20,6 +28,9 @@ class TestConfig:
 @pytest.fixture
 def api():
     app = create_app(TestConfig)
+    app.config["NFE_CERTIFICATE_VAULT"] = StaticCertificateVault(
+        certificate_material("00000000000191")
+    )
     with app.app_context():
         db.create_all()
         organization = Organization(nome="Organização Teste", slug="org-teste")
@@ -222,3 +233,128 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
     assert versions_response.status_code == 200
     assert versions_response.get_json()[0]["xsd_valid"] is True
     assert versions_response.get_json()[0]["xsd_errors"] == []
+
+    certificate_response = client.post(
+        f"/clients/{importer_id}/fiscal-certificates",
+        headers=headers,
+        json={
+            "environment": "homologation",
+            "provider": "gcp_secret_manager",
+            "certificate_ref": "gcp:nfe-hom-client-test-pfx@1",
+            "password_ref": "gcp:nfe-hom-client-test-password@1",
+        },
+    )
+    assert certificate_response.status_code == 201
+    certificate_body = certificate_response.get_json()
+    certificate_id = certificate_body["id"]
+    assert certificate_body["status"] == "pending_validation"
+    assert certificate_body["is_active"] is False
+    assert "certificate_ref" not in certificate_body
+    assert "password_ref" not in certificate_body
+
+    validation_response = client.post(
+        (
+            f"/clients/{importer_id}/fiscal-certificates/"
+            f"{certificate_id}/validate"
+        ),
+        headers=headers,
+        json={},
+    )
+    assert validation_response.status_code == 200
+    assert validation_response.get_json()["valid"] is True
+    assert (
+        validation_response.get_json()["issuer_cnpj"]
+        == "00000000000191"
+    )
+    assert len(
+        validation_response.get_json()["certificate_fingerprint_sha256"]
+    ) == 64
+
+    activation_response = client.post(
+        (
+            f"/clients/{importer_id}/fiscal-certificates/"
+            f"{certificate_id}/activate"
+        ),
+        headers=headers,
+        json={},
+    )
+    assert activation_response.status_code == 200
+    assert activation_response.get_json()["status"] == "active"
+    assert activation_response.get_json()["is_active"] is True
+
+    signature_response = client.post(
+        f"/nfe-drafts/{draft_id}/xml-versions/{xml_version_id}/sign",
+        headers=headers,
+        json={"certificate_id": certificate_id},
+    )
+    assert signature_response.status_code == 201, (
+        signature_response.get_json()
+    )
+    signature_body = signature_response.get_json()
+    signed_version = signature_body["xml_version"]
+    signed_version_id = signed_version["id"]
+    assert signature_body["replayed"] is False
+    assert signature_body["issuance"]["status"] == "signed"
+    assert signed_version["xml_type"] == "SIGNED"
+    assert signed_version["version_number"] == 1
+    assert signed_version["xsd_valid"] is True
+    assert signed_version["xsd_errors"] == []
+    assert "<Signature" in signed_version["xml_content"]
+    assert "<X509Certificate>" in signed_version["xml_content"]
+
+    replay_response = client.post(
+        f"/nfe-drafts/{draft_id}/xml-versions/{xml_version_id}/sign",
+        headers=headers,
+        json={"certificate_id": certificate_id},
+    )
+    assert replay_response.status_code == 200
+    assert replay_response.get_json()["replayed"] is True
+    assert (
+        replay_response.get_json()["xml_version"]["id"]
+        == signed_version_id
+    )
+
+    signed_download = client.get(
+        (
+            f"/nfe-drafts/{draft_id}/xml-versions/"
+            f"{signed_version_id}/download"
+        ),
+        headers=headers,
+    )
+    assert signed_download.status_code == 200
+    assert b"<Signature" in signed_download.data
+    assert (
+        f"NFe-{xml_body['access_key']}-signed-v1.xml"
+        in signed_download.headers["Content-Disposition"]
+    )
+
+    process_after_signature = client.get(
+        f"/import-processes/{process_id}",
+        headers=headers,
+    )
+    assert process_after_signature.status_code == 200
+    assert process_after_signature.get_json()["status"] == "XML_SIGNED"
+
+    with client.application.app_context():
+        issuance = NfeIssuance.query.filter_by(
+            nfe_draft_id=UUID(draft_id)
+        ).one()
+        assert issuance.status == "signed"
+        assert str(issuance.certificate_id) == certificate_id
+
+        attempts = NfeIssuanceAttempt.query.filter_by(
+            nfe_issuance_id=issuance.id
+        ).all()
+        assert len(attempts) == 1
+        assert attempts[0].status == NfeAttemptStatus.SUCCEEDED
+        assert len(attempts[0].request_checksum) == 64
+        assert len(attempts[0].response_checksum) == 64
+
+        events = NfeIssuanceEvent.query.filter_by(
+            nfe_issuance_id=issuance.id
+        ).all()
+        assert len(events) == 1
+        assert events[0].previous_status == "xsd_validated"
+        assert events[0].current_status == "signed"
+        assert "certificate_ref" not in events[0].event_metadata
+        assert "password_ref" not in events[0].event_metadata

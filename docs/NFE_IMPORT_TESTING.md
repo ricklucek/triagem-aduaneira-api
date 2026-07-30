@@ -254,8 +254,8 @@ em `nfe_xml_versions.xsd_valid` e `nfe_xml_versions.xsd_errors`.
 Como o XSD de `NFe` exige `Signature`, a validação da versão `unsigned` cria
 uma assinatura estrutural apenas em uma cópia em memória. O XML armazenado não
 é alterado e continua sem assinatura digital. A assinatura temporária não
-realiza validação criptográfica; isso será feito posteriormente com o
-certificado A1.
+realiza validação criptográfica. A assinatura efetiva é realizada somente pelo
+endpoint descrito a seguir, com o certificado A1 ativo do emitente.
 
 Quando válido, o processo passa para `xml_validated`. Quando inválido, passa
 para `xml_validation_failed` e a resposta informa linha, coluna, tipo e mensagem
@@ -263,6 +263,108 @@ de cada erro.
 
 O schema já acompanha a aplicação. `NFE_XSD_PATH` só precisa ser configurada
 para testar outro pacote de schemas de forma controlada.
+
+## 8. Cadastrar e validar o certificado A1
+
+O arquivo PFX/P12 e sua senha devem ficar em secrets distintos. No Secret
+Manager, o secret do certificado contém os bytes originais do arquivo, sem
+conversão para Base64. As referências salvas no banco aceitam:
+
+- `gcp:NOME_DO_SECRET`, que usa a versão `latest`;
+- `gcp:NOME_DO_SECRET@VERSAO`, que fixa uma versão numérica.
+
+O cadastro não transfere bytes ou senha pela API:
+
+```http
+POST /clients/{client_id}/fiscal-certificates
+Content-Type: application/json
+
+{
+  "environment": "homologation",
+  "provider": "gcp_secret_manager",
+  "certificate_ref": "gcp:nfe-hom-client-pfx@1",
+  "password_ref": "gcp:nfe-hom-client-password@1"
+}
+```
+
+Copie o `id` retornado e valide o material:
+
+```http
+POST /clients/{client_id}/fiscal-certificates/{certificate_id}/validate
+Content-Type: application/json
+
+{}
+```
+
+A validação abre o PKCS#12 somente em memória, exige chave privada RSA, confere
+o CNPJ com o perfil fiscal, o período de validade e o uso para assinatura
+digital. Quando aprovada, persiste apenas fingerprint SHA-256, serial, titular
+e datas. As referências dos secrets nunca são devolvidas pela API.
+
+Depois da conferência, ative explicitamente:
+
+```http
+POST /clients/{client_id}/fiscal-certificates/{certificate_id}/activate
+Content-Type: application/json
+
+{}
+```
+
+Somente um certificado pode permanecer ativo para cada cliente e ambiente. A
+ativação desabilita o anterior. Cadastro, validação, ativação e assinatura
+exigem usuário `admin`.
+
+## 9. Assinar o XML validado
+
+Use o `id` da versão `unsigned` mais recente e já aprovada no XSD:
+
+```http
+POST /nfe-drafts/{draft_id}/xml-versions/{unsigned_xml_version_id}/sign
+Content-Type: application/json
+
+{
+  "certificate_id": "UUID_DO_CERTIFICADO_ATIVO"
+}
+```
+
+Se `certificate_id` for omitido, o backend seleciona o único A1 ativo do
+cliente e ambiente. A operação:
+
+1. resolve PFX e senha sob demanda;
+2. reconfirma CNPJ, validade e chave privada;
+3. calcula o digest SHA-1 canonizado de `infNFe`;
+4. assina `SignedInfo` com RSA-SHA1, conforme o XMLDSig exigido pelo leiaute;
+5. verifica digest e assinatura com a chave pública;
+6. valida o XML assinado no XSD oficial;
+7. persiste uma versão `signed` sem sobrescrever a `unsigned`;
+8. registra emissão, tentativa, checksums e transição de estado.
+
+Resposta esperada:
+
+```json
+{
+  "replayed": false,
+  "issuance": {
+    "status": "signed",
+    "access_key": "CHAVE_DE_44_DIGITOS"
+  },
+  "xml_version": {
+    "xml_type": "SIGNED",
+    "xsd_valid": true,
+    "xsd_errors": []
+  }
+}
+```
+
+Repetir a mesma requisição devolve HTTP `200`, `replayed=true` e a mesma versão
+assinada. A primeira execução devolve HTTP `201`. O processo passa para
+`xml_signed`.
+
+Baixe o arquivo assinado pelo endpoint já existente:
+
+```http
+GET /nfe-drafts/{draft_id}/xml-versions/{signed_xml_version_id}/download
+```
 
 ## Modalidades
 
@@ -284,7 +386,8 @@ fiscal, com regras próprias.
 
 ## Limites desta etapa
 
-- Ainda não há assinatura A1, transmissão, recibo, protocolo ou eventos.
+- A assinatura A1 está implementada, mas ainda não há transmissão, recibo,
+  protocolo de autorização ou eventos fiscais enviados à SEFAZ.
 - A aprovação no XSD comprova a conformidade estrutural, mas não executa as
   regras de negócio aplicadas pela autorização da SEFAZ.
 - O cálculo usa parâmetros explícitos porque ICMS e benefícios dependem da UF,
