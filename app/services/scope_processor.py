@@ -167,6 +167,7 @@ class ScopeDataProcessor:
             "client_id": str(scope.client_id) if scope.client_id else None,
             "client_cnpj": scope.client.cnpj if scope.client else None,
             "client_razao_social": scope.client.razao_social if scope.client else None,
+            "client_nome_resumido": scope.client.nome_resumido if scope.client else None,
             "responsible_user_id": str(scope.responsible_user_id) if scope.responsible_user_id else None,
             "responsible_user_nome": scope.responsible_user.nome if scope.responsible_user else None,
         }

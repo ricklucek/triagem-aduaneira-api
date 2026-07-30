@@ -121,7 +121,7 @@ def list_scopes():
     if params.get("q"):
         term = f"%{params['q']}%"
         query = query.outerjoin(Client, Scope.client_id == Client.id).filter(
-            or_(Client.razao_social.ilike(term), Client.cnpj.ilike(term), Scope.status.ilike(term))
+            or_(Client.razao_social.ilike(term), Client.nome_resumido.ilike(term), Client.cnpj.ilike(term), Scope.status.ilike(term))
         )
 
     total = query.count()
