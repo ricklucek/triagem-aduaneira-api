@@ -1,0 +1,102 @@
+from decimal import Decimal, InvalidOperation
+
+from marshmallow import EXCLUDE, Schema, ValidationError, fields, validate, validates_schema
+
+from ..models import FiscalEnvironment, ImportPurpose
+
+
+class ClientImportTaxRuleSchema(Schema):
+    class Meta:
+        unknown = EXCLUDE
+
+    id = fields.UUID(dump_only=True)
+    organization_id = fields.UUID(dump_only=True)
+    client_id = fields.UUID(dump_only=True)
+    name = fields.String(required=True, validate=validate.Length(min=1, max=120))
+    issuer_state = fields.String(
+        required=True,
+        validate=validate.Regexp(r"^[A-Z]{2}$"),
+    )
+    import_purpose = fields.String(
+        required=True,
+        validate=validate.OneOf(ImportPurpose.values()),
+    )
+    import_modality = fields.String(
+        load_default=None,
+        allow_none=True,
+        validate=validate.OneOf(["direct", "on_behalf", "by_order"]),
+    )
+    tax_regime = fields.String(
+        load_default=None,
+        allow_none=True,
+        validate=validate.OneOf(["1", "2", "3"]),
+    )
+    ncm_pattern = fields.String(
+        load_default=None,
+        allow_none=True,
+        validate=validate.Regexp(r"^[0-9]{2,8}$"),
+    )
+    priority = fields.Integer(load_default=0)
+    configuration_json = fields.Dict(required=True)
+    additional_cost_defaults = fields.Dict(load_default=None, allow_none=True)
+    transport_defaults = fields.Dict(load_default=None, allow_none=True)
+    payment_defaults = fields.Dict(load_default=None, allow_none=True)
+    active = fields.Boolean(load_default=True)
+    effective_from = fields.Date(load_default=None, allow_none=True)
+    effective_until = fields.Date(load_default=None, allow_none=True)
+    created_by_user_id = fields.UUID(dump_only=True)
+    created_at = fields.DateTime(dump_only=True)
+    updated_at = fields.DateTime(dump_only=True)
+
+    @validates_schema
+    def validate_rule(self, data, **kwargs):
+        start = data.get("effective_from")
+        end = data.get("effective_until")
+        if start and end and end < start:
+            raise ValidationError(
+                "effective_until não pode ser anterior a effective_from.",
+                field_name="effective_until",
+            )
+
+        configuration = data.get("configuration_json")
+        if configuration is None:
+            return
+        try:
+            rate = Decimal(str(configuration.get("icms_rate")))
+        except (InvalidOperation, TypeError, ValueError):
+            raise ValidationError(
+                "configuration_json.icms_rate deve ser numérico.",
+                field_name="configuration_json",
+            )
+        if not Decimal("0") < rate < Decimal("100"):
+            raise ValidationError(
+                "configuration_json.icms_rate deve ser maior que 0 e menor que 100.",
+                field_name="configuration_json",
+            )
+
+
+class UpdateClientImportTaxRuleSchema(ClientImportTaxRuleSchema):
+    name = fields.String(validate=validate.Length(min=1, max=120))
+    issuer_state = fields.String(validate=validate.Regexp(r"^[A-Z]{2}$"))
+    import_purpose = fields.String(validate=validate.OneOf(ImportPurpose.values()))
+    configuration_json = fields.Dict()
+
+
+class NfeContextQuerySchema(Schema):
+    duimp_snapshot_id = fields.UUID(load_default=None, allow_none=True)
+    import_purpose = fields.String(
+        required=True,
+        validate=validate.OneOf(ImportPurpose.values()),
+    )
+    provider_environment = fields.String(
+        load_default=None,
+        allow_none=True,
+        validate=validate.OneOf(FiscalEnvironment.values()),
+    )
+    refresh_external = fields.Boolean(load_default=False)
+
+
+class ResolveNfeContextSchema(NfeContextQuerySchema):
+    refresh_external = fields.Boolean(load_default=True)
+    overrides = fields.Dict(load_default=dict)
+

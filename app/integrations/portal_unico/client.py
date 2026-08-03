@@ -318,6 +318,9 @@ class PortalUnicoDuimpGateway:
     AUTH_PATH = "/portal/api/autenticar/chave-acesso"
     DUIMP_BASE_PATH = "/duimp-api/api/ext"
     CATALOG_BASE_PATH = "/catp/api/ext"
+    CCT_IMPORT_BASE_PATH = "/ccta/api/ext"
+    PCCE_BASE_PATH = "/pcce/api"
+    TABX_BASE_PATH = "/tabx/api/ext"
     ENVIRONMENT_HOSTS = {
         "homologation": "https://val.portalunico.siscomex.gov.br",
         "validation": "https://val.portalunico.siscomex.gov.br",
@@ -458,6 +461,94 @@ class PortalUnicoDuimpGateway:
             payload,
             wrapper_keys=("operadorEstrangeiro", "operador"),
         )
+
+    def fetch_cargo_knowledge(
+        self,
+        *,
+        knowledge_number: str,
+        responsible_tax_id: str | None = None,
+        issue_date: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Consulta somente-leitura do conhecimento no CCT Importação."""
+        self._ensure_authenticated()
+        number = str(knowledge_number or "").strip()
+        if not number:
+            raise ValueError("Número do conhecimento de carga é obrigatório.")
+
+        query: dict[str, Any] = {"numeroConhecimento": number}
+        if responsible_tax_id:
+            query["cnpjResponsavel"] = self._tax_id(responsible_tax_id)
+        if issue_date:
+            query["dataEmissao"] = str(issue_date)
+
+        payload = self._get_api(
+            self.CCT_IMPORT_BASE_PATH,
+            "/conhecimentos",
+            query=query,
+        )
+        if not isinstance(payload, list):
+            raise PortalUnicoIntegrationError(
+                "A consulta do CCT não retornou uma lista de conhecimentos."
+            )
+        return [item for item in payload if isinstance(item, dict)]
+
+    def fetch_icms_declaration(self, *, duimp_number: str) -> dict[str, Any]:
+        """Consulta somente-leitura da declaração de ICMS no PCCE."""
+        self._ensure_authenticated()
+        identifier = DuimpIdentifier.parse(duimp_number)
+        payload = self._get_api(
+            self.PCCE_BASE_PATH,
+            f"/ext/priv/icms/{identifier.compact}",
+        )
+        if not isinstance(payload, dict):
+            raise PortalUnicoIntegrationError(
+                "A consulta do PCCE não retornou uma declaração de ICMS válida."
+            )
+        return payload
+
+    def fetch_comex_table(
+        self,
+        *,
+        table_name: str,
+        filters: list[dict[str, Any]] | None = None,
+        return_fields: list[dict[str, Any]] | None = None,
+        sort_fields: list[dict[str, Any]] | None = None,
+        level: int = 0,
+        offset: int = 1,
+    ) -> dict[str, Any]:
+        """Consulta uma tabela TABX usando o contrato JSON da API oficial."""
+        self._ensure_authenticated()
+        name = str(table_name or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9_]{1,50}", name):
+            raise ValueError("Nome da tabela TABX inválido.")
+        if level not in {0, 1}:
+            raise ValueError("Nível da consulta TABX deve ser 0 ou 1.")
+        if offset < 1:
+            raise ValueError("Offset da consulta TABX deve ser maior ou igual a 1.")
+
+        query: dict[str, Any] = {"nivel": str(level), "offset": str(offset)}
+        for key, value in {
+            "filtros": filters,
+            "camposRetorno": return_fields,
+            "camposOrdenacao": sort_fields,
+        }.items():
+            if value:
+                query[key] = json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+
+        payload = self._get_api(
+            self.TABX_BASE_PATH,
+            f"/tabela/{quote(name, safe='')}",
+            query=query,
+        )
+        if not isinstance(payload, dict):
+            raise PortalUnicoIntegrationError(
+                "A consulta TABX não retornou um objeto JSON válido."
+            )
+        return payload
 
     def _fetch_items(
         self, compact_number: str, version: int, expected_items: int
@@ -761,6 +852,13 @@ class PortalUnicoDuimpGateway:
         raise PortalUnicoIntegrationError(
             "CPF/CNPJ responsável pelo Catálogo de Produtos é inválido."
         )
+
+    @staticmethod
+    def _tax_id(value: Any) -> str:
+        digits = "".join(filter(str.isdigit, str(value or "")))
+        if len(digits) in {11, 14}:
+            return digits
+        raise ValueError("CPF/CNPJ deve conter 11 ou 14 dígitos.")
 
     @staticmethod
     def _path_segment(value: Any, label: str) -> str:

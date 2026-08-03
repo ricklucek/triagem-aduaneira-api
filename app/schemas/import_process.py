@@ -1,4 +1,4 @@
-from marshmallow import EXCLUDE, Schema, fields, validate
+from marshmallow import EXCLUDE, Schema, ValidationError, fields, validate, validates_schema
 from marshmallow_sqlalchemy import SQLAlchemyAutoSchema, auto_field
 
 from app.models.import_process import NfeNumberSequence
@@ -187,13 +187,22 @@ class CreateNfeDraftFromDuimpSchema(Schema):
     )
     duimp_payload = fields.Dict(load_default=None, allow_none=True)
     duimp_snapshot_id = fields.UUID(load_default=None, allow_none=True)
-    tax_configuration = fields.Dict(required=True)
+    tax_configuration = fields.Dict(load_default=None, allow_none=True)
+    tax_rule_id = fields.UUID(load_default=None, allow_none=True)
     additional_costs = fields.Dict(load_default=dict)
     foreign_supplier = fields.Dict(load_default=None, allow_none=True)
     duimp_overrides = fields.Dict(load_default=dict)
     transport = fields.Dict(load_default=dict)
     payment = fields.Dict(load_default=dict)
     additional_info = fields.Dict(load_default=dict)
+
+    @validates_schema
+    def validate_tax_source(self, data, **kwargs):
+        if data.get("tax_configuration") is not None and data.get("tax_rule_id"):
+            raise ValidationError(
+                "Informe tax_configuration ou tax_rule_id, não ambos.",
+                field_name="tax_rule_id",
+            )
 
 
 class UpdateNfeDraftItemSchema(Schema):

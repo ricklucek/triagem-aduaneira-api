@@ -313,3 +313,56 @@ def test_gateway_enriches_products_and_operators_from_catalog():
     assert transport.requests[5].url.endswith(
         "/catp/api/ext/operador-estrangeiro/00000000/CN/OPE_TEST_1/1"
     )
+
+
+def test_gateway_reads_cct_pcce_and_tabx_without_mutating_operations():
+    transport = FakeTransport(
+        [
+            response({}, **{"Set-Token": "jwt", "X-CSRF-Token": "csrf-1"}),
+            response([{"identificacao": "RUC-1", "tipo": "AWB"}], csrf="csrf-2"),
+            response(
+                {"numeroDuimp": "26BR00000000001", "ufFavorecida": "PR"},
+                csrf="csrf-3",
+            ),
+            response(
+                {
+                    "nomeTabela": "UNIDADE_ADUANEIRA",
+                    "dados": [{"campos": [{"nome": "CODIGO", "valor": "0927800"}]}],
+                },
+                csrf="csrf-4",
+            ),
+        ]
+    )
+    gateway = PortalUnicoDuimpGateway(
+        credentials=PortalUnicoCredentials("id", "secret"),
+        environment="production",
+        transport=transport,
+    )
+
+    cct = gateway.fetch_cargo_knowledge(knowledge_number="RUC-1")
+    pcce = gateway.fetch_icms_declaration(duimp_number="26BR0000000000-1")
+    tabx = gateway.fetch_comex_table(
+        table_name="UNIDADE_ADUANEIRA",
+        filters=[
+            {
+                "nomeTabela": "UNIDADE_ADUANEIRA",
+                "nome": "CODIGO",
+                "valores": ["0927800"],
+            }
+        ],
+    )
+
+    assert cct[0]["tipo"] == "AWB"
+    assert pcce["ufFavorecida"] == "PR"
+    assert tabx["nomeTabela"] == "UNIDADE_ADUANEIRA"
+    assert transport.requests[1].method == "GET"
+    assert transport.requests[1].url.endswith("/ccta/api/ext/conhecimentos")
+    assert transport.requests[1].query == {"numeroConhecimento": "RUC-1"}
+    assert transport.requests[2].url.endswith(
+        "/pcce/api/ext/priv/icms/26BR00000000001"
+    )
+    assert transport.requests[3].url.endswith(
+        "/tabx/api/ext/tabela/UNIDADE_ADUANEIRA"
+    )
+    assert transport.requests[3].query["nivel"] == "0"
+    assert '"valores":["0927800"]' in transport.requests[3].query["filtros"]

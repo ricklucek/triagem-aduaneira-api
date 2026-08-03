@@ -358,3 +358,161 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
         assert events[0].current_status == "signed"
         assert "certificate_ref" not in events[0].event_metadata
         assert "password_ref" not in events[0].event_metadata
+
+
+def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
+    client, headers, importer_id = api
+
+    profile_response = client.put(
+        f"/clients/{importer_id}/fiscal-profile",
+        headers=headers,
+        json={
+            "legal_name": "Importadora Teste Ltda",
+            "cnpj": "00000000000191",
+            "state_registration": "1234567890",
+            "tax_regime": "3",
+            "street": "Rua de Teste",
+            "number": "100",
+            "district": "Centro",
+            "city_code": "4106902",
+            "city_name": "Curitiba",
+            "state": "PR",
+            "zip_code": "80000000",
+        },
+    )
+    assert profile_response.status_code == 200
+
+    rule_response = client.post(
+        f"/clients/{importer_id}/import-tax-rules",
+        headers=headers,
+        json={
+            "name": "PR revenda direta padrão",
+            "issuer_state": "PR",
+            "import_purpose": "resale",
+            "import_modality": "direct",
+            "tax_regime": "3",
+            "priority": 100,
+            "configuration_json": {
+                "icms_rate": "12",
+                "icms_origin": "1",
+                "icms_cst": "90",
+                "ipi_cst": "49",
+                "pis_cst": "98",
+                "cofins_cst": "98",
+            },
+            "transport_defaults": {"freight_mode": "9"},
+            "payment_defaults": {"method": "90", "value": "0.00"},
+        },
+    )
+    assert rule_response.status_code == 201, rule_response.get_json()
+    rule_id = rule_response.get_json()["id"]
+
+    process_response = client.post(
+        "/import-processes",
+        headers=headers,
+        json={
+            "importer_id": importer_id,
+            "reference_code": "TESTE-AUTOMACAO-001",
+            "duimp_number": "26BR0000000000-1",
+            "source": "manual",
+        },
+    )
+    assert process_response.status_code == 201
+    process_id = process_response.get_json()["id"]
+
+    snapshot_response = client.post(
+        f"/import-processes/{process_id}/duimp-snapshots",
+        headers=headers,
+        json={
+            "duimp_number": "26BR0000000000-1",
+            "duimp_version": "1",
+            "raw_payload": {
+                "numero": "26BR0000000000-1",
+                "versao": "1",
+                "dataRegistro": "2026-07-14",
+                "modalidadeImportacao": "direct",
+                "itens": [
+                    {
+                        "numeroItem": "1",
+                        "codigoProduto": "PROD-001",
+                        "descricao": "Produto automatizado",
+                        "ncm": "87087090",
+                        "quantidade": "2",
+                        "unidade": "UN",
+                        "valorProduto": "100.00",
+                        "valorUnitario": "50.00",
+                        "tributos": {
+                            "ii": {"base": "100", "rate": "18", "value": "18"},
+                            "ipi": {"base": "118", "rate": "3.25", "value": "3.84"},
+                            "pis": {"base": "100", "rate": "3.12", "value": "3.12"},
+                            "cofins": {"base": "100", "rate": "14.37", "value": "14.37"},
+                        },
+                    }
+                ],
+            },
+        },
+    )
+    assert snapshot_response.status_code == 201, snapshot_response.get_json()
+    snapshot_id = snapshot_response.get_json()["id"]
+
+    before = client.get(
+        f"/import-processes/{process_id}/nfe-context",
+        headers=headers,
+        query_string={
+            "duimp_snapshot_id": snapshot_id,
+            "import_purpose": "resale",
+        },
+    )
+    assert before.status_code == 200, before.get_json()
+    assert before.get_json()["ready_for_draft"] is False
+    assert "clearance_date" in before.get_json()["missing_fields"]
+    assert before.get_json()["tax_rule"]["id"] == rule_id
+
+    resolved = client.post(
+        f"/import-processes/{process_id}/nfe-context/resolve",
+        headers=headers,
+        json={
+            "duimp_snapshot_id": snapshot_id,
+            "import_purpose": "resale",
+            "refresh_external": False,
+            "overrides": {
+                "clearance_location": "PORTO DE PARANAGUA",
+                "clearance_state": "PR",
+                "clearance_date": "2026-07-15",
+                "transport_mode_code": "1",
+                "foreign_supplier": {
+                    "name": "Foreign Supplier Ltd",
+                    "country_code": "1600",
+                    "country_name": "CHINA",
+                },
+            },
+        },
+    )
+    assert resolved.status_code == 200, resolved.get_json()
+    assert resolved.get_json()["ready_for_draft"] is True
+    assert (
+        resolved.get_json()["fields"]["clearance_date"]["source"]
+        == "operator_override"
+    )
+
+    draft_response = client.post(
+        f"/import-processes/{process_id}/nfe-draft/from-duimp",
+        headers=headers,
+        json={
+            "environment": "homologation",
+            "series": "1",
+            "import_purpose": "resale",
+            "duimp_snapshot_id": snapshot_id,
+        },
+    )
+    assert draft_response.status_code == 201, draft_response.get_json()
+    body = draft_response.get_json()
+    assert body["validation"]["valid"] is True
+    assert body["tax_rule"]["id"] == rule_id
+    assert body["draft"]["fiscal_payload"]["source"] == {
+        "duimp_source": "DUIMP",
+        "fiscal_profile_id": profile_response.get_json()["id"],
+        "import_process_id": process_id,
+        "tax_configuration_source": "client_import_tax_rule",
+        "tax_rule_id": rule_id,
+    }

@@ -4,7 +4,7 @@ import hashlib
 import json
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -20,6 +20,7 @@ from ..integrations.portal_unico import (
 from ..models import Client
 from ..models import (
     ClientFiscalProfile,
+    ClientImportTaxRule,
     DuimpSnapshot,
     ExternalApiRequestLog,
     ExternalProvider,
@@ -51,6 +52,7 @@ from app.services.fiscal_certificate import (
 from app.services.fiscal_certificate_registry import FiscalCertificateRegistry
 from app.services.import_tax_calculator import ImportTaxCalculator
 from app.services.nfe_issuance_state import NfeIdempotency
+from app.services.nfe_context import NfeContextResolver
 from app.services.nfe_xml_builder import NfeXmlBuilder
 from app.services.nfe_xml_signer import (
     NfeXmlSignatureError,
@@ -143,6 +145,7 @@ class ImportNfeService:
         )
         self.duimp_normalizer = DuimpNormalizer()
         self.tax_calculator = ImportTaxCalculator()
+        self.nfe_context_resolver = NfeContextResolver()
         self.xml_builder = NfeXmlBuilder()
         self.xsd_validator = xsd_validator or NfeXsdValidator()
         self.certificate_vault = (
@@ -185,6 +188,14 @@ class ImportNfeService:
         query = ClientFiscalProfile.query
         if self.organization_id:
             query = query.filter(ClientFiscalProfile.organization_id == self.organization_id)
+        return query
+
+    def import_tax_rule_query_for_current_user(self):
+        query = ClientImportTaxRule.query
+        if self.organization_id:
+            query = query.filter(
+                ClientImportTaxRule.organization_id == self.organization_id
+            )
         return query
     
     def get_nfe_draft_or_404(self, draft_id) -> NfeDraft:
@@ -515,6 +526,160 @@ class ImportNfeService:
         return {"items": rows, "total": total, "limit": params["limit"], "offset": params["offset"]}
 
     # ------------------------------------------------------------------
+    # Regras fiscais de importação
+    # ------------------------------------------------------------------
+    def list_import_tax_rules(self, client_id) -> list[ClientImportTaxRule]:
+        self.get_client_for_current_user(client_id)
+        return (
+            self.import_tax_rule_query_for_current_user()
+            .filter(ClientImportTaxRule.client_id == client_id)
+            .order_by(
+                ClientImportTaxRule.active.desc(),
+                ClientImportTaxRule.priority.desc(),
+                ClientImportTaxRule.name.asc(),
+            )
+            .all()
+        )
+
+    def create_import_tax_rule(
+        self,
+        client_id,
+        payload: dict[str, Any],
+    ) -> ClientImportTaxRule:
+        self.get_client_for_current_user(client_id)
+        now = datetime.utcnow()
+        rule = ClientImportTaxRule(
+            organization_id=self._require_organization_id(),
+            client_id=client_id,
+            created_by_user_id=self.user_id,
+            created_at=now,
+            updated_at=now,
+            **payload,
+        )
+        self._validate_import_tax_rule(rule)
+        db.session.add(rule)
+        db.session.flush()
+        return rule
+
+    def update_import_tax_rule(
+        self,
+        rule: ClientImportTaxRule,
+        payload: dict[str, Any],
+    ) -> ClientImportTaxRule:
+        for field in (
+            "name",
+            "issuer_state",
+            "import_purpose",
+            "import_modality",
+            "tax_regime",
+            "ncm_pattern",
+            "priority",
+            "configuration_json",
+            "additional_cost_defaults",
+            "transport_defaults",
+            "payment_defaults",
+            "active",
+            "effective_from",
+            "effective_until",
+        ):
+            if field in payload:
+                setattr(rule, field, payload[field])
+        rule.updated_at = datetime.utcnow()
+        self._validate_import_tax_rule(rule)
+        db.session.flush()
+        return rule
+
+    def get_import_tax_rule(self, client_id, rule_id) -> ClientImportTaxRule:
+        self.get_client_for_current_user(client_id)
+        rule = (
+            self.import_tax_rule_query_for_current_user()
+            .filter(
+                ClientImportTaxRule.id == rule_id,
+                ClientImportTaxRule.client_id == client_id,
+            )
+            .first()
+        )
+        if rule is None:
+            raise ValueError("Regra fiscal de importação não encontrada.")
+        return rule
+
+    def deactivate_import_tax_rule(self, rule: ClientImportTaxRule) -> None:
+        rule.active = False
+        rule.updated_at = datetime.utcnow()
+        db.session.flush()
+
+    def match_import_tax_rule(
+        self,
+        *,
+        client_id,
+        issuer_state: str,
+        tax_regime: str,
+        import_purpose: str,
+        import_modality: str | None,
+        ncms: list[str],
+        reference_date: date | None,
+        rule_id=None,
+    ) -> ClientImportTaxRule | None:
+        query = self.import_tax_rule_query_for_current_user().filter(
+            ClientImportTaxRule.client_id == client_id,
+            ClientImportTaxRule.active.is_(True),
+        )
+        if rule_id:
+            query = query.filter(ClientImportTaxRule.id == rule_id)
+
+        matches: list[ClientImportTaxRule] = []
+        for rule in query.all():
+            if rule.issuer_state != issuer_state:
+                continue
+            if rule.import_purpose != import_purpose:
+                continue
+            if rule.tax_regime and rule.tax_regime != tax_regime:
+                continue
+            if rule.import_modality and rule.import_modality != import_modality:
+                continue
+            if reference_date:
+                if rule.effective_from and reference_date < rule.effective_from:
+                    continue
+                if rule.effective_until and reference_date > rule.effective_until:
+                    continue
+            pattern = self._digits(rule.ncm_pattern)
+            if pattern and (not ncms or not all(ncm.startswith(pattern) for ncm in ncms)):
+                continue
+            matches.append(rule)
+
+        def score(rule: ClientImportTaxRule):
+            return (
+                rule.priority,
+                len(self._digits(rule.ncm_pattern)),
+                bool(rule.import_modality),
+                bool(rule.tax_regime),
+            )
+
+        matches.sort(key=score, reverse=True)
+        if rule_id and not matches:
+            raise ValueError(
+                "A regra fiscal informada não é aplicável ao cliente, UF, "
+                "finalidade, modalidade, NCMs ou período da DUIMP."
+            )
+        if len(matches) > 1 and score(matches[0]) == score(matches[1]):
+            raise ValueError(
+                "Mais de uma regra fiscal com a mesma especificidade é aplicável. "
+                "Ajuste a prioridade ou o escopo das regras."
+            )
+        return matches[0] if matches else None
+
+    @staticmethod
+    def _validate_import_tax_rule(rule: ClientImportTaxRule) -> None:
+        if (
+            rule.effective_from
+            and rule.effective_until
+            and rule.effective_until < rule.effective_from
+        ):
+            raise ValueError(
+                "effective_until não pode ser anterior a effective_from."
+            )
+
+    # ------------------------------------------------------------------
     # DUIMP snapshot
     # ------------------------------------------------------------------
     def create_manual_duimp_snapshot(self, process: ImportProcess, payload: dict[str, Any]) -> DuimpSnapshot:
@@ -679,6 +844,235 @@ class ImportNfeService:
         return connection
 
     # ------------------------------------------------------------------
+    # Contexto automatizado para NF-e
+    # ------------------------------------------------------------------
+    def get_nfe_context(
+        self,
+        process: ImportProcess,
+        payload: dict[str, Any],
+        *,
+        persist: bool = False,
+    ) -> dict[str, Any]:
+        snapshot = self._snapshot_for_process(
+            process,
+            payload.get("duimp_snapshot_id"),
+        )
+        normalized = deepcopy(
+            snapshot.normalized_payload
+            or self.normalize_duimp_payload(snapshot.raw_payload)
+        )
+
+        external: dict[str, Any] = {"errors": []}
+        connection_config: dict[str, Any] = {}
+        environment = payload.get("provider_environment")
+        if environment:
+            connection = self._find_provider_connection(
+                process=process,
+                provider=ExternalProvider.PORTAL_UNICO.value,
+                environment=environment,
+            )
+            connection_config = dict(connection.config_json or {})
+
+        if payload.get("refresh_external"):
+            if not environment:
+                raise ValueError(
+                    "provider_environment é obrigatório quando refresh_external=true."
+                )
+            gateway = self._duimp_gateway_for(process=process, payload=payload)
+            cargo_identifier = self._cargo_identifier(normalized)
+            if cargo_identifier:
+                external["cargo_knowledge"] = self._read_external_context(
+                    process=process,
+                    endpoint_name="cct.cargo_knowledge.get",
+                    request_payload={"numeroConhecimento": cargo_identifier},
+                    errors=external["errors"],
+                    callback=lambda: gateway.fetch_cargo_knowledge(
+                        knowledge_number=cargo_identifier
+                    ),
+                )
+
+            external["icms_declaration"] = self._read_external_context(
+                process=process,
+                endpoint_name="pcce.icms.get",
+                request_payload={"duimp_number": normalized.get("number")},
+                errors=external["errors"],
+                callback=lambda: gateway.fetch_icms_declaration(
+                    duimp_number=normalized.get("number")
+                ),
+            )
+
+            customs_unit_code = normalized.get("clearance_location_code")
+            customs_table = connection_config.get("tabx_customs_unit_table")
+            if customs_table and customs_unit_code:
+                code_field = connection_config.get(
+                    "tabx_customs_unit_code_field", "CODIGO"
+                )
+                external["customs_unit"] = self._read_external_context(
+                    process=process,
+                    endpoint_name="tabx.customs_unit.get",
+                    request_payload={
+                        "table": customs_table,
+                        "code": customs_unit_code,
+                    },
+                    errors=external["errors"],
+                    callback=lambda: gateway.fetch_comex_table(
+                        table_name=customs_table,
+                        filters=[
+                            {
+                                "nomeTabela": customs_table,
+                                "nome": code_field,
+                                "valores": [str(customs_unit_code)],
+                            }
+                        ],
+                    ),
+                )
+
+            country_iso = (
+                (normalized.get("foreign_supplier") or {}).get(
+                    "country_iso_alpha_2"
+                )
+                or (normalized.get("country_of_origin") or {}).get("iso_alpha_2")
+            )
+            country_table = connection_config.get("tabx_country_table")
+            if country_table and country_iso:
+                iso_field = connection_config.get(
+                    "tabx_country_iso_field", "SIGLA_ISO2"
+                )
+                external["country"] = self._read_external_context(
+                    process=process,
+                    endpoint_name="tabx.country.get",
+                    request_payload={"table": country_table, "iso": country_iso},
+                    errors=external["errors"],
+                    callback=lambda: gateway.fetch_comex_table(
+                        table_name=country_table,
+                        filters=[
+                            {
+                                "nomeTabela": country_table,
+                                "nome": iso_field,
+                                "valores": [str(country_iso)],
+                            }
+                        ],
+                    ),
+                )
+
+        context = self.nfe_context_resolver.resolve(
+            normalized=normalized,
+            external=external,
+            connection_config=connection_config,
+            overrides=payload.get("overrides"),
+        )
+        fiscal_profile = self.get_importer_fiscal_profile_or_none(process.importer_id)
+        rule = None
+        if fiscal_profile:
+            rule = self.match_import_tax_rule(
+                client_id=process.importer_id,
+                issuer_state=fiscal_profile.state,
+                tax_regime=fiscal_profile.tax_regime,
+                import_purpose=payload["import_purpose"],
+                import_modality=context["normalized"].get("import_modality"),
+                ncms=[
+                    self._digits(item.get("ncm"))
+                    for item in context["normalized"].get("items", [])
+                    if item.get("ncm")
+                ],
+                reference_date=self._date_value(
+                    context["normalized"].get("registration_date")
+                ),
+            )
+
+        missing = list(context["missing_fields"])
+        if fiscal_profile is None:
+            missing.append("client.fiscal_profile")
+        if rule is None:
+            missing.append("tax_configuration")
+        context.update(
+            {
+                "process_id": str(process.id),
+                "snapshot_id": str(snapshot.id),
+                "tax_rule": self._tax_rule_to_dict(rule) if rule else None,
+                "missing_fields": missing,
+                "ready_for_draft": not missing,
+            }
+        )
+
+        if persist:
+            snapshot.normalized_payload = context["normalized"]
+            db.session.flush()
+        return context
+
+    def _snapshot_for_process(
+        self,
+        process: ImportProcess,
+        snapshot_id=None,
+    ) -> DuimpSnapshot:
+        query = self.snapshot_query_for_current_user().filter(
+            DuimpSnapshot.import_process_id == process.id
+        )
+        if snapshot_id:
+            query = query.filter(DuimpSnapshot.id == snapshot_id)
+        snapshot = query.order_by(DuimpSnapshot.created_at.desc()).first()
+        if snapshot is None:
+            raise ValueError("Snapshot da DUIMP não encontrado para este processo.")
+        return snapshot
+
+    def _read_external_context(
+        self,
+        *,
+        process: ImportProcess,
+        endpoint_name: str,
+        request_payload: dict[str, Any],
+        errors: list[dict[str, Any]],
+        callback,
+    ) -> Any:
+        started_at = datetime.utcnow()
+        try:
+            response = callback()
+            self._log_external_request(
+                process=process,
+                provider=ExternalProvider.PORTAL_UNICO.value,
+                endpoint_name=endpoint_name,
+                method=HttpMethod.GET.value,
+                request_payload=request_payload,
+                response_payload=response,
+                success=True,
+                status_code=200,
+                started_at=started_at,
+                finished_at=datetime.utcnow(),
+            )
+            return response
+        except Exception as exc:
+            error = {
+                "source": endpoint_name,
+                "code": getattr(exc, "error_code", None)
+                or exc.__class__.__name__,
+                "message": str(exc),
+            }
+            errors.append(error)
+            self._log_external_request(
+                process=process,
+                provider=ExternalProvider.PORTAL_UNICO.value,
+                endpoint_name=endpoint_name,
+                method=HttpMethod.GET.value,
+                request_payload=request_payload,
+                response_payload=None,
+                success=False,
+                status_code=getattr(exc, "status_code", None),
+                error_code=error["code"],
+                error_message=error["message"],
+                started_at=started_at,
+                finished_at=datetime.utcnow(),
+            )
+            return None
+
+    @staticmethod
+    def _cargo_identifier(normalized: dict[str, Any]) -> str | None:
+        raw = normalized.get("raw") or {}
+        general = raw.get("dadosGerais") or {}
+        cargo = general.get("carga") or {}
+        value = cargo.get("identificacao")
+        return str(value).strip() if value not in (None, "") else None
+
+    # ------------------------------------------------------------------
     # NFe draft
     # ------------------------------------------------------------------
     def create_nfe_draft_from_duimp(self, process: ImportProcess, payload: dict[str, Any]) -> dict[str, Any]:
@@ -703,6 +1097,44 @@ class ImportNfeService:
             normalized = fetch_result["normalized"]
             snapshot = fetch_result["snapshot"]
 
+        tax_rule = None
+        tax_configuration = payload.get("tax_configuration")
+        if tax_configuration is None:
+            tax_rule = self.match_import_tax_rule(
+                client_id=process.importer_id,
+                issuer_state=fiscal_profile.state,
+                tax_regime=fiscal_profile.tax_regime,
+                import_purpose=payload["import_purpose"],
+                import_modality=normalized.get("import_modality"),
+                ncms=[
+                    self._digits(item.get("ncm"))
+                    for item in normalized.get("items", [])
+                    if item.get("ncm")
+                ],
+                reference_date=self._date_value(normalized.get("registration_date")),
+                rule_id=payload.get("tax_rule_id"),
+            )
+            if tax_rule is None:
+                raise ValueError(
+                    "Nenhuma regra fiscal aplicável foi encontrada. Cadastre uma "
+                    "regra para o cliente ou informe tax_configuration explicitamente."
+                )
+            tax_configuration = deepcopy(tax_rule.configuration_json or {})
+
+        additional_costs = self._merge_defaults(
+            tax_rule.additional_cost_defaults if tax_rule else None,
+            normalized.get("automation_additional_costs"),
+        )
+        additional_costs.update(payload.get("additional_costs") or {})
+        transport = self._merge_defaults(
+            tax_rule.transport_defaults if tax_rule else None,
+            payload.get("transport"),
+        )
+        payment = self._merge_defaults(
+            tax_rule.payment_defaults if tax_rule else None,
+            payload.get("payment"),
+        )
+
         fiscal_payload = self.map_duimp_to_nfe_payload(
             duimp=normalized,
             process=process,
@@ -711,13 +1143,19 @@ class ImportNfeService:
             series=payload["series"],
             number=payload.get("number"),
             import_purpose=payload["import_purpose"],
-            tax_configuration=payload["tax_configuration"],
-            additional_costs=payload.get("additional_costs"),
+            tax_configuration=tax_configuration,
+            additional_costs=additional_costs,
             foreign_supplier=payload.get("foreign_supplier"),
             duimp_overrides=payload.get("duimp_overrides"),
-            transport=payload.get("transport"),
-            payment=payload.get("payment"),
+            transport=transport,
+            payment=payment,
             additional_info=payload.get("additional_info"),
+        )
+        fiscal_payload["source"]["tax_configuration_source"] = (
+            "client_import_tax_rule" if tax_rule else "request"
+        )
+        fiscal_payload["source"]["tax_rule_id"] = (
+            str(tax_rule.id) if tax_rule else None
         )
 
         validation = self.validate_nfe_payload(fiscal_payload)
@@ -759,7 +1197,12 @@ class ImportNfeService:
         process.updated_at = now
         db.session.flush()
 
-        return {"draft": draft, "snapshot": snapshot, "validation": validation.to_dict()}
+        return {
+            "draft": draft,
+            "snapshot": snapshot,
+            "validation": validation.to_dict(),
+            "tax_rule": self._tax_rule_to_dict(tax_rule) if tax_rule else None,
+        }
 
     def get_nfe_draft_detail(self, draft: NfeDraft) -> dict[str, Any]:
         items = (
@@ -1743,7 +2186,7 @@ class ImportNfeService:
         endpoint_name: str,
         method: str,
         request_payload: dict[str, Any] | None,
-        response_payload: dict[str, Any] | None,
+        response_payload: Any,
         success: bool,
         status_code: int | None,
         started_at: datetime,
@@ -1782,6 +2225,54 @@ class ImportNfeService:
         if import_purpose not in mapping:
             raise ValueError("Finalidade de importação inválida para definição do CFOP.")
         return mapping[import_purpose]
+
+    @staticmethod
+    def _merge_defaults(
+        defaults: dict[str, Any] | None,
+        explicit: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        result = deepcopy(defaults or {})
+        result.update(explicit or {})
+        return result
+
+    @staticmethod
+    def _date_value(value: Any) -> date | None:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _tax_rule_to_dict(rule: ClientImportTaxRule) -> dict[str, Any]:
+        return {
+            "id": str(rule.id),
+            "client_id": str(rule.client_id),
+            "name": rule.name,
+            "issuer_state": rule.issuer_state,
+            "import_purpose": rule.import_purpose,
+            "import_modality": rule.import_modality,
+            "tax_regime": rule.tax_regime,
+            "ncm_pattern": rule.ncm_pattern,
+            "priority": rule.priority,
+            "configuration_json": rule.configuration_json,
+            "additional_cost_defaults": rule.additional_cost_defaults,
+            "transport_defaults": rule.transport_defaults,
+            "payment_defaults": rule.payment_defaults,
+            "active": rule.active,
+            "effective_from": (
+                rule.effective_from.isoformat() if rule.effective_from else None
+            ),
+            "effective_until": (
+                rule.effective_until.isoformat() if rule.effective_until else None
+            ),
+        }
 
     def _require_organization_id(self):
         if not self.organization_id:

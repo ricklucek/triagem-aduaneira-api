@@ -254,6 +254,7 @@ def create_nfe_draft_from_duimp(process_id: str):
                     "draft": nfe_draft_schema.dump(result["draft"]),
                     "snapshot": duimp_snapshot_schema.dump(result["snapshot"]),
                     "validation": result["validation"],
+                    "tax_rule": result.get("tax_rule"),
                 }
             ),
             201,
