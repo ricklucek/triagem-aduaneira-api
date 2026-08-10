@@ -55,6 +55,8 @@ _DEFAULT_SERVICO_PREPOSTO = {
 _DEFAULT_SERVICO_FRETE_INTERNACIONAL = {
     "habilitado": False,
     "modalidade": None,
+    "responsavelFrete": "CASCO",
+    "prestadoresTerceiros": [],
     "ptaxNegociado": None,
 }
 
