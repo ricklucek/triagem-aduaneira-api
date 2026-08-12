@@ -171,7 +171,8 @@ class NfeXmlBuilder:
             self._text(di, "UFTerceiro", duimp.get("third_party_state"))
         self._text(di, "cExportador", data.get("exporter_code") or duimp.get("exporter_code"))
         addition = ET.SubElement(di, self._tag("adi"))
-        self._text(addition, "nSeqAdic", data.get("sequence_number") or data.get("addition_number") or "1")
+        self._optional(addition, "nAdicao", data.get("addition_number"))
+        self._text(addition, "nSeqAdic", data.get("sequence_number") or "1")
         self._text(addition, "cFabricante", data.get("manufacturer_code") or "0000")
         self._optional(addition, "nDraw", data.get("drawback_number"))
 
@@ -182,21 +183,56 @@ class NfeXmlBuilder:
         imposto = ET.SubElement(parent, self._tag("imposto"))
 
         icms_data = taxes["icms"]
-        if str(icms_data.get("cst") or "").zfill(2) != "90":
-            raise NfeXmlBuildError("Nesta etapa, o gerador suporta ICMS CST 90 para importação.")
+        icms_cst = str(icms_data.get("cst") or "").zfill(2)
+        if icms_cst not in {"51", "90"}:
+            raise NfeXmlBuildError(
+                "Nesta etapa, o gerador suporta ICMS CST 51 ou 90 para importação."
+            )
         icms = ET.SubElement(imposto, self._tag("ICMS"))
-        icms90 = ET.SubElement(icms, self._tag("ICMS90"))
-        for tag, key, default in (
-            ("orig", "origin", "1"), ("CST", "cst", "90"), ("modBC", "base_method", "3"),
-        ):
-            self._text(icms90, tag, icms_data.get(key) or default)
-        self._text(icms90, "vBC", self._money(icms_data.get("base")))
-        self._text(icms90, "pICMS", self._rate(icms_data.get("rate")))
-        self._text(icms90, "vICMS", self._money(icms_data.get("value")))
-        self._text(icms90, "modBCST", icms_data.get("st_base_method") or "6")
-        self._text(icms90, "vBCST", self._money(icms_data.get("st_base")))
-        self._text(icms90, "pICMSST", self._rate(icms_data.get("st_rate")))
-        self._text(icms90, "vICMSST", self._money(icms_data.get("st_value")))
+        if icms_cst == "51":
+            icms51 = ET.SubElement(icms, self._tag("ICMS51"))
+            self._text(icms51, "orig", icms_data.get("origin") or "1")
+            self._text(icms51, "CST", "51")
+            self._optional(icms51, "modBC", icms_data.get("base_method"))
+            self._optional_money(icms51, "pRedBC", icms_data.get("base_reduction_rate"))
+            self._optional(icms51, "cBenefRBC", icms_data.get("base_benefit_code"))
+            self._text(icms51, "vBC", self._money(icms_data.get("base")))
+            if icms_data.get("rate") not in (None, ""):
+                self._text(icms51, "pICMS", self._rate(icms_data["rate"]))
+            if icms_data.get("operation_value") not in (None, ""):
+                self._text(
+                    icms51,
+                    "vICMSOp",
+                    self._money(icms_data["operation_value"]),
+                )
+            if icms_data.get("deferment_rate") not in (None, ""):
+                self._text(
+                    icms51,
+                    "pDif",
+                    self._rate(icms_data["deferment_rate"]),
+                )
+            if icms_data.get("deferred_value") not in (None, ""):
+                self._text(
+                    icms51,
+                    "vICMSDif",
+                    self._money(icms_data["deferred_value"]),
+                )
+            self._text(icms51, "vICMS", self._money(icms_data.get("value")))
+        else:
+            icms90 = ET.SubElement(icms, self._tag("ICMS90"))
+            for tag, key, default in (
+                ("orig", "origin", "1"),
+                ("CST", "cst", "90"),
+                ("modBC", "base_method", "3"),
+            ):
+                self._text(icms90, tag, icms_data.get(key) or default)
+            self._text(icms90, "vBC", self._money(icms_data.get("base")))
+            self._text(icms90, "pICMS", self._rate(icms_data.get("rate")))
+            self._text(icms90, "vICMS", self._money(icms_data.get("value")))
+            self._text(icms90, "modBCST", icms_data.get("st_base_method") or "6")
+            self._text(icms90, "vBCST", self._money(icms_data.get("st_base")))
+            self._text(icms90, "pICMSST", self._rate(icms_data.get("st_rate")))
+            self._text(icms90, "vICMSST", self._money(icms_data.get("st_value")))
 
         ipi_data = taxes["ipi"]
         ipi = ET.SubElement(imposto, self._tag("IPI"))

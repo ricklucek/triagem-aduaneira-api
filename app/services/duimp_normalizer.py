@@ -42,7 +42,16 @@ class DuimpNormalizer:
             payload.get("numero") or identification.get("numero")
         )
         version = payload.get("versao") or identification.get("versao")
-        items = [self._normalize_portal_item(item) for item in raw_items]
+        addition_references = self._addition_references(general)
+        items = [
+            self._normalize_portal_item(
+                item,
+                addition_reference=addition_references.get(
+                    str((item.get("identificacao") or {}).get("numeroItem") or "")
+                ),
+            )
+            for item in raw_items
+        ]
         modalities = {item.get("import_modality") for item in items if item.get("import_modality")}
         third_party_ids = {
             item.get("third_party_tax_id")
@@ -112,7 +121,12 @@ class DuimpNormalizer:
             "raw": payload,
         }
 
-    def _normalize_portal_item(self, raw_item: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_portal_item(
+        self,
+        raw_item: dict[str, Any],
+        *,
+        addition_reference: tuple[str, str] | None = None,
+    ) -> dict[str, Any]:
         identification = raw_item.get("identificacao") or {}
         product = raw_item.get("produto") or {}
         merchandise = raw_item.get("mercadoria") or {}
@@ -138,12 +152,14 @@ class DuimpNormalizer:
         catalog = product.get("catalogo") or {}
         if not isinstance(catalog, dict):
             catalog = {}
-        description = self._nfe_product_description(
+        description, additional_info = self._nfe_product_text(
             product.get("denominacao")
             or product.get("descricao")
             or merchandise.get("descricao"),
             catalog.get("descricao"),
         )
+        addition_number, sequence_number = addition_reference or ("1", "1")
+        manufacturer_code = self._string(manufacturer.get("codigo"))
 
         return {
             "number": str(identification.get("numeroItem") or ""),
@@ -156,19 +172,31 @@ class DuimpNormalizer:
             ),
             "product_version": self._string(product.get("versao")),
             "description": description,
+            "additional_info": additional_info,
             "complementary_description": self._string(merchandise.get("descricao")),
             "ncm": self._digits(product.get("ncm")),
-            "commercial_unit": self._string(merchandise.get("unidadeComercial") or "UN"),
+            "commercial_unit": self._nfe_unit(
+                merchandise.get("unidadeComercial") or "UN"
+            ),
             "quantity": str(quantity),
             "unit_value": str(unit_value),
             "customs_value": str(customs_value),
             "product_value": str(customs_value),
-            "taxable_unit": self._string(merchandise.get("unidadeComercial") or "UN"),
+            "taxable_unit": self._nfe_unit(
+                merchandise.get("unidadeComercial") or "UN"
+            ),
             "taxable_quantity": str(quantity),
             "taxable_unit_value": str(unit_value),
-            "addition_number": self._string(raw_item.get("numeroAdicao") or "1"),
-            "sequence_number": self._string(raw_item.get("sequenciaAdicao") or "1"),
-            "manufacturer_code": self._string(manufacturer.get("codigo")),
+            "addition_number": self._string(
+                raw_item.get("numeroAdicao") or addition_number
+            ),
+            "sequence_number": self._string(
+                raw_item.get("sequenciaAdicao") or sequence_number
+            ),
+            "manufacturer_code": manufacturer_code,
+            "manufacturer_code_missing_from_portal": (
+                "fabricante" in raw_item and manufacturer_code is None
+            ),
             "exporter_code": self._string(exporter.get("codigo")),
             "drawback_number": self._string(
                 (raw_item.get("dadosInsumoDrawbackIsencao") or {}).get(
@@ -369,6 +397,17 @@ class DuimpNormalizer:
             total += self._decimal(afrmm.get("valorDevido") or afrmm.get("valorPago"))
         return total
 
+    @staticmethod
+    def _addition_references(general: dict[str, Any]) -> dict[str, tuple[str, str]]:
+        references: dict[str, tuple[str, str]] = {}
+        for addition in general.get("adicoes") or []:
+            addition_number = str(addition.get("numero") or "").strip()
+            if not addition_number:
+                continue
+            for sequence, item_number in enumerate(addition.get("itens") or [], start=1):
+                references[str(item_number)] = (addition_number, str(sequence))
+        return references
+
     def _sale_adjustment(self, sale: dict[str, Any], adjustment_type: str) -> Decimal:
         return sum(
             (
@@ -421,10 +460,10 @@ class DuimpNormalizer:
         }
 
     @staticmethod
-    def _nfe_product_description(
+    def _nfe_product_text(
         denomination: Any,
         complementary_detail: Any = None,
-    ) -> str:
+    ) -> tuple[str, str | None]:
         parts = []
         for value in (denomination, complementary_detail):
             normalized = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -433,7 +472,7 @@ class DuimpNormalizer:
 
         description = " ".join(parts) or "Mercadoria importada"
         if len(description) <= 120:
-            return description
+            return description, None
 
         truncated = description[:120].rstrip()
         if (
@@ -442,7 +481,28 @@ class DuimpNormalizer:
             and " " in truncated
         ):
             truncated = truncated.rsplit(" ", 1)[0]
-        return truncated
+        return truncated, description[:500]
+
+    @classmethod
+    def _nfe_product_description(
+        cls,
+        denomination: Any,
+        complementary_detail: Any = None,
+    ) -> str:
+        return cls._nfe_product_text(denomination, complementary_detail)[0]
+
+    @classmethod
+    def _nfe_unit(cls, value: Any) -> str:
+        normalized = re.sub(r"\s+", " ", str(value or "UN")).strip().upper()
+        aliases = {
+            "UNIDADE": "UN",
+            "UNIDADES": "UN",
+            "PECA": "PC",
+            "PECAS": "PC",
+            "QUILOGRAMA": "KG",
+            "QUILOGRAMAS": "KG",
+        }
+        return aliases.get(normalized, normalized[:6] or "UN")
 
     @staticmethod
     def _date_part(value: Any) -> str | None:

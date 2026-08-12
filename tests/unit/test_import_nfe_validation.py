@@ -45,3 +45,27 @@ def test_validation_rejects_item_not_enriched_by_catalog():
         "field": "items[1].description",
         "message": "Produto não enriquecido pelo Catálogo de Produtos.",
     } in result.errors
+
+
+def test_validation_warns_and_blocks_diagnostic_icms_authorization():
+    service = ImportNfeService(
+        current_user=SimpleNamespace(organization_id=None, id=None)
+    )
+    authorization = service._authorization_metadata(
+        [
+            {
+                "tax_payload": {
+                    "icms": {
+                        "cst": "51",
+                        "diagnostic_only": True,
+                    }
+                }
+            }
+        ]
+    )
+
+    assert authorization["ready"] is False
+    assert authorization["mode"] == "diagnostic"
+    assert authorization["blockers"][0]["code"] == (
+        "missing_nominal_icms_rate"
+    )

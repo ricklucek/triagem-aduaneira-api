@@ -1068,6 +1068,19 @@ class ImportNfeService:
     def _cargo_identifier(normalized: dict[str, Any]) -> str | None:
         raw = normalized.get("raw") or {}
         general = raw.get("dadosGerais") or {}
+        documents = (general.get("documentos") or {}).get(
+            "documentosInstrucao"
+        ) or []
+        # Documento 30 é o conhecimento aéreo informado na própria DUIMP.
+        # Ele deve ser preferido à RUC para a consulta numeroConhecimento do CCT.
+        for document in documents:
+            document_type = str((document.get("tipo") or {}).get("codigo") or "")
+            if document_type != "30":
+                continue
+            for keyword in document.get("palavrasChave") or []:
+                value = keyword.get("valor")
+                if value not in (None, ""):
+                    return str(value).strip()
         cargo = general.get("carga") or {}
         value = cargo.get("identificacao")
         return str(value).strip() if value not in (None, "") else None
@@ -1674,10 +1687,18 @@ class ImportNfeService:
             configuration=tax_configuration,
             additional_costs=resolved_additional_costs,
         )
+        expected_tax_totals = deepcopy(duimp.get("tax_totals") or {})
+        icms_reference = (
+            (duimp.get("automation_fiscal_references") or {}).get("icms") or {}
+        )
+        if icms_reference.get("declared_value") not in (None, ""):
+            expected_tax_totals["icms"] = {
+                "value": icms_reference["declared_value"]
+            }
         reconciliation = self.tax_calculator.reconcile(
             items,
             totals,
-            expected_tax_totals=duimp.get("tax_totals"),
+            expected_tax_totals=expected_tax_totals,
             expected_additional_costs=resolved_additional_costs,
         )
         issuer = self.build_fiscal_party_from_profile(fiscal_profile)
@@ -1701,6 +1722,8 @@ class ImportNfeService:
             "third_party_tax_id": duimp.get("third_party_tax_id"),
         }
         duimp_data.update(duimp_overrides or {})
+
+        authorization = self._authorization_metadata(items)
 
         return {
             "document": {
@@ -1726,6 +1749,7 @@ class ImportNfeService:
             "totals": totals,
             "additional_costs": resolved_additional_costs,
             "reconciliation": reconciliation,
+            "authorization": authorization,
             "transport": transport or {"freight_mode": "9"},
             "payment": payment or {"method": "90", "value": "0.00"},
             "additional_info": {
@@ -1858,12 +1882,21 @@ class ImportNfeService:
             if unit_value == 0 and quantity > 0:
                 unit_value = product_value / quantity
 
+            manufacturer_fallback = bool(
+                item.get("manufacturer_code_missing_from_portal")
+                and not item.get("manufacturer_code")
+            )
+            manufacturer_code = (
+                "0000" if manufacturer_fallback else item.get("manufacturer_code")
+            )
+            item_additional_info = item.get("additional_info")
             mapped_items.append(
                 {
                     "item_number": index,
                     "duimp_item_number": item["number"],
                     "product_code": item["product_code"],
                     "description": item["description"],
+                    "additional_info": item_additional_info,
                     "ncm": item["ncm"],
                     "cfop": cfop,
                     "cest": item.get("cest"),
@@ -1888,7 +1921,19 @@ class ImportNfeService:
                         "duimp_item_number": item["number"],
                         "addition_number": item.get("addition_number"),
                         "sequence_number": item.get("sequence_number"),
-                        "manufacturer_code": item.get("manufacturer_code"),
+                        "manufacturer_code": manufacturer_code,
+                        "manufacturer_code_source": (
+                            "fallback_missing_portal_code"
+                            if manufacturer_fallback
+                            else "portal_unico"
+                        ),
+                        "manufacturer_code_warning": (
+                            "Portal Único retornou fabricante sem código; aplicado "
+                            "fallback controlado 0000."
+                            if manufacturer_fallback
+                            else None
+                        ),
+                        "additional_info": item_additional_info,
                         "exporter_code": item.get("exporter_code") or duimp.get("exporter_code"),
                         "drawback_number": item.get("drawback_number"),
                     },
@@ -1901,6 +1946,48 @@ class ImportNfeService:
 
     def calculate_nfe_totals(self, items: list[dict[str, Any]]) -> dict[str, Any]:
         return self.tax_calculator.calculate_totals(items)
+
+    @staticmethod
+    def _authorization_metadata(items: list[dict[str, Any]]) -> dict[str, Any]:
+        diagnostic_icms = any(
+            bool(
+                ((item.get("tax_payload") or {}).get("icms") or {}).get(
+                    "diagnostic_only"
+                )
+            )
+            for item in items
+        )
+        blockers = []
+        if diagnostic_icms:
+            blockers.append(
+                {
+                    "code": "missing_nominal_icms_rate",
+                    "field": "tax_configuration.icms_rate",
+                    "message": (
+                        "A transmissão está bloqueada até a equipe fiscal confirmar "
+                        "a alíquota nominal do ICMS e o enquadramento do TTD."
+                    ),
+                }
+            )
+        return {
+            "ready": not blockers,
+            "blockers": blockers,
+            "mode": "diagnostic" if diagnostic_icms else "fiscal",
+        }
+
+    def ensure_authorization_ready(self, draft: NfeDraft) -> None:
+        """Guarda obrigatória do futuro envio à SEFAZ."""
+        self._refresh_draft_payload_from_items(draft)
+        authorization = (draft.fiscal_payload or {}).get("authorization") or {}
+        if not authorization.get("ready"):
+            codes = ", ".join(
+                str(blocker.get("code"))
+                for blocker in authorization.get("blockers") or []
+            )
+            raise ValueError(
+                "Transmissão da NF-e bloqueada por pendências fiscais"
+                + (f": {codes}." if codes else ".")
+            )
 
     def validate_nfe_payload(self, payload: dict[str, Any]) -> ValidationResult:
         errors: list[dict[str, Any]] = []
@@ -1987,6 +2074,26 @@ class ImportNfeService:
                         "message": "Tributos obrigatórios ausentes: " + ", ".join(missing_taxes) + ".",
                     }
                 )
+            import_payload = item.get("import_payload") or {}
+            if import_payload.get("manufacturer_code_source") == (
+                "fallback_missing_portal_code"
+            ):
+                warnings.append(
+                    {
+                        "field": f"{prefix}.import_payload.manufacturer_code",
+                        "message": import_payload.get("manufacturer_code_warning"),
+                    }
+                )
+
+        authorization = payload.get("authorization") or {}
+        for blocker in authorization.get("blockers") or []:
+            warnings.append(
+                {
+                    "field": blocker.get("field") or "authorization",
+                    "code": blocker.get("code"),
+                    "message": blocker.get("message"),
+                }
+            )
 
         reconciliation = payload.get("reconciliation") or {}
         if reconciliation.get("status") == "requires_review":
@@ -2151,6 +2258,7 @@ class ImportNfeService:
         payload = dict(draft.fiscal_payload or {})
         payload["items"] = [self._item_to_payload(row) for row in rows]
         payload["totals"] = self.calculate_nfe_totals(payload["items"])
+        payload["authorization"] = self._authorization_metadata(payload["items"])
         draft.fiscal_payload = payload
 
     def _item_to_payload(self, item: NfeDraftItem) -> dict[str, Any]:
@@ -2173,6 +2281,7 @@ class ImportNfeService:
             "insurance_value": str(item.insurance_value),
             "discount_value": str(item.discount_value),
             "other_value": str(item.other_value),
+            "additional_info": (item.import_payload or {}).get("additional_info"),
             "import_payload": item.import_payload,
             "tax_payload": item.tax_payload,
             "raw_source_payload": item.raw_source_payload,

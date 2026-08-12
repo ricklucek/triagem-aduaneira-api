@@ -1,4 +1,5 @@
 from app.services.nfe_context import NfeContextResolver
+from app.services.import_process import ImportNfeService
 
 
 def test_context_resolver_combines_official_sources_and_explicit_overrides():
@@ -83,3 +84,47 @@ def test_context_resolver_keeps_unconfirmed_fields_missing():
         "source": None,
         "status": "missing",
     }
+
+
+def test_context_uses_controlled_official_references_without_tabx():
+    result = NfeContextResolver().resolve(
+        normalized={
+            "registration_date": "2026-05-26",
+            "clearance_location_code": "0927800",
+            "clearance_date": "2026-05-27",
+            "transport_mode_code": "4",
+            "foreign_supplier": {"country_iso_alpha_2": "US"},
+        }
+    )
+
+    assert result["ready_for_draft"] is True
+    assert result["normalized"]["clearance_location"] == "ALF/PORTO DE ITAJAI"
+    assert result["normalized"]["clearance_state"] == "SC"
+    assert result["normalized"]["foreign_supplier"]["country_code"] == "2496"
+    assert result["fields"]["clearance_location"]["source"] == (
+        "builtin_official_reference"
+    )
+
+
+def test_cargo_identifier_prefers_air_waybill_over_ruc():
+    identifier = ImportNfeService._cargo_identifier(
+        {
+            "raw": {
+                "dadosGerais": {
+                    "carga": {"identificacao": "6BR-RUC-FALLBACK"},
+                    "documentos": {
+                        "documentosInstrucao": [
+                            {
+                                "tipo": {"codigo": "30"},
+                                "palavrasChave": [
+                                    {"codigo": "1", "valor": "047-35401251/005153"}
+                                ],
+                            }
+                        ]
+                    },
+                }
+            }
+        }
+    )
+
+    assert identifier == "047-35401251/005153"

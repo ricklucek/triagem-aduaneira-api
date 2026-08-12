@@ -192,3 +192,62 @@ def test_marks_reconciliation_for_review_when_official_total_diverges():
     assert result["status"] == "requires_review"
     assert result["failed_checks"] == 1
     assert result["checks"][0]["difference"] == "-0.21"
+
+
+def test_calculates_full_icms_deferment_diagnostic_for_ordemilk_duimp():
+    values = [
+        ("9590.25", "1918.05", "374.02", "201.40", "983.00"),
+        ("9033.55", "1806.71", "352.31", "189.70", "925.94"),
+        ("13999.46", "1763.93", "0", "293.99", "1434.94"),
+        ("10631.04", "1339.51", "0", "223.25", "1089.68"),
+    ]
+    items = []
+    for product, ii, ipi, pis, cofins in values:
+        items.append(
+            {
+                "product_value": product,
+                "customs_value": product,
+                "net_weight": "1",
+                "freight_value": "0",
+                "insurance_value": "0",
+                "discount_value": "0",
+                "other_value": "0",
+                "tax_payload": {
+                    "ii": {"base": product, "value": ii},
+                    "ipi": {"base": product, "value": ipi},
+                    "pis": {"base": product, "value": pis},
+                    "cofins": {"base": product, "value": cofins},
+                },
+                "import_payload": {},
+            }
+        )
+
+    calculated, totals = ImportTaxCalculator().calculate(
+        items,
+        configuration={
+            "icms_origin": "1",
+            "icms_cst": "51",
+            "icms_base_method": "3",
+            "icms_deferment_rate": "100",
+            "ipi_cst": "49",
+            "pis_cst": "98",
+            "cofins_cst": "98",
+        },
+        additional_costs={"siscomex_fee": "192.79"},
+    )
+
+    assert totals["invoice_value"] == "56343.52"
+    assert totals["icms_base"] == "56343.52"
+    assert totals["icms_value"] == "0.00"
+    assert [item["tax_payload"]["icms"]["base"] for item in calculated] == [
+        "12492.36",
+        "11767.20",
+        "18235.85",
+        "13848.11",
+    ]
+    icms = calculated[0]["tax_payload"]["icms"]
+    assert icms["rate"] is None
+    assert icms["operation_value"] is None
+    assert icms["deferred_value"] is None
+    assert icms["deferment_rate"] == "100.0000"
+    assert icms["diagnostic_only"] is True

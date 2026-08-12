@@ -61,8 +61,27 @@ class ClientImportTaxRuleSchema(Schema):
         configuration = data.get("configuration_json")
         if configuration is None:
             return
+        cst = str(configuration.get("icms_cst") or "90").zfill(2)
+        raw_rate = configuration.get("icms_rate")
+        if raw_rate in (None, "") and cst == "51":
+            try:
+                deferment_rate = Decimal(
+                    str(configuration.get("icms_deferment_rate"))
+                )
+            except (InvalidOperation, TypeError, ValueError):
+                raise ValidationError(
+                    "configuration_json.icms_deferment_rate deve ser numérico.",
+                    field_name="configuration_json",
+                )
+            if deferment_rate != Decimal("100"):
+                raise ValidationError(
+                    "ICMS CST 51 sem alíquota nominal somente é aceito para "
+                    "XML diagnóstico com diferimento de 100%.",
+                    field_name="configuration_json",
+                )
+            return
         try:
-            rate = Decimal(str(configuration.get("icms_rate")))
+            rate = Decimal(str(raw_rate))
         except (InvalidOperation, TypeError, ValueError):
             raise ValidationError(
                 "configuration_json.icms_rate deve ser numérico.",
@@ -99,4 +118,3 @@ class NfeContextQuerySchema(Schema):
 class ResolveNfeContextSchema(NfeContextQuerySchema):
     refresh_external = fields.Boolean(load_default=True)
     overrides = fields.Dict(load_default=dict)
-

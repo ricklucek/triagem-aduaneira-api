@@ -7,6 +7,19 @@ from typing import Any, Mapping
 class NfeContextResolver:
     """Consolida fontes da NF-e sem transformar inferências em fatos fiscais."""
 
+    REFERENCE_CUSTOMS_UNITS = {
+        "0927800": {
+            "description": "ALF/PORTO DE ITAJAI",
+            "state": "SC",
+        },
+    }
+    REFERENCE_COUNTRY_CODES = {
+        "US": {
+            "code": "2496",
+            "name": "ESTADOS UNIDOS",
+        },
+    }
+
     REQUIRED_DUIMP_FIELDS = (
         "registration_date",
         "clearance_location",
@@ -65,6 +78,25 @@ class NfeContextResolver:
                 ),
                 "portal_unico_tabx",
             )
+        else:
+            reference_unit = self.REFERENCE_CUSTOMS_UNITS.get(
+                str(resolved.get("clearance_location_code") or "")
+            )
+            if reference_unit:
+                self._set_if_missing(
+                    resolved,
+                    sources,
+                    "clearance_location",
+                    reference_unit["description"],
+                    "builtin_official_reference",
+                )
+                self._set_if_missing(
+                    resolved,
+                    sources,
+                    "clearance_state",
+                    reference_unit["state"],
+                    "builtin_official_reference",
+                )
 
         knowledge = self._first_active_knowledge(external.get("cargo_knowledge"))
         if knowledge:
@@ -115,6 +147,22 @@ class NfeContextResolver:
             sources["foreign_supplier.country_code"] = (
                 "portal_unico_tabx" if tabx_country else "provider_configuration"
             )
+        elif not supplier.get("country_code"):
+            reference_country = self.REFERENCE_COUNTRY_CODES.get(
+                str(country_iso or "").upper()
+            )
+            if reference_country:
+                supplier["country_code"] = reference_country["code"]
+                supplier.setdefault("country_iso_alpha_2", country_iso)
+                if not supplier.get("country_name"):
+                    supplier["country_name"] = reference_country["name"]
+                    sources["foreign_supplier.country_name"] = (
+                        "builtin_official_reference"
+                    )
+                resolved["foreign_supplier"] = supplier
+                sources["foreign_supplier.country_code"] = (
+                    "builtin_official_reference"
+                )
         elif supplier != (resolved.get("foreign_supplier") or {}):
             resolved["foreign_supplier"] = supplier
 
@@ -171,6 +219,29 @@ class NfeContextResolver:
         if suggested_costs:
             resolved["automation_additional_costs"] = suggested_costs
 
+        fiscal_icms_reference = {
+            "declared_value": (
+                str(pcce.get("valorIcms"))
+                if isinstance(pcce, Mapping)
+                and pcce.get("valorIcms") is not None
+                else None
+            ),
+            "paid_value": (
+                str(pcce.get("valorPagoIcms"))
+                if isinstance(pcce, Mapping)
+                and pcce.get("valorPagoIcms") is not None
+                else None
+            ),
+            "favored_state": (
+                pcce.get("ufFavorecida") if isinstance(pcce, Mapping) else None
+            ),
+            "source": "portal_unico_pcce" if isinstance(pcce, Mapping) else None,
+        }
+        if isinstance(pcce, Mapping):
+            resolved["automation_fiscal_references"] = {
+                "icms": fiscal_icms_reference
+            }
+
         return {
             "normalized": resolved,
             "fields": fields,
@@ -187,26 +258,7 @@ class NfeContextResolver:
                 "additional_costs": suggested_costs,
             },
             "fiscal_references": {
-                "icms": {
-                    "declared_value": (
-                        str(pcce.get("valorIcms"))
-                        if isinstance(pcce, Mapping)
-                        and pcce.get("valorIcms") is not None
-                        else None
-                    ),
-                    "paid_value": (
-                        str(pcce.get("valorPagoIcms"))
-                        if isinstance(pcce, Mapping)
-                        and pcce.get("valorPagoIcms") is not None
-                        else None
-                    ),
-                    "favored_state": (
-                        pcce.get("ufFavorecida")
-                        if isinstance(pcce, Mapping)
-                        else None
-                    ),
-                    "source": "portal_unico_pcce" if isinstance(pcce, Mapping) else None,
-                }
+                "icms": fiscal_icms_reference
             },
         }
 

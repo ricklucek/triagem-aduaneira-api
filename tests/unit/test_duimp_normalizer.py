@@ -1,3 +1,4 @@
+from copy import deepcopy
 from decimal import Decimal
 
 import pytest
@@ -173,6 +174,37 @@ def test_normalizes_catalog_enrichment_into_fiscal_product_fields():
         "logradouro": "TEST STREET 100",
         "city_name": "TEST CITY",
     }
+
+
+def test_normalizes_duimp_additions_units_description_and_missing_manufacturer():
+    payload = portal_payload()
+    payload["dadosGerais"]["adicoes"] = [
+        {"numero": 1, "itens": [1]},
+        {"numero": 2, "itens": [2]},
+    ]
+    first = payload["itens"][0]
+    first["mercadoria"]["unidadeComercial"] = "UNIDADE"
+    first["fabricante"] = {"codigo": None, "pais": {"codigo": "US"}}
+    first["produto"]["catalogo"] = {
+        "descricao": "DESCRICAO COMPLETA " + ("TECNICA " * 30)
+    }
+    second = deepcopy(first)
+    second["identificacao"] = {"numeroItem": 2}
+    payload["itens"].append(second)
+
+    result = DuimpNormalizer().normalize(payload)
+
+    first_result, second_result = result["items"]
+    assert first_result["addition_number"] == "1"
+    assert first_result["sequence_number"] == "1"
+    assert second_result["addition_number"] == "2"
+    assert second_result["sequence_number"] == "1"
+    assert first_result["commercial_unit"] == "UN"
+    assert first_result["taxable_unit"] == "UN"
+    assert len(first_result["description"]) <= 120
+    assert len(first_result["additional_info"]) > len(first_result["description"])
+    assert first_result["manufacturer_code"] is None
+    assert first_result["manufacturer_code_missing_from_portal"] is True
 
 
 def test_rejects_mixed_modalities_in_same_duimp():

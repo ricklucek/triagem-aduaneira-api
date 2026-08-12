@@ -179,3 +179,38 @@ def test_xsd_validator_reports_invalid_issue_datetime():
 
     assert result.is_valid is False
     assert any("dhEmi" in error["message"] for error in result.errors)
+
+
+def test_builds_xsd_valid_diagnostic_icms51_without_nominal_values():
+    data = payload()
+    data["items"][0]["import_payload"]["addition_number"] = "2"
+    data["items"][0]["tax_payload"]["icms"] = {
+        "origin": "1",
+        "cst": "51",
+        "base_method": "3",
+        "base": "9686.49",
+        "rate": None,
+        "operation_value": None,
+        "deferment_rate": "100",
+        "deferred_value": None,
+        "value": "0",
+        "diagnostic_only": True,
+    }
+    data["totals"]["icms_value"] = "0"
+
+    xml = NfeXmlBuilder().build(
+        data,
+        access_key="41260700000000000191550010000144221763362375",
+    )
+    root = ET.fromstring(xml)
+    icms51 = root.find(".//nfe:ICMS51", NS)
+
+    assert icms51 is not None
+    assert icms51.findtext("nfe:vBC", namespaces=NS) == "9686.49"
+    assert icms51.findtext("nfe:pDif", namespaces=NS) == "100.0000"
+    assert icms51.findtext("nfe:vICMS", namespaces=NS) == "0.00"
+    assert icms51.find("nfe:pICMS", NS) is None
+    assert icms51.find("nfe:vICMSOp", NS) is None
+    assert icms51.find("nfe:vICMSDif", NS) is None
+    assert root.findtext(".//nfe:adi/nfe:nAdicao", namespaces=NS) == "2"
+    assert NfeXsdValidator().validate(xml, allow_unsigned=True).is_valid is True

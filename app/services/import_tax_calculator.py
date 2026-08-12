@@ -23,8 +23,25 @@ class ImportTaxCalculator:
         if not items:
             raise ImportTaxCalculationError("Não existem itens para calcular.")
 
-        icms_rate = self._decimal(configuration.get("icms_rate"))
-        if not Decimal("0") < icms_rate < Decimal("100"):
+        icms_cst = str(configuration.get("icms_cst") or "90").zfill(2)
+        raw_icms_rate = configuration.get("icms_rate")
+        has_icms_rate = raw_icms_rate not in (None, "")
+        icms_rate = self._decimal(raw_icms_rate)
+        deferment_rate = self._decimal(
+            configuration.get("icms_deferment_rate")
+        )
+        if icms_cst == "51":
+            if not Decimal("0") < deferment_rate <= Decimal("100"):
+                raise ImportTaxCalculationError(
+                    "O percentual de diferimento do ICMS CST 51 deve ser maior "
+                    "que zero e menor ou igual a 100."
+                )
+            if has_icms_rate and not Decimal("0") < icms_rate < Decimal("100"):
+                raise ImportTaxCalculationError(
+                    "A alíquota nominal do ICMS, quando informada, deve ser "
+                    "maior que zero e menor que 100."
+                )
+        elif not Decimal("0") < icms_rate < Decimal("100"):
             raise ImportTaxCalculationError(
                 "A alíquota de ICMS deve ser maior que zero e menor que 100."
             )
@@ -90,6 +107,47 @@ class ImportTaxCalculator:
             "other": self.allocate(cost_totals["other"], customs_value_weights),
         }
 
+        icms_base_allocations: list[Decimal] | None = None
+        if (
+            icms_cst == "51"
+            and configuration.get(
+                "icms_base_allocation", "proportional_customs_value"
+            )
+            == "proportional_customs_value"
+        ):
+            total_numerator = Decimal("0")
+            for index, source in enumerate(items):
+                source_taxes = deepcopy(
+                    source.get("tax_payload") or source.get("taxes") or {}
+                )
+                total_numerator += (
+                    self._money(source.get("product_value"))
+                    + self._tax(source_taxes, "ii")["value"]
+                    + self._tax(source_taxes, "ipi")["value"]
+                    + self._tax(source_taxes, "pis")["value"]
+                    + self._tax(source_taxes, "cofins")["value"]
+                    + self._money(source.get("other_value"))
+                    + sum(
+                        (values[index] for values in allocations.values()),
+                        Decimal("0"),
+                    )
+                    - self._money(source.get("discount_value"))
+                )
+            effective_rate = (
+                icms_rate
+                * (Decimal("1") - deferment_rate / Decimal("100"))
+                if has_icms_rate
+                else Decimal("0")
+            )
+            total_icms_base = self._money(
+                total_numerator
+                / (Decimal("1") - effective_rate / Decimal("100"))
+            )
+            icms_base_allocations = self.allocate(
+                total_icms_base,
+                customs_value_weights,
+            )
+
         calculated_items: list[dict[str, Any]] = []
         for index, source in enumerate(items):
             item = deepcopy(source)
@@ -122,18 +180,74 @@ class ImportTaxCalculator:
                 + item_other
                 - discount
             )
-            icms_base = self._money(
-                icms_base_numerator / (Decimal("1") - icms_rate / Decimal("100"))
-            )
-            icms_value = self._money(icms_base * icms_rate / Decimal("100"))
+            if icms_cst == "51":
+                effective_rate = (
+                    icms_rate
+                    * (Decimal("1") - deferment_rate / Decimal("100"))
+                    if has_icms_rate
+                    else Decimal("0")
+                )
+                icms_base = (
+                    icms_base_allocations[index]
+                    if icms_base_allocations is not None
+                    else self._money(
+                        icms_base_numerator
+                        / (Decimal("1") - effective_rate / Decimal("100"))
+                    )
+                )
+                icms_operation_value = (
+                    self._money(icms_base * icms_rate / Decimal("100"))
+                    if has_icms_rate
+                    else None
+                )
+                icms_deferred_value = (
+                    self._money(
+                        icms_operation_value
+                        * deferment_rate
+                        / Decimal("100")
+                    )
+                    if icms_operation_value is not None
+                    else None
+                )
+                icms_value = (
+                    self._money(icms_operation_value - icms_deferred_value)
+                    if icms_operation_value is not None
+                    else Decimal("0.00")
+                )
+            else:
+                icms_base = self._money(
+                    icms_base_numerator
+                    / (Decimal("1") - icms_rate / Decimal("100"))
+                )
+                icms_operation_value = None
+                icms_deferred_value = None
+                icms_value = self._money(
+                    icms_base * icms_rate / Decimal("100")
+                )
 
             taxes["icms"] = {
                 "origin": str(configuration.get("icms_origin") or "1"),
-                "cst": str(configuration.get("icms_cst") or "90").zfill(2),
+                "cst": icms_cst,
                 "base_method": str(configuration.get("icms_base_method") or "3"),
                 "base": self._format_money(icms_base),
-                "rate": self._format_rate(icms_rate),
+                "rate": self._format_rate(icms_rate) if has_icms_rate else None,
                 "value": self._format_money(icms_value),
+                "operation_value": (
+                    self._format_money(icms_operation_value)
+                    if icms_operation_value is not None
+                    else None
+                ),
+                "deferment_rate": (
+                    self._format_rate(deferment_rate)
+                    if icms_cst == "51"
+                    else None
+                ),
+                "deferred_value": (
+                    self._format_money(icms_deferred_value)
+                    if icms_deferred_value is not None
+                    else None
+                ),
+                "diagnostic_only": icms_cst == "51" and not has_icms_rate,
                 "st_base_method": str(configuration.get("icms_st_base_method") or "6"),
                 "st_base": "0.00",
                 "st_rate": "0.0000",
@@ -363,6 +477,7 @@ class ImportTaxCalculator:
             "ipi": "ipi_value",
             "pis": "pis_value",
             "cofins": "cofins_value",
+            "icms": "icms_value",
         }.items():
             expected_tax = (expected_tax_totals or {}).get(tax_name)
             if expected_tax is None:

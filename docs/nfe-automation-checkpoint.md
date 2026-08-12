@@ -39,8 +39,11 @@ O `config_json` da conexão aceita estas chaves para enriquecimento TABX:
 ```
 
 Os nomes de tabela/campo devem ser confirmados nos metadados TABX disponíveis
-para a credencial. Se não estiverem configurados, a API não inventa descrições,
-UF ou código de país. `country_code_map` é um fallback controlado pela empresa.
+para a credencial. Se não estiverem configurados, a API usa somente referências
+oficiais incorporadas e identificadas como `builtin_official_reference`. Neste
+checkpoint estão cadastrados `0927800 -> ALF/PORTO DE ITAJAI, SC` e
+`US -> 2496, ESTADOS UNIDOS`. Outros códigos continuam pendentes até serem
+resolvidos pelo TABX, pela configuração da conexão ou pelo operador.
 
 ## 3. Cadastro único de regra fiscal por cliente
 
@@ -177,6 +180,98 @@ Depois, prossiga com os endpoints já existentes:
 3. `POST /nfe-drafts/{draft_id}/xml-versions/{xml_version_id}/validate-xsd`
 4. conferir reconciliação, totais e referências do processo;
 5. somente depois assinar e transmitir em homologação.
+
+## 5. XML diagnóstico com ICMS CST 51
+
+Quando o Portal/PCCE e a documentação fiscal comprovarem diferimento integral,
+mas a alíquota nominal e o enquadramento do TTD ainda não estiverem confirmados,
+é possível cadastrar uma regra exclusiva de diagnóstico:
+
+```http
+POST /clients/daba0bf1-43b4-42be-a8a5-b4326307366e/import-tax-rules
+Content-Type: application/json
+```
+
+```json
+{
+  "name": "SC - industrialização direta - diferimento integral diagnóstico",
+  "issuer_state": "SC",
+  "import_purpose": "industrialization",
+  "import_modality": "direct",
+  "tax_regime": "3",
+  "ncm_pattern": "84",
+  "priority": 100,
+  "configuration_json": {
+    "icms_origin": "1",
+    "icms_cst": "51",
+    "icms_base_method": "3",
+    "icms_deferment_rate": "100",
+    "icms_base_allocation": "proportional_customs_value",
+    "ipi_cst": "49",
+    "ipi_enquiry_code": "999",
+    "pis_cst": "98",
+    "cofins_cst": "98"
+  },
+  "additional_cost_defaults": {
+    "afrmm": "0",
+    "thc": "0",
+    "other": "0"
+  },
+  "transport_defaults": {
+    "freight_mode": "9"
+  },
+  "payment_defaults": {
+    "method": "90",
+    "value": "0.00"
+  },
+  "active": true,
+  "effective_from": "2026-01-01"
+}
+```
+
+Sem `icms_rate`, o XML contém `ICMS51`, `vBC`, `pDif=100` e `vICMS=0`,
+omitindo `pICMS`, `vICMSOp` e `vICMSDif`. O draft recebe:
+
+```json
+{
+  "authorization": {
+    "ready": false,
+    "mode": "diagnostic",
+    "blockers": [
+      {
+        "code": "missing_nominal_icms_rate"
+      }
+    ]
+  }
+}
+```
+
+Esse bloqueio deve ser obrigatoriamente verificado pelo futuro endpoint de
+transmissão. A geração, o download e a validação XSD do XML diagnóstico
+continuam disponíveis para conferência. A assinatura não remove o bloqueio.
+
+Para a DUIMP `26BR0000684087-7`, persista a data confirmada no histórico:
+
+```json
+{
+  "duimp_snapshot_id": "d4a60485-8309-47d7-b535-7bb3fe2136cc",
+  "import_purpose": "industrialization",
+  "refresh_external": false,
+  "overrides": {
+    "clearance_date": "2026-05-27"
+  }
+}
+```
+
+Após o novo `duimp/fetch`, a normalização também:
+
+- consulta o CCT pelo AWB do documento de instrução tipo `30`, antes da RUC;
+- deriva adição e sequência a partir de `dadosGerais.adicoes`;
+- normaliza `UNIDADE` para `UN`;
+- conserva a descrição CATP completa em `infAdProd` quando `xProd` ultrapassa
+  120 caracteres;
+- aplica `cFabricante=0000` apenas quando o Portal retornou explicitamente o
+  fabricante sem código, registrando a origem do fallback e um aviso.
 
 ## Referências oficiais
 
