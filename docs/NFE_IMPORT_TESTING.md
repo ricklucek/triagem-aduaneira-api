@@ -19,7 +19,38 @@ O teste de integração `tests/integration/test_import_nfe_api_flow.py` executa 
 fluxo completo em SQLite, com dados sanitizados, e confirma que o XML não tem
 uma assinatura digital.
 
-## 2. Configurar o perfil fiscal do emitente
+## 2. Cadastrar o cliente, quando ainda não existir
+
+Consulte primeiro pelo CNPJ, com ou sem máscara:
+
+```http
+GET /clients?cnpj=03.114.340/0001-31
+```
+
+Se `total` for zero, cadastre o cliente-base:
+
+```http
+POST /clients
+Content-Type: application/json
+```
+
+```json
+{
+  "cnpj": "03.114.340/0001-31",
+  "razao_social": "IMPORTADORA EXEMPLO LTDA",
+  "nome_resumido": "IMPORTADORA EXEMPLO",
+  "inscricao_estadual": "123456789",
+  "regime_tributacao": "LUCRO_PRESUMIDO_OU_REAL",
+  "ativo": true
+}
+```
+
+O endpoint normaliza a máscara, valida os dígitos verificadores, vincula o
+cliente à organização do usuário autenticado e retorna `201`. CNPJ repetido na
+mesma organização retorna `409` com o `client_id` já existente. Os formatos
+numérico e alfanumérico de 14 posições são aceitos.
+
+## 3. Configurar o perfil fiscal do emitente
 
 Use `PUT /clients/{client_id}/fiscal-profile`. A UF informada aqui define o
 `cUF`, o endereço do emitente e a chave de acesso da NF-e; ela não é fixa no
@@ -30,7 +61,7 @@ Campos essenciais: CNPJ, IE, CRT, logradouro, município/IBGE, UF e CEP.
 Se o número da NF-e não for enviado ao criar o rascunho, configure também a
 sequência com `PUT /clients/{client_id}/nfe-number-sequences`.
 
-## 3. Configurar o Portal Único
+## 4. Configurar o Portal Único
 
 Cadastre uma conexão em `POST /external-provider-connections`:
 
@@ -57,7 +88,7 @@ O backend autentica em `/portal/api/autenticar/chave-acesso`, conserva os
 headers de token/CSRF e consulta versão, dados gerais e todas as páginas de
 itens (até 100 itens por página).
 
-## 4. Criar o processo e capturar a DUIMP
+## 5. Criar o processo e capturar a DUIMP
 
 Crie o processo:
 
@@ -112,7 +143,7 @@ estar vazio. O rascunho fiscal rejeita a descrição genérica
 `Mercadoria importada`, evitando gerar chave ou XML com um item ainda não
 enriquecido.
 
-## 5. Criar o rascunho fiscal
+## 6. Criar o rascunho fiscal
 
 ```http
 POST /import-processes/{process_id}/nfe-draft/from-duimp
@@ -186,7 +217,7 @@ totais oficiais disponíveis na DUIMP e todos os custos informados fecharam; o
 status `requires_review` bloqueia a geração da chave e do XML até a divergência
 ser corrigida.
 
-## 6. Gerar chave e XML
+## 7. Gerar chave e XML
 
 ```http
 POST /nfe-drafts/{draft_id}/generate-access-key
@@ -223,7 +254,7 @@ A resposta tem `Content-Type: application/xml` e
 `Content-Disposition: attachment`, podendo ser salva diretamente pelo cliente
 HTTP ou pelo frontend.
 
-## 7. Validar o XML no XSD oficial
+## 8. Validar o XML no XSD oficial
 
 ```http
 POST /nfe-drafts/{draft_id}/xml-versions/{xml_version_id}/validate-xsd
@@ -264,7 +295,7 @@ de cada erro.
 O schema já acompanha a aplicação. `NFE_XSD_PATH` só precisa ser configurada
 para testar outro pacote de schemas de forma controlada.
 
-## 8. Cadastrar e validar o certificado A1
+## 9. Cadastrar e validar o certificado A1
 
 O arquivo PFX/P12 e sua senha devem ficar em secrets distintos. No Secret
 Manager, o secret do certificado contém os bytes originais do arquivo, sem
@@ -314,7 +345,7 @@ Somente um certificado pode permanecer ativo para cada cliente e ambiente. A
 ativação desabilita o anterior. Cadastro, validação, ativação e assinatura
 exigem usuário `admin`.
 
-## 9. Assinar o XML validado
+## 10. Assinar o XML validado
 
 Use o `id` da versão `unsigned` mais recente e já aprovada no XSD:
 

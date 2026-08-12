@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_
 
+from app.cnpj import is_valid_cnpj, normalize_cnpj
 from ..extensions import db
 from ..integrations.portal_unico import (
     DefaultPortalCredentialResolver,
@@ -330,7 +331,13 @@ class ImportNfeService:
         if not client_id:
             raise ValueError("client_id é obrigatório.")
 
-        self.get_client_for_current_user(client_id)
+        client = self.get_client_for_current_user(client_id)
+
+        payload_cnpj = normalize_cnpj(payload["cnpj"])
+        if payload_cnpj != normalize_cnpj(client.cnpj):
+            raise ValueError(
+                "O CNPJ do perfil fiscal deve ser igual ao CNPJ do cliente."
+            )
 
         profile = self.get_importer_fiscal_profile_or_none(client_id)
         now = datetime.utcnow()
@@ -347,7 +354,7 @@ class ImportNfeService:
 
         profile.legal_name = str(payload["legal_name"]).strip()
         profile.trade_name = self._empty_to_none(payload.get("trade_name"))
-        profile.cnpj = self._digits(payload["cnpj"])
+        profile.cnpj = payload_cnpj
         profile.state_registration = self._empty_to_none(self._digits(payload.get("state_registration")))
         profile.tax_regime = str(payload["tax_regime"])
 
@@ -373,8 +380,10 @@ class ImportNfeService:
 
     def validate_client_fiscal_profile(self, profile: ClientFiscalProfile) -> None:
         errors = []
-        if len(self._digits(profile.cnpj)) != 14:
-            errors.append("CNPJ do perfil fiscal deve conter 14 dígitos.")
+        if not is_valid_cnpj(profile.cnpj):
+            errors.append(
+                "CNPJ do perfil fiscal deve conter 14 caracteres e dígitos verificadores válidos."
+            )
         if not profile.legal_name:
             errors.append("Razão social do perfil fiscal é obrigatória.")
         if profile.tax_regime not in {"1", "2", "3"}:
@@ -1802,7 +1811,7 @@ class ImportNfeService:
         return {
             "client_id": str(profile.client_id),
             "fiscal_profile_id": str(profile.id),
-            "cnpj": self._digits(profile.cnpj),
+            "cnpj": normalize_cnpj(profile.cnpj),
             "legal_name": profile.legal_name,
             "trade_name": profile.trade_name,
             "state_registration": self._digits(profile.state_registration),
