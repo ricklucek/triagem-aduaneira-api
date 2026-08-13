@@ -184,12 +184,17 @@ class NfeXmlBuilder:
 
         icms_data = taxes["icms"]
         icms_cst = str(icms_data.get("cst") or "").zfill(2)
-        if icms_cst not in {"51", "90"}:
+        if icms_cst not in {"40", "41", "50", "51", "90"}:
             raise NfeXmlBuildError(
-                "Nesta etapa, o gerador suporta ICMS CST 51 ou 90 para importação."
+                "Nesta etapa, o gerador suporta ICMS CST 40, 41, 50, 51 ou 90 "
+                "para importação."
             )
         icms = ET.SubElement(imposto, self._tag("ICMS"))
-        if icms_cst == "51":
+        if icms_cst in {"40", "41", "50"}:
+            icms40 = ET.SubElement(icms, self._tag("ICMS40"))
+            self._text(icms40, "orig", icms_data.get("origin") or "1")
+            self._text(icms40, "CST", icms_cst)
+        elif icms_cst == "51":
             icms51 = ET.SubElement(icms, self._tag("ICMS51"))
             self._text(icms51, "orig", icms_data.get("origin") or "1")
             self._text(icms51, "CST", "51")

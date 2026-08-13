@@ -214,3 +214,32 @@ def test_builds_xsd_valid_diagnostic_icms51_without_nominal_values():
     assert icms51.find("nfe:vICMSDif", NS) is None
     assert root.findtext(".//nfe:adi/nfe:nAdicao", namespaces=NS) == "2"
     assert NfeXsdValidator().validate(xml, allow_unsigned=True).is_valid is True
+
+
+def test_builds_xsd_valid_diagnostic_icms40_without_nominal_values():
+    data = payload()
+    data["items"][0]["tax_payload"]["icms"] = {
+        "origin": "1",
+        "cst": "40",
+        "base": "0",
+        "rate": None,
+        "value": "0",
+        "tax_treatment_confirmed": False,
+        "diagnostic_only": True,
+    }
+    data["totals"]["icms_base"] = "0"
+    data["totals"]["icms_value"] = "0"
+
+    xml = NfeXmlBuilder().build(
+        data,
+        access_key="41260700000000000191550010000144221763362375",
+    )
+    root = ET.fromstring(xml)
+    icms40 = root.find(".//nfe:ICMS40", NS)
+
+    assert icms40 is not None
+    assert icms40.findtext("nfe:orig", namespaces=NS) == "1"
+    assert icms40.findtext("nfe:CST", namespaces=NS) == "40"
+    assert icms40.find("nfe:vICMSDeson", NS) is None
+    assert icms40.find("nfe:motDesICMS", NS) is None
+    assert NfeXsdValidator().validate(xml, allow_unsigned=True).is_valid is True

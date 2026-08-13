@@ -1415,6 +1415,8 @@ class ImportNfeService:
                 "Somente a versão XML não assinada mais recente pode ser assinada."
             )
 
+        self.ensure_authorization_ready(draft)
+
         existing_signed = NfeXmlVersion.query.filter(
             NfeXmlVersion.nfe_draft_id == draft.id,
             NfeXmlVersion.xml_type == NfeXmlType.SIGNED.value,
@@ -1958,16 +1960,15 @@ class ImportNfeService:
 
     @staticmethod
     def _authorization_metadata(items: list[dict[str, Any]]) -> dict[str, Any]:
-        diagnostic_icms = any(
-            bool(
-                ((item.get("tax_payload") or {}).get("icms") or {}).get(
-                    "diagnostic_only"
-                )
-            )
-            for item in items
-        )
         blockers = []
-        if diagnostic_icms:
+        diagnostic_treatments = {
+            str(icms.get("cst") or "").zfill(2)
+            for item in items
+            if (
+                icms := ((item.get("tax_payload") or {}).get("icms") or {})
+            ).get("diagnostic_only")
+        }
+        if "51" in diagnostic_treatments:
             blockers.append(
                 {
                     "code": "missing_nominal_icms_rate",
@@ -1978,10 +1979,22 @@ class ImportNfeService:
                     ),
                 }
             )
+        if diagnostic_treatments & {"40", "41", "50"}:
+            blockers.append(
+                {
+                    "code": "unconfirmed_icms_tax_treatment",
+                    "field": "tax_configuration.icms_cst",
+                    "message": (
+                        "A assinatura e a transmissão estão bloqueadas até a "
+                        "equipe fiscal confirmar se a exoneração integral deve "
+                        "usar ICMS CST 40, 41 ou 50."
+                    ),
+                }
+            )
         return {
             "ready": not blockers,
             "blockers": blockers,
-            "mode": "diagnostic" if diagnostic_icms else "fiscal",
+            "mode": "diagnostic" if diagnostic_treatments else "fiscal",
         }
 
     def ensure_authorization_ready(self, draft: NfeDraft) -> None:
@@ -1994,7 +2007,7 @@ class ImportNfeService:
                 for blocker in authorization.get("blockers") or []
             )
             raise ValueError(
-                "Transmissão da NF-e bloqueada por pendências fiscais"
+                "Assinatura/transmissão da NF-e bloqueada por pendências fiscais"
                 + (f": {codes}." if codes else ".")
             )
 

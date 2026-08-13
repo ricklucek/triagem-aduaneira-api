@@ -251,3 +251,56 @@ def test_calculates_full_icms_deferment_diagnostic_for_ordemilk_duimp():
     assert icms["deferred_value"] is None
     assert icms["deferment_rate"] == "100.0000"
     assert icms["diagnostic_only"] is True
+
+
+@pytest.mark.parametrize("cst", ["40", "41", "50"])
+def test_calculates_non_taxed_icms_without_nominal_rate(cst):
+    calculated, totals = ImportTaxCalculator().calculate(
+        [reference_item()],
+        configuration={
+            "icms_origin": "1",
+            "icms_cst": cst,
+            "icms_tax_treatment_confirmed": False,
+            "ipi_cst": "49",
+            "pis_cst": "98",
+            "cofins_cst": "98",
+        },
+        additional_costs={"siscomex_fee": "192.79"},
+    )
+
+    icms = calculated[0]["tax_payload"]["icms"]
+    assert icms["cst"] == cst
+    assert icms["base"] == "0.00"
+    assert icms["reference_base"] == "8628.08"
+    assert icms["rate"] is None
+    assert icms["value"] == "0.00"
+    assert icms["tax_treatment_confirmed"] is False
+    assert icms["diagnostic_only"] is True
+    assert totals["icms_base"] == "0.00"
+    assert totals["icms_value"] == "0.00"
+
+
+def test_marks_non_taxed_icms_as_fiscal_after_explicit_confirmation():
+    calculated, _ = ImportTaxCalculator().calculate(
+        [reference_item()],
+        configuration={
+            "icms_origin": "1",
+            "icms_cst": "40",
+            "icms_tax_treatment_confirmed": True,
+        },
+    )
+
+    icms = calculated[0]["tax_payload"]["icms"]
+    assert icms["tax_treatment_confirmed"] is True
+    assert icms["diagnostic_only"] is False
+
+
+def test_rejects_nominal_rate_for_non_taxed_icms():
+    with pytest.raises(
+        ImportTaxCalculationError,
+        match="CST 40 não aceita alíquota nominal",
+    ):
+        ImportTaxCalculator().calculate(
+            [reference_item()],
+            configuration={"icms_cst": "40", "icms_rate": "19.5"},
+        )

@@ -190,6 +190,29 @@ operador estrangeiro não tiver código BACEN ou endereço suficientes para a
 NF-e. Nome e endereço são preenchidos automaticamente pelo Catálogo quando
 estiverem disponíveis.
 
+Para uma operação com exoneração integral identificada no PCCE, o operador
+pode substituir a configuração tributária do processo sem criar uma regra
+permanente para o cliente:
+
+```json
+{
+  "tax_configuration": {
+    "icms_origin": "1",
+    "icms_cst": "40",
+    "icms_tax_treatment_confirmed": false,
+    "ipi_cst": "49",
+    "ipi_enquiry_code": "999",
+    "pis_cst": "98",
+    "cofins_cst": "98"
+  }
+}
+```
+
+`icms_cst` aceita `40` (isenta), `41` (não tributada) ou `50` (suspensão)
+sem alíquota nominal. Com a confirmação fiscal em `false`, o XML não assinado
+pode ser gerado e validado no XSD, mas os endpoints de assinatura e futura
+transmissão permanecem bloqueados.
+
 Quando `afrmm` e `siscomex_fee` não forem enviados em `additional_costs`, o
 backend utiliza respectivamente `normalized_payload.afrmm_value` e o tributo
 `taxa_utilizacao` da DUIMP. Valores enviados explicitamente, inclusive

@@ -12,6 +12,8 @@ class ImportTaxCalculationError(ValueError):
 class ImportTaxCalculator:
     MONEY = Decimal("0.01")
     RATE = Decimal("0.0001")
+    NON_TAXED_ICMS_CSTS = {"40", "41", "50"}
+    SUPPORTED_ICMS_CSTS = NON_TAXED_ICMS_CSTS | {"51", "90"}
 
     def calculate(
         self,
@@ -24,13 +26,30 @@ class ImportTaxCalculator:
             raise ImportTaxCalculationError("Não existem itens para calcular.")
 
         icms_cst = str(configuration.get("icms_cst") or "90").zfill(2)
+        if icms_cst not in self.SUPPORTED_ICMS_CSTS:
+            raise ImportTaxCalculationError(
+                "ICMS CST não suportado. Informe 40, 41, 50, 51 ou 90."
+            )
         raw_icms_rate = configuration.get("icms_rate")
         has_icms_rate = raw_icms_rate not in (None, "")
         icms_rate = self._decimal(raw_icms_rate)
+        raw_tax_treatment_confirmed = configuration.get(
+            "icms_tax_treatment_confirmed"
+        )
+        if raw_tax_treatment_confirmed not in (None, True, False):
+            raise ImportTaxCalculationError(
+                "icms_tax_treatment_confirmed deve ser booleano."
+            )
+        tax_treatment_confirmed = raw_tax_treatment_confirmed is True
         deferment_rate = self._decimal(
             configuration.get("icms_deferment_rate")
         )
-        if icms_cst == "51":
+        if icms_cst in self.NON_TAXED_ICMS_CSTS:
+            if has_icms_rate:
+                raise ImportTaxCalculationError(
+                    f"ICMS CST {icms_cst} não aceita alíquota nominal."
+                )
+        elif icms_cst == "51":
             if not Decimal("0") < deferment_rate <= Decimal("100"):
                 raise ImportTaxCalculationError(
                     "O percentual de diferimento do ICMS CST 51 deve ser maior "
@@ -180,7 +199,12 @@ class ImportTaxCalculator:
                 + item_other
                 - discount
             )
-            if icms_cst == "51":
+            if icms_cst in self.NON_TAXED_ICMS_CSTS:
+                icms_base = Decimal("0.00")
+                icms_operation_value = None
+                icms_deferred_value = None
+                icms_value = Decimal("0.00")
+            elif icms_cst == "51":
                 effective_rate = (
                     icms_rate
                     * (Decimal("1") - deferment_rate / Decimal("100"))
@@ -230,6 +254,11 @@ class ImportTaxCalculator:
                 "cst": icms_cst,
                 "base_method": str(configuration.get("icms_base_method") or "3"),
                 "base": self._format_money(icms_base),
+                "reference_base": (
+                    self._format_money(icms_base_numerator)
+                    if icms_cst in self.NON_TAXED_ICMS_CSTS
+                    else None
+                ),
                 "rate": self._format_rate(icms_rate) if has_icms_rate else None,
                 "value": self._format_money(icms_value),
                 "operation_value": (
@@ -247,7 +276,18 @@ class ImportTaxCalculator:
                     if icms_deferred_value is not None
                     else None
                 ),
-                "diagnostic_only": icms_cst == "51" and not has_icms_rate,
+                "tax_treatment_confirmed": (
+                    tax_treatment_confirmed
+                    if icms_cst in self.NON_TAXED_ICMS_CSTS
+                    else None
+                ),
+                "diagnostic_only": (
+                    (icms_cst == "51" and not has_icms_rate)
+                    or (
+                        icms_cst in self.NON_TAXED_ICMS_CSTS
+                        and not tax_treatment_confirmed
+                    )
+                ),
                 "st_base_method": str(configuration.get("icms_st_base_method") or "6"),
                 "st_base": "0.00",
                 "st_rate": "0.0000",

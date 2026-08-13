@@ -248,7 +248,8 @@ omitindo `pICMS`, `vICMSOp` e `vICMSDif`. O draft recebe:
 
 Esse bloqueio deve ser obrigatoriamente verificado pelo futuro endpoint de
 transmissão. A geração, o download e a validação XSD do XML diagnóstico
-continuam disponíveis para conferência. A assinatura não remove o bloqueio.
+continuam disponíveis para conferência. A assinatura também é recusada
+enquanto o bloqueio fiscal estiver ativo.
 
 Para a DUIMP `26BR0000684087-7`, persista a data confirmada no histórico:
 
@@ -262,6 +263,48 @@ Para a DUIMP `26BR0000684087-7`, persista a data confirmada no histórico:
   }
 }
 ```
+
+## 6. XML diagnóstico com ICMS CST 40, 41 ou 50
+
+Quando o PCCE comprovar exoneração integral, mas a natureza fiscal ainda
+depender de confirmação do operador, informe `tax_configuration` diretamente
+na criação do draft. Isso evita cadastrar como padrão do cliente uma regra que
+só se aplica a uma reimportação ou operação específica.
+
+```json
+{
+  "environment": "homologation",
+  "series": "1",
+  "import_purpose": "resale",
+  "duimp_snapshot_id": "UUID_DO_SNAPSHOT",
+  "tax_configuration": {
+    "icms_origin": "1",
+    "icms_cst": "40",
+    "icms_tax_treatment_confirmed": false,
+    "ipi_cst": "49",
+    "ipi_enquiry_code": "999",
+    "pis_cst": "98",
+    "cofins_cst": "98"
+  }
+}
+```
+
+O operador pode selecionar:
+
+- `40`: isenta;
+- `41`: não tributada;
+- `50`: suspensão.
+
+Esses CSTs não aceitam `icms_rate`. O XML usa o grupo `ICMS40` somente com
+`orig` e `CST`, omitindo base, alíquota e valor desonerado que não tenham sido
+comprovados. Enquanto `icms_tax_treatment_confirmed=false`, o draft contém o
+bloqueio `unconfirmed_icms_tax_treatment`; ainda é possível gerar, baixar e
+validar o XML não assinado, mas não assiná-lo ou transmiti-lo.
+
+Altere o booleano para `true` somente após a equipe fiscal confirmar o CST e o
+fundamento aplicável à operação de entrada. A confirmação da NF-e de saída não
+deve ser reaproveitada automaticamente, pois saída temporária e retorno de
+importação são fatos fiscais distintos.
 
 Após o novo `duimp/fetch`, a normalização também:
 

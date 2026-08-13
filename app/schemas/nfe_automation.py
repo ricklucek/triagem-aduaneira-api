@@ -62,7 +62,27 @@ class ClientImportTaxRuleSchema(Schema):
         if configuration is None:
             return
         cst = str(configuration.get("icms_cst") or "90").zfill(2)
+        supported_csts = {"40", "41", "50", "51", "90"}
+        if cst not in supported_csts:
+            raise ValidationError(
+                "configuration_json.icms_cst deve ser 40, 41, 50, 51 ou 90.",
+                field_name="configuration_json",
+            )
         raw_rate = configuration.get("icms_rate")
+        raw_confirmed = configuration.get("icms_tax_treatment_confirmed")
+        if raw_confirmed not in (None, True, False):
+            raise ValidationError(
+                "configuration_json.icms_tax_treatment_confirmed deve ser "
+                "booleano.",
+                field_name="configuration_json",
+            )
+        if cst in {"40", "41", "50"}:
+            if raw_rate not in (None, ""):
+                raise ValidationError(
+                    f"ICMS CST {cst} não aceita alíquota nominal.",
+                    field_name="configuration_json",
+                )
+            return
         if raw_rate in (None, "") and cst == "51":
             try:
                 deferment_rate = Decimal(
