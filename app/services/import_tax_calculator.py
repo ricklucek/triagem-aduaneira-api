@@ -593,6 +593,23 @@ class ImportTaxCalculator:
                 calculated=totals.get(total_field),
                 tolerance=tolerance,
             )
+            if (
+                tax_name == "icms"
+                and not checks[-1]["matches"]
+                and self.is_diagnostic_full_icms_reduction(items)
+            ):
+                checks[-1].update(
+                    {
+                        "blocking": False,
+                        "code": "diagnostic_icms_reconciliation_difference",
+                        "message": (
+                            "O ICMS declarado na DUIMP diverge do vICMS da "
+                            "NF-e diagnóstica com CST 51 e redução integral da "
+                            "base. A divergência exige revisão fiscal, mas não "
+                            "impede a geração do XML não assinado."
+                        ),
+                    }
+                )
 
         for cost_name, total_field in {
             "afrmm": "afrmm_value",
@@ -609,13 +626,51 @@ class ImportTaxCalculator:
             )
 
         failed = [check for check in checks if not check["matches"]]
+        blocking_failed = [
+            check for check in failed if check.get("blocking", True)
+        ]
+        warning_failed = [
+            check for check in failed if not check.get("blocking", True)
+        ]
         return {
             "status": "balanced" if not failed else "requires_review",
             "tolerance": self._format_money(tolerance),
             "checks": checks,
             "failed_checks": len(failed),
+            "blocking_failed_checks": len(blocking_failed),
+            "warning_checks": len(warning_failed),
             "item_count": len(items),
         }
+
+    def is_diagnostic_full_icms_reduction(
+        self, items: list[dict[str, Any]]
+    ) -> bool:
+        """Identify the controlled ICMS51 diagnostic scenario.
+
+        This classification is deliberately strict so that unrelated ICMS
+        divergences remain blocking reconciliation errors.
+        """
+        if not items:
+            return False
+
+        for item in items:
+            icms = ((item.get("tax_payload") or {}).get("icms") or {})
+            if str(icms.get("cst") or "").zfill(2) != "51":
+                return False
+            if icms.get("diagnostic_only") is not True:
+                return False
+            if self._decimal(icms.get("base_reduction_rate")) != Decimal(
+                "100"
+            ):
+                return False
+            if icms.get("rate") not in (None, ""):
+                return False
+            if icms.get("value") not in (None, "") and self._money(
+                icms.get("value")
+            ) != Decimal("0.00"):
+                return False
+
+        return True
 
     def _append_reconciliation_check(
         self,
@@ -638,6 +693,7 @@ class ImportTaxCalculator:
                 "calculated": self._format_money(calculated_value),
                 "difference": self._format_money(difference),
                 "matches": abs(difference) <= tolerance,
+                "blocking": True,
             }
         )
 

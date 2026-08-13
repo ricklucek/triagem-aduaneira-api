@@ -192,6 +192,42 @@ def test_marks_reconciliation_for_review_when_official_total_diverges():
     assert result["status"] == "requires_review"
     assert result["failed_checks"] == 1
     assert result["checks"][0]["difference"] == "-0.21"
+    assert result["checks"][0]["blocking"] is True
+    assert result["blocking_failed_checks"] == 1
+    assert result["warning_checks"] == 0
+
+
+def test_marks_full_reduction_diagnostic_icms_difference_as_non_blocking():
+    calculator = ImportTaxCalculator()
+    items, totals = calculator.calculate(
+        [reference_item()],
+        configuration={
+            "icms_origin": "1",
+            "icms_cst": "51",
+            "icms_base_method": "3",
+            "icms_base_reduction_rate": "100",
+            "icms_base_allocation": "per_item",
+            "icms_benefit_code": "PR839999",
+            "ipi_cst": "00",
+            "pis_cst": "99",
+            "cofins_cst": "99",
+        },
+    )
+
+    result = calculator.reconcile(
+        items,
+        totals,
+        expected_tax_totals={"icms": {"value": "100.00"}},
+    )
+
+    assert result["status"] == "requires_review"
+    assert result["failed_checks"] == 1
+    assert result["blocking_failed_checks"] == 0
+    assert result["warning_checks"] == 1
+    assert result["checks"][0]["blocking"] is False
+    assert result["checks"][0]["code"] == (
+        "diagnostic_icms_reconciliation_difference"
+    )
 
 
 def test_calculates_full_icms_deferment_diagnostic_for_ordemilk_duimp():

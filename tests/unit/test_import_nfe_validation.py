@@ -71,6 +71,113 @@ def test_validation_warns_and_blocks_diagnostic_icms_authorization():
     )
 
 
+def test_validation_warns_instead_of_rejecting_legacy_diagnostic_icms_check():
+    service = ImportNfeService(
+        current_user=SimpleNamespace(organization_id=None, id=None)
+    )
+    item = {
+        "product_code": "342.79.752",
+        "description": "DOBRADICA PARA MOVEIS",
+        "ncm": "83021000",
+        "cfop": "3102",
+        "commercial_quantity": "1",
+        "product_value": "100",
+        "import_payload": {"duimp_item_number": "2"},
+        "tax_payload": {
+            "icms": {
+                "cst": "51",
+                "base_reduction_rate": "100.0000",
+                "rate": None,
+                "value": None,
+                "diagnostic_only": True,
+            },
+            **{
+                tax: {"value": "1"}
+                for tax in ("ipi", "ii", "pis", "cofins")
+            },
+        },
+    }
+    payload = {
+        "document": {
+            "model": "55",
+            "operation_type": "entry",
+            "environment": "homologation",
+            "series": "1",
+        },
+        "duimp": {
+            "number": "26BR0000704908-1",
+            "registration_date": "2026-05-27",
+            "clearance_location": "TCP - TERMINAL",
+            "clearance_state": "PR",
+            "clearance_date": "2026-05-27",
+            "transport_mode_code": "1",
+        },
+        "issuer": {
+            "cnpj": "02473058000188",
+            "legal_name": "Hafele Brasil Ltda.",
+            "tax_regime": "3",
+            "address": {
+                "street": "Rodovia João Leopoldo Jacomel",
+                "number": "4459",
+                "district": "Jardim Primavera",
+                "city_code": "4119509",
+                "city_name": "Piraquara",
+                "state": "PR",
+                "zip_code": "83302000",
+            },
+        },
+        "recipient": {
+            "party_type": "foreign",
+            "legal_name": "HAFELE SE & CO KG",
+            "address": {
+                "street": "ADOLF HAFELE STRASSE",
+                "number": "1",
+                "district": "EXTERIOR",
+                "city_code": "9999999",
+                "city_name": "NAGOLD",
+                "state": "EX",
+                "country_code": "0230",
+                "country_name": "ALEMANHA",
+            },
+        },
+        "items": [item],
+        "authorization": {
+            "ready": False,
+            "mode": "diagnostic",
+            "blockers": [
+                {
+                    "code": "missing_nominal_icms_rate",
+                    "field": "tax_configuration.icms_rate",
+                    "message": "Revisão fiscal pendente.",
+                }
+            ],
+        },
+        # Legacy drafts do not yet have the `blocking` classification.
+        "reconciliation": {
+            "status": "requires_review",
+            "checks": [
+                {
+                    "name": "duimp_icms",
+                    "expected": "5475.05",
+                    "calculated": "0.00",
+                    "difference": "-5475.05",
+                    "matches": False,
+                }
+            ],
+        },
+    }
+
+    result = service.validate_nfe_payload(payload)
+
+    assert result.is_valid is True
+    assert not result.errors
+    assert any(
+        warning.get("code")
+        == "diagnostic_icms_reconciliation_difference"
+        for warning in result.warnings
+    )
+
+
 def test_validation_blocks_unconfirmed_non_taxed_icms_treatment():
     service = ImportNfeService(
         current_user=SimpleNamespace(organization_id=None, id=None)

@@ -2119,20 +2119,57 @@ class ImportNfeService:
 
         reconciliation = payload.get("reconciliation") or {}
         if reconciliation.get("status") == "requires_review":
-            failed_names = ", ".join(
-                str(check.get("name"))
+            failed_checks = [
+                check
                 for check in reconciliation.get("checks") or []
                 if not check.get("matches")
+            ]
+            diagnostic_icms = (
+                self.tax_calculator.is_diagnostic_full_icms_reduction(items)
             )
-            errors.append(
-                {
-                    "field": "reconciliation",
-                    "message": (
-                        "A reconciliação fiscal encontrou divergências"
-                        + (f": {failed_names}." if failed_names else ".")
-                    ),
-                }
-            )
+            blocking_checks = []
+            warning_checks = []
+            for check in failed_checks:
+                is_controlled_diagnostic_icms = (
+                    check.get("name") == "duimp_icms" and diagnostic_icms
+                )
+                if (
+                    check.get("blocking", True) is False
+                    or is_controlled_diagnostic_icms
+                ):
+                    warning_checks.append(check)
+                else:
+                    blocking_checks.append(check)
+
+            if blocking_checks:
+                failed_names = ", ".join(
+                    str(check.get("name")) for check in blocking_checks
+                )
+                errors.append(
+                    {
+                        "field": "reconciliation",
+                        "message": (
+                            "A reconciliação fiscal encontrou divergências"
+                            + (f": {failed_names}." if failed_names else ".")
+                        ),
+                    }
+                )
+
+            for check in warning_checks:
+                warnings.append(
+                    {
+                        "field": f"reconciliation.{check.get('name')}",
+                        "code": check.get("code")
+                        or "diagnostic_icms_reconciliation_difference",
+                        "message": check.get("message")
+                        or (
+                            "O ICMS declarado na DUIMP diverge do vICMS da "
+                            "NF-e diagnóstica com CST 51 e redução integral da "
+                            "base. A divergência exige revisão fiscal, mas não "
+                            "impede a geração do XML não assinado."
+                        ),
+                    }
+                )
 
         warnings.append(
             {
