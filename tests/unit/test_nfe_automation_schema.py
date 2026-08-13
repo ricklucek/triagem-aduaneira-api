@@ -28,8 +28,23 @@ def test_rejects_partial_deferment_without_nominal_rate():
     payload = diagnostic_icms51_rule()
     payload["configuration_json"]["icms_deferment_rate"] = "50"
 
-    with pytest.raises(ValidationError, match="diferimento de 100%"):
+    with pytest.raises(ValidationError, match="diferimento ou redução"):
         ClientImportTaxRuleSchema().load(payload)
+
+
+def test_accepts_diagnostic_icms51_with_full_base_reduction():
+    payload = diagnostic_icms51_rule()
+    payload["configuration_json"].pop("icms_deferment_rate")
+    payload["configuration_json"].update(
+        {
+            "icms_base_reduction_rate": "100",
+            "icms_benefit_code": "PR839999",
+        }
+    )
+
+    result = ClientImportTaxRuleSchema().load(payload)
+
+    assert result["configuration_json"]["icms_base_reduction_rate"] == "100"
 
 
 @pytest.mark.parametrize("cst", ["40", "41", "50"])

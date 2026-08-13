@@ -106,6 +106,32 @@ def test_context_uses_controlled_official_references_without_tabx():
     )
 
 
+def test_context_resolves_hafele_official_references_and_duimp_costs():
+    result = NfeContextResolver().resolve(
+        normalized={
+            "registration_date": "2026-05-27",
+            "clearance_location_code": "0917900",
+            "clearance_date": "2026-05-27",
+            "transport_mode_code": "1",
+            "afrmm_value": "0",
+            "tax_totals": {
+                "taxa_utilizacao": {"value": "285.34"},
+            },
+            "foreign_supplier": {"country_iso_alpha_2": "DE"},
+        }
+    )
+
+    assert result["ready_for_draft"] is True
+    assert result["normalized"]["clearance_location"] == "TCP - TERMINAL"
+    assert result["normalized"]["clearance_state"] == "PR"
+    assert result["normalized"]["foreign_supplier"]["country_code"] == "0230"
+    assert result["normalized"]["foreign_supplier"]["country_name"] == "ALEMANHA"
+    assert result["suggested"]["additional_costs"] == {
+        "afrmm": "0",
+        "siscomex_fee": "285.34",
+    }
+
+
 def test_cargo_identifier_prefers_air_waybill_over_ruc():
     identifier = ImportNfeService._cargo_identifier(
         {

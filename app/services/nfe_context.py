@@ -8,12 +8,20 @@ class NfeContextResolver:
     """Consolida fontes da NF-e sem transformar inferências em fatos fiscais."""
 
     REFERENCE_CUSTOMS_UNITS = {
+        "0917900": {
+            "description": "TCP - TERMINAL",
+            "state": "PR",
+        },
         "0927800": {
             "description": "ALF/PORTO DE ITAJAI",
             "state": "SC",
         },
     }
     REFERENCE_COUNTRY_CODES = {
+        "DE": {
+            "code": "0230",
+            "name": "ALEMANHA",
+        },
         "US": {
             "code": "2496",
             "name": "ESTADOS UNIDOS",
@@ -211,6 +219,19 @@ class NfeContextResolver:
 
         pcce = external.get("icms_declaration")
         suggested_costs: dict[str, str] = {}
+        if resolved.get("afrmm_value") not in (None, ""):
+            suggested_costs["afrmm"] = str(resolved["afrmm_value"])
+        tax_totals = resolved.get("tax_totals") or {}
+        for tax_name in (
+            "taxa_utilizacao",
+            "taxa_utilizacao_siscomex",
+            "taxa_siscomex",
+        ):
+            tax = tax_totals.get(tax_name)
+            value = tax.get("value") if isinstance(tax, Mapping) else tax
+            if value not in (None, ""):
+                suggested_costs["siscomex_fee"] = str(value)
+                break
         if isinstance(pcce, Mapping):
             if pcce.get("valorAfrmm") is not None:
                 suggested_costs["afrmm"] = str(pcce["valorAfrmm"])

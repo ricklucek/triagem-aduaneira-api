@@ -253,6 +253,60 @@ def test_calculates_full_icms_deferment_diagnostic_for_ordemilk_duimp():
     assert icms["diagnostic_only"] is True
 
 
+def test_calculates_hafele_full_base_reduction_and_item_ipi_treatment():
+    base_item = {
+        "product_value": "392.29",
+        "customs_value": "549.08",
+        "freight_value": "156.33",
+        "insurance_value": "0.47",
+        "net_weight": "3.768",
+        "discount_value": "0",
+        "other_value": "0",
+        "tax_payload": {
+            "ii": {"base": "549.08", "rate": "18", "value": "98.83"},
+            "ipi": {"base": "647.9144", "rate": "3.25", "value": "21.06"},
+            "pis": {"base": "549.08", "rate": "2.1", "value": "11.53"},
+            "cofins": {"base": "549.08", "rate": "9.65", "value": "52.99"},
+        },
+        "import_payload": {},
+    }
+    zero_ipi_item = {
+        **base_item,
+        "product_value": "7954.74",
+        "customs_value": "8634.14",
+        "freight_value": "669.90",
+        "insurance_value": "9.50",
+        "tax_payload": {
+            **base_item["tax_payload"],
+            "ipi": {"base": "10015.6024", "rate": "0", "value": "0"},
+        },
+    }
+
+    calculated, _ = ImportTaxCalculator().calculate(
+        [base_item, zero_ipi_item],
+        configuration={
+            "icms_origin": "1",
+            "icms_cst": "51",
+            "icms_base_method": "3",
+            "icms_base_reduction_rate": "100",
+            "icms_base_allocation": "per_item",
+            "icms_benefit_code": "PR839999",
+            "ipi_cst": "00",
+            "ipi_zero_rate_cst": "01",
+            "pis_cst": "99",
+            "cofins_cst": "99",
+        },
+    )
+
+    first_icms = calculated[0]["tax_payload"]["icms"]
+    assert first_icms["base"] == "733.50"
+    assert first_icms["base_reduction_rate"] == "100.0000"
+    assert first_icms["value"] is None
+    assert calculated[0]["benefit_code"] == "PR839999"
+    assert calculated[0]["tax_payload"]["ipi"]["cst"] == "00"
+    assert calculated[1]["tax_payload"]["ipi"]["cst"] == "01"
+
+
 @pytest.mark.parametrize("cst", ["40", "41", "50"])
 def test_calculates_non_taxed_icms_without_nominal_rate(cst):
     calculated, totals = ImportTaxCalculator().calculate(

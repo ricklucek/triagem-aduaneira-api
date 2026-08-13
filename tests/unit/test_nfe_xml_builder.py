@@ -216,6 +216,45 @@ def test_builds_xsd_valid_diagnostic_icms51_without_nominal_values():
     assert NfeXsdValidator().validate(xml, allow_unsigned=True).is_valid is True
 
 
+def test_builds_xsd_valid_icms51_base_reduction_benefit_and_ipint():
+    data = payload()
+    data["items"][0]["benefit_code"] = "PR839999"
+    data["items"][0]["tax_payload"]["icms"] = {
+        "origin": "1",
+        "cst": "51",
+        "base_method": "3",
+        "base_reduction_rate": "100",
+        "base": "9686.49",
+        "rate": None,
+        "value": None,
+        "diagnostic_only": True,
+    }
+    data["items"][0]["tax_payload"]["ipi"] = {
+        "cst": "01",
+        "enquiry_code": "999",
+        "base": "7144.18",
+        "rate": "0",
+        "value": "0",
+    }
+    data["totals"]["icms_value"] = "0"
+    data["totals"]["ipi_value"] = "0"
+
+    xml = NfeXmlBuilder().build(
+        data,
+        access_key="41260700000000000191550010000144221763362375",
+    )
+    root = ET.fromstring(xml)
+    icms51 = root.find(".//nfe:ICMS51", NS)
+
+    assert root.findtext(".//nfe:prod/nfe:cBenef", namespaces=NS) == "PR839999"
+    assert icms51.findtext("nfe:pRedBC", namespaces=NS) == "100.0000"
+    assert icms51.find("nfe:pICMS", NS) is None
+    assert icms51.find("nfe:vICMS", NS) is None
+    assert root.findtext(".//nfe:IPI/nfe:IPINT/nfe:CST", namespaces=NS) == "01"
+    assert root.find(".//nfe:IPI/nfe:IPITrib", NS) is None
+    assert NfeXsdValidator().validate(xml, allow_unsigned=True).is_valid is True
+
+
 def test_builds_xsd_valid_diagnostic_icms40_without_nominal_values():
     data = payload()
     data["items"][0]["tax_payload"]["icms"] = {

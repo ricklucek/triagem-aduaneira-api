@@ -2292,6 +2292,11 @@ class ImportNfeService:
             "ncm": item.ncm,
             "cfop": item.cfop,
             "cest": item.cest,
+            "benefit_code": (
+                ((item.tax_payload or {}).get("icms") or {}).get(
+                    "benefit_code"
+                )
+            ),
             "commercial_unit": item.commercial_unit,
             "commercial_quantity": str(item.commercial_quantity),
             "commercial_unit_value": str(item.commercial_unit_value),

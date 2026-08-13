@@ -95,7 +95,7 @@ def portal_payload():
     }
 
 
-def test_normalizes_official_portal_payload_using_customs_value():
+def test_normalizes_official_portal_payload_separating_fiscal_components():
     result = DuimpNormalizer().normalize(portal_payload())
 
     assert result["number"] == "26BR0000000000-1"
@@ -114,10 +114,10 @@ def test_normalizes_official_portal_payload_using_customs_value():
 
     item = result["items"][0]
     assert item["customs_value"] == "1000"
-    assert item["product_value"] == "1000"
-    assert Decimal(item["unit_value"]) == Decimal("83.33333333333333333333333333")
-    assert item["freight_value"] == "0"
-    assert item["insurance_value"] == "0"
+    assert item["product_value"] == "900"
+    assert Decimal(item["unit_value"]) == Decimal("75")
+    assert item["freight_value"] == "90"
+    assert item["insurance_value"] == "10"
     assert item["customs_freight_value"] == "90"
     assert item["customs_insurance_value"] == "10"
     assert item["net_weight"] == "25.5"

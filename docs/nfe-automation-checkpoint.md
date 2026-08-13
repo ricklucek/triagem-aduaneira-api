@@ -316,6 +316,109 @@ Após o novo `duimp/fetch`, a normalização também:
 - aplica `cFabricante=0000` apenas quando o Portal retornou explicitamente o
   fabricante sem código, registrando a origem do fallback e um aviso.
 
+## 7. DUIMP 26BR0000704908-1 — HAFELE
+
+O snapshot dessa DUIMP comprovou oito itens e os mesmos totais federais do XML
+autorizado usado como comparação: II `2691.98`, IPI `810.52`, PIS `353.57` e
+COFINS `1624.69`. A normalização passa a discriminar os componentes fiscais da
+operação em vez de registrar todo o valor aduaneiro como `vProd`:
+
+- mercadorias: `14873.13`;
+- frete: `1945.27`;
+- seguro: `17.76`;
+- valor aduaneiro: `16836.17`;
+- taxa de utilização Siscomex: `285.34`.
+
+Os valores atuais do Portal diferem em poucos centavos dos usados na NF-e
+histórica. A reconciliação deve registrar essa diferença, sem substituir os
+valores oficiais atuais pelo conteúdo da nota de comparação.
+
+Após atualizar a API, execute novamente `duimp/fetch` para criar um snapshot
+normalizado com a decomposição nova. Depois persista o contexto:
+
+```http
+POST /import-processes/93210732-52a9-4425-ab5d-cb5ae29396e8/nfe-context/resolve
+Content-Type: application/json
+```
+
+```json
+{
+  "duimp_snapshot_id": "NOVO_UUID_DO_SNAPSHOT",
+  "import_purpose": "resale",
+  "refresh_external": false,
+  "overrides": {
+    "clearance_date": "2026-05-27",
+    "transport_mode_code": "1"
+  }
+}
+```
+
+A unidade `0917900` é resolvida para `TCP - TERMINAL / PR` e o país `DE` para
+`0230 / ALEMANHA`. A data de desembaraço permanece override explícito porque o
+retorno consultado não a forneceu e o histórico e a NF-e de comparação não
+coincidem entre si.
+
+Cadastre a regra de diagnóstico do cliente:
+
+```http
+POST /clients/08e19c74-8815-4eee-ab0d-42a0cbbaf312/import-tax-rules
+Content-Type: application/json
+```
+
+```json
+{
+  "name": "PR - revenda direta - redução integral diagnóstico",
+  "issuer_state": "PR",
+  "import_purpose": "resale",
+  "import_modality": "direct",
+  "tax_regime": "3",
+  "priority": 100,
+  "configuration_json": {
+    "icms_origin": "1",
+    "icms_cst": "51",
+    "icms_base_method": "3",
+    "icms_base_reduction_rate": "100",
+    "icms_base_allocation": "per_item",
+    "icms_benefit_code": "PR839999",
+    "ipi_cst": "00",
+    "ipi_zero_rate_cst": "01",
+    "ipi_enquiry_code": "999",
+    "pis_cst": "99",
+    "cofins_cst": "99"
+  },
+  "transport_defaults": {
+    "freight_mode": "1"
+  },
+  "payment_defaults": {
+    "method": "90",
+    "value": "0.00"
+  },
+  "active": true,
+  "effective_from": "2026-01-01"
+}
+```
+
+Essa regra produz `ICMS51` com `pRedBC=100`, omite os valores nominais de ICMS,
+leva `PR839999` para `cBenef`, usa `IPITrib/00` nos itens tributados e `IPINT/01`
+no item com alíquota zero. A transmissão permanece bloqueada por
+`missing_nominal_icms_rate`; o XML não assinado e a validação XSD continuam
+disponíveis.
+
+Crie o draft usando somente o novo snapshot e a regra persistida:
+
+```json
+{
+  "environment": "homologation",
+  "series": "1",
+  "import_purpose": "resale",
+  "duimp_snapshot_id": "NOVO_UUID_DO_SNAPSHOT"
+}
+```
+
+O CEST `1007600` visto no XML histórico não é inferido apenas pelo NCM. Se a
+equipe fiscal confirmar que ele se aplica ao item `342.79.752`, use o endpoint
+de edição do item do draft antes de gerar a chave de acesso.
+
 ## Referências oficiais
 
 - [CCT Importação — consultas e operações](https://docs.portalunico.siscomex.gov.br/api/ccta/consultas/)

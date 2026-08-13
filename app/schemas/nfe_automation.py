@@ -85,18 +85,24 @@ class ClientImportTaxRuleSchema(Schema):
             return
         if raw_rate in (None, "") and cst == "51":
             try:
+                base_reduction_rate = Decimal(
+                    str(configuration.get("icms_base_reduction_rate"))
+                )
+            except (InvalidOperation, TypeError, ValueError):
+                base_reduction_rate = Decimal("0")
+            try:
                 deferment_rate = Decimal(
                     str(configuration.get("icms_deferment_rate"))
                 )
             except (InvalidOperation, TypeError, ValueError):
-                raise ValidationError(
-                    "configuration_json.icms_deferment_rate deve ser numérico.",
-                    field_name="configuration_json",
-                )
-            if deferment_rate != Decimal("100"):
+                deferment_rate = Decimal("0")
+            if (
+                deferment_rate != Decimal("100")
+                and base_reduction_rate != Decimal("100")
+            ):
                 raise ValidationError(
                     "ICMS CST 51 sem alíquota nominal somente é aceito para "
-                    "XML diagnóstico com diferimento de 100%.",
+                    "XML diagnóstico com diferimento ou redução de base de 100%.",
                     field_name="configuration_json",
                 )
             return

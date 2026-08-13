@@ -138,14 +138,21 @@ class DuimpNormalizer:
         manufacturer = raw_item.get("fabricante") or {}
 
         quantity = self._decimal(merchandise.get("quantidadeComercial"))
+        source_freight = self._decimal((sale.get("frete") or {}).get("valorBRL"))
+        source_insurance = self._decimal(
+            (sale.get("seguro") or {}).get("valorBRL")
+        )
         customs_value = self._decimal(
             calculated_merchandise.get("valorAduaneiroBRL")
             or sale.get("valorBRL")
         )
-        unit_value = customs_value / quantity if quantity else Decimal("0")
-        source_freight = self._decimal((sale.get("frete") or {}).get("valorBRL"))
-        source_insurance = self._decimal(
-            (sale.get("seguro") or {}).get("valorBRL")
+        local_shipment_value = self._decimal(
+            calculated_merchandise.get("valorLocalEmbarqueBRL")
+            or sale.get("valorBRL")
+            or customs_value
+        )
+        unit_value = (
+            local_shipment_value / quantity if quantity else Decimal("0")
         )
         net_weight = self._decimal(merchandise.get("pesoLiquido"))
         modality_code = self._string(characterization.get("indicador"))
@@ -175,13 +182,15 @@ class DuimpNormalizer:
             "additional_info": additional_info,
             "complementary_description": self._string(merchandise.get("descricao")),
             "ncm": self._digits(product.get("ncm")),
+            "cest": self._digits(product.get("cest") or catalog.get("cest"))
+            or None,
             "commercial_unit": self._nfe_unit(
                 merchandise.get("unidadeComercial") or "UN"
             ),
             "quantity": str(quantity),
             "unit_value": str(unit_value),
             "customs_value": str(customs_value),
-            "product_value": str(customs_value),
+            "product_value": str(local_shipment_value),
             "taxable_unit": self._nfe_unit(
                 merchandise.get("unidadeComercial") or "UN"
             ),
@@ -203,10 +212,10 @@ class DuimpNormalizer:
                     "numeroAtoDuimpInsumo"
                 )
             ),
-            # O valor aduaneiro já contém frete e seguro. Estes campos fiscais
-            # permanecem zerados para que a NF-e não some os componentes duas vezes.
-            "freight_value": "0",
-            "insurance_value": "0",
+            # A NF-e discrimina o valor local da mercadoria, o frete e o seguro.
+            # O valor aduaneiro permanece separado para rateios e conferências.
+            "freight_value": str(source_freight),
+            "insurance_value": str(source_insurance),
             "customs_freight_value": str(source_freight),
             "customs_insurance_value": str(source_insurance),
             "net_weight": str(net_weight),
