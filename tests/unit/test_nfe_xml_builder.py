@@ -151,6 +151,51 @@ def test_normalizes_nfe_datetime_to_seconds():
     )
 
 
+def test_builds_operation_indicators_carrier_and_volume():
+    data = payload()
+    data["document"].update(
+        {
+            "presence_indicator": "9",
+            "intermediary_indicator": "0",
+        }
+    )
+    data["transport"] = {
+        "freight_mode": "1",
+        "carrier": {
+            "tax_id": "06.255.344/0001-28",
+            "name": "S2 LOG",
+            "state_registration": "9086113225",
+            "address": "RUA VEREADOR ANGELO BURBELLO 800",
+            "city_name": "CURITIBA",
+            "state": "PR",
+        },
+        "volume": {
+            "quantity": 8,
+            "species": "DIVERSOS",
+            "net_weight": "46.88800",
+            "gross_weight": "51.50000",
+        },
+    }
+
+    xml = NfeXmlBuilder().build(
+        data,
+        access_key="41260700000000000191550010000144221763362375",
+    )
+    root = ET.fromstring(xml)
+
+    assert root.findtext(".//nfe:ide/nfe:indPres", namespaces=NS) == "9"
+    assert root.findtext(".//nfe:ide/nfe:indIntermed", namespaces=NS) == "0"
+    assert root.findtext(".//nfe:transporta/nfe:CNPJ", namespaces=NS) == (
+        "06255344000128"
+    )
+    assert root.findtext(".//nfe:transporta/nfe:xNome", namespaces=NS) == (
+        "S2 LOG"
+    )
+    assert root.findtext(".//nfe:vol/nfe:pesoL", namespaces=NS) == "46.888"
+    assert root.findtext(".//nfe:vol/nfe:pesoB", namespaces=NS) == "51.500"
+    assert NfeXsdValidator().validate(xml, allow_unsigned=True).is_valid is True
+
+
 def test_unsigned_xml_passes_official_xsd_with_validation_signature():
     xml = NfeXmlBuilder().build(
         payload(),

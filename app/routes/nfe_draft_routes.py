@@ -9,6 +9,7 @@ from ..schemas.import_process import (
     NfeDraftItemSchema,
     NfeDraftSchema,
     NfeXmlVersionSchema,
+    UpdateNfeDraftSchema,
     UpdateNfeDraftItemSchema,
 )
 from ..schemas.fiscal_certificate import SignNfeXmlSchema
@@ -90,6 +91,39 @@ def get_nfe_draft(draft_id: str):
             ),
         }
     )
+
+
+@nfe_draft_bp.patch("/<draft_id>")
+@auth_required
+def update_nfe_draft(draft_id: str):
+    draft_uuid = uuid_or_404(draft_id)
+    service = _service()
+    draft = (
+        service.nfe_draft_query_for_current_user()
+        .filter_by(id=draft_uuid)
+        .first_or_404()
+    )
+
+    try:
+        payload = UpdateNfeDraftSchema().load(json_payload())
+        detail = service.update_draft_metadata(draft, payload)
+        db.session.commit()
+        return jsonify(
+            {
+                "draft": nfe_draft_schema.dump(detail["draft"]),
+                "items": nfe_draft_item_schema.dump(
+                    detail["items"], many=True
+                ),
+                "validation": detail["validation"],
+                "requires_new_xml": detail["requires_new_xml"],
+            }
+        )
+    except ValidationError as exc:
+        db.session.rollback()
+        return validation_error_response(exc)
+    except ValueError as exc:
+        db.session.rollback()
+        return bad_request_response(exc)
 
 
 @nfe_draft_bp.post("/<draft_id>/validate")

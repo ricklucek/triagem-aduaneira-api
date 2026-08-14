@@ -3,6 +3,13 @@ from decimal import Decimal, InvalidOperation
 from marshmallow import EXCLUDE, Schema, ValidationError, fields, validate, validates_schema
 
 from ..models import FiscalEnvironment, ImportPurpose
+from .import_process import (
+    NfeAdditionalInfoSchema,
+    NfeDocumentOptionsSchema,
+    NfeItemDefaultsSchema,
+    NfePaymentSchema,
+    NfeTransportSchema,
+)
 
 
 class ClientImportTaxRuleSchema(Schema):
@@ -58,9 +65,31 @@ class ClientImportTaxRuleSchema(Schema):
                 field_name="effective_until",
             )
 
+        if data.get("transport_defaults") is not None:
+            NfeTransportSchema().load(data["transport_defaults"])
+        if data.get("payment_defaults") is not None:
+            NfePaymentSchema().load(data["payment_defaults"])
+
         configuration = data.get("configuration_json")
         if configuration is None:
             return
+        nested_defaults = (
+            (
+                "document_defaults",
+                NfeDocumentOptionsSchema(),
+            ),
+            ("item_defaults", NfeItemDefaultsSchema()),
+            ("additional_info_defaults", NfeAdditionalInfoSchema()),
+        )
+        for field_name, schema in nested_defaults:
+            if configuration.get(field_name) is not None:
+                try:
+                    schema.load(configuration[field_name])
+                except ValidationError as exc:
+                    raise ValidationError(
+                        {field_name: exc.messages},
+                        field_name="configuration_json",
+                    ) from exc
         cst = str(configuration.get("icms_cst") or "90").zfill(2)
         supported_csts = {"40", "41", "50", "51", "90"}
         if cst not in supported_csts:

@@ -1156,6 +1156,18 @@ class ImportNfeService:
             tax_rule.payment_defaults if tax_rule else None,
             payload.get("payment"),
         )
+        document_options = self._merge_defaults(
+            tax_configuration.get("document_defaults"),
+            payload.get("document"),
+        )
+        item_defaults = self._merge_defaults(
+            tax_configuration.get("item_defaults"),
+            payload.get("item_defaults"),
+        )
+        additional_info = self._merge_defaults(
+            tax_configuration.get("additional_info_defaults"),
+            payload.get("additional_info"),
+        )
 
         fiscal_payload = self.map_duimp_to_nfe_payload(
             duimp=normalized,
@@ -1169,9 +1181,11 @@ class ImportNfeService:
             additional_costs=additional_costs,
             foreign_supplier=payload.get("foreign_supplier"),
             duimp_overrides=payload.get("duimp_overrides"),
+            document_options=document_options,
+            item_defaults=item_defaults,
             transport=transport,
             payment=payment,
-            additional_info=payload.get("additional_info"),
+            additional_info=additional_info,
         )
         fiscal_payload["source"]["tax_configuration_source"] = (
             "client_import_tax_rule" if tax_rule else "request"
@@ -1238,6 +1252,106 @@ class ImportNfeService:
             .all()
         )
         return {"draft": draft, "items": items, "xml_versions": xml_versions}
+
+    def update_draft_metadata(
+        self,
+        draft: NfeDraft,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        current_status = getattr(draft.status, "value", draft.status)
+        immutable_statuses = {
+            NfeDraftStatus.SIGNED.value,
+            NfeDraftStatus.TRANSMITTED.value,
+            NfeDraftStatus.AUTHORIZED.value,
+            NfeDraftStatus.CANCELLED.value,
+        }
+        if current_status in immutable_statuses:
+            raise ValueError(
+                "Rascunho assinado, transmitido, autorizado ou cancelado "
+                "não pode mais ser alterado."
+            )
+
+        rows = (
+            NfeDraftItem.query
+            .filter(NfeDraftItem.nfe_draft_id == draft.id)
+            .order_by(NfeDraftItem.item_number.asc())
+            .all()
+        )
+        now = datetime.utcnow()
+        fiscal_payload = deepcopy(draft.fiscal_payload or {})
+
+        for section in ("document", "transport", "payment"):
+            if section in payload:
+                fiscal_payload[section] = self._merge_defaults(
+                    fiscal_payload.get(section),
+                    payload[section],
+                )
+
+        if "additional_info" in payload:
+            additional_update = deepcopy(payload["additional_info"] or {})
+            legal_text = str(
+                additional_update.pop("legal_text", "") or ""
+            ).strip()
+            additional_info = self._merge_defaults(
+                fiscal_payload.get("additional_info"),
+                additional_update,
+            )
+            if legal_text:
+                complementary = str(
+                    additional_info.get("complementary") or ""
+                ).strip()
+                if legal_text not in complementary:
+                    additional_info["complementary"] = " ".join(
+                        part for part in (complementary, legal_text) if part
+                    )
+                additional_info["legal_text_present"] = True
+            fiscal_payload["additional_info"] = additional_info
+
+        item_defaults = payload.get("item_defaults") or {}
+        for row in rows:
+            for field in ("commercial_unit", "taxable_unit"):
+                if item_defaults.get(field):
+                    setattr(row, field, item_defaults[field])
+                    row.updated_at = now
+
+        had_xml_versions = (
+            NfeXmlVersion.query.filter(
+                NfeXmlVersion.nfe_draft_id == draft.id
+            ).first()
+            is not None
+        )
+        draft.fiscal_payload = fiscal_payload
+        self._refresh_draft_payload_from_items(draft)
+        validation = self.validate_nfe_payload(draft.fiscal_payload)
+        draft.validation_errors = validation.errors or None
+        draft.validation_warnings = validation.warnings or None
+        draft.status = (
+            NfeDraftStatus.READY_FOR_XML.value
+            if validation.is_valid
+            else NfeDraftStatus.VALIDATION_FAILED.value
+        )
+        draft.updated_at = now
+
+        process = (
+            self.import_process_query_for_current_user()
+            .filter(ImportProcess.id == draft.import_process_id)
+            .first()
+        )
+        if process:
+            process.status = (
+                ImportProcessStatus.DRAFT_READY.value
+                if validation.is_valid
+                else ImportProcessStatus.DRAFT_VALIDATION_FAILED.value
+            )
+            process.updated_at = now
+
+        db.session.flush()
+        return {
+            "draft": draft,
+            "items": rows,
+            "validation": validation.to_dict(),
+            "requires_new_xml": had_xml_versions,
+        }
 
     def update_draft_item(self, draft: NfeDraft, item: NfeDraftItem, payload: dict[str, Any]) -> NfeDraftItem:
         allowed_fields = [
@@ -1681,6 +1795,8 @@ class ImportNfeService:
         additional_costs: dict[str, Any] | None = None,
         foreign_supplier: dict[str, Any] | None = None,
         duimp_overrides: dict[str, Any] | None = None,
+        document_options: dict[str, Any] | None = None,
+        item_defaults: dict[str, Any] | None = None,
         transport: dict[str, Any] | None = None,
         payment: dict[str, Any] | None = None,
         additional_info: dict[str, Any] | None = None,
@@ -1693,6 +1809,12 @@ class ImportNfeService:
             duimp=duimp,
             import_purpose=import_purpose,
         )
+        item_defaults = item_defaults or {}
+        for item in items:
+            if item_defaults.get("commercial_unit"):
+                item["commercial_unit"] = item_defaults["commercial_unit"]
+            if item_defaults.get("taxable_unit"):
+                item["taxable_unit"] = item_defaults["taxable_unit"]
         items, totals = self.tax_calculator.calculate(
             items,
             configuration=tax_configuration,
@@ -1735,6 +1857,17 @@ class ImportNfeService:
         duimp_data.update(duimp_overrides or {})
 
         authorization = self._authorization_metadata(items)
+        document_options = document_options or {}
+        resolved_transport = self._transport_with_automatic_weight(
+            transport,
+            items,
+        )
+        resolved_additional_info = self._build_import_additional_info(
+            duimp=duimp,
+            totals=totals,
+            additional_costs=resolved_additional_costs,
+            options=additional_info,
+        )
 
         return {
             "document": {
@@ -1744,7 +1877,16 @@ class ImportNfeService:
                 "environment": environment,
                 "series": series,
                 "number": number,
-                "operation_nature": "Importação de mercadoria",
+                "operation_nature": document_options.get("operation_nature")
+                or self._default_operation_nature(import_purpose),
+                "presence_indicator": document_options.get(
+                    "presence_indicator"
+                )
+                or "9",
+                "intermediary_indicator": document_options.get(
+                    "intermediary_indicator"
+                )
+                or "0",
                 "import_purpose": import_purpose,
                 "import_modality": duimp.get("import_modality"),
                 "currency": "BRL",
@@ -1761,12 +1903,9 @@ class ImportNfeService:
             "additional_costs": resolved_additional_costs,
             "reconciliation": reconciliation,
             "authorization": authorization,
-            "transport": transport or {"freight_mode": "9"},
+            "transport": resolved_transport,
             "payment": payment or {"method": "90", "value": "0.00"},
-            "additional_info": {
-                "complementary": f"NF-e de entrada de importação gerada com base na DUIMP {duimp['number']}.",
-                **(additional_info or {}),
-            },
+            "additional_info": resolved_additional_info,
             "source": {
                 "import_process_id": str(process.id),
                 "duimp_source": "DUIMP",
@@ -1791,6 +1930,99 @@ class ImportNfeService:
             if resolved.get(name) in (None, ""):
                 resolved[name] = default
         return resolved
+
+    @staticmethod
+    def _default_operation_nature(import_purpose: str) -> str:
+        return {
+            ImportPurpose.RESALE.value: "Compra para comercialização",
+            ImportPurpose.INDUSTRIALIZATION.value: (
+                "Compra para industrialização"
+            ),
+            ImportPurpose.FIXED_ASSET.value: (
+                "Importação de ativo imobilizado"
+            ),
+            ImportPurpose.USE_CONSUMPTION.value: (
+                "Importação para uso ou consumo"
+            ),
+            "service_use": "Importação para prestação de serviço",
+        }.get(import_purpose, "Importação de mercadoria")
+
+    def _transport_with_automatic_weight(
+        self,
+        transport: dict[str, Any] | None,
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        resolved = deepcopy(transport or {})
+        resolved.setdefault("freight_mode", "9")
+        net_weight = sum(
+            (self._decimal(item.get("net_weight")) for item in items),
+            Decimal("0"),
+        )
+        volume = deepcopy(resolved.get("volume") or {})
+        if net_weight > 0 and volume.get("net_weight") in (None, ""):
+            volume["net_weight"] = str(net_weight)
+            volume["net_weight_source"] = "duimp_items"
+        if volume:
+            resolved["volume"] = volume
+        return resolved
+
+    def _build_import_additional_info(
+        self,
+        *,
+        duimp: dict[str, Any],
+        totals: dict[str, Any],
+        additional_costs: dict[str, Any],
+        options: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        options = deepcopy(options or {})
+        parts = []
+        if options.get("automatic_summary", True):
+            registration_date = self._date_value(duimp.get("registration_date"))
+            formatted_date = (
+                registration_date.strftime("%d.%m.%Y")
+                if registration_date
+                else "não informada"
+            )
+            parts.append(
+                "Conforme DUIMP: "
+                f"{duimp.get('api_number') or duimp.get('number')}. "
+                f"Registrada em: {formatted_date}."
+            )
+            values = (
+                ("II", totals.get("ii_value")),
+                ("TAXA SISCOMEX", additional_costs.get("siscomex_fee")),
+                ("FRETE INTERNACIONAL", totals.get("freight_value")),
+                ("THC", additional_costs.get("thc")),
+                ("AFRMM", additional_costs.get("afrmm")),
+                ("SEGURO INTERNACIONAL", totals.get("insurance_value")),
+                ("COFINS", totals.get("cofins_value")),
+                ("PIS", totals.get("pis_value")),
+            )
+            parts.append(
+                "; ".join(
+                    f"{label}: R$ {self._format_brl(value)}"
+                    for label, value in values
+                )
+                + "."
+            )
+        for key in ("complementary", "legal_text"):
+            text = str(options.get(key) or "").strip()
+            if text:
+                parts.append(text)
+        return {
+            "fiscal": options.get("fiscal"),
+            "complementary": " ".join(parts) or None,
+            "automatic_summary": options.get("automatic_summary", True),
+            "legal_text_present": bool(
+                str(options.get("legal_text") or "").strip()
+            ),
+        }
+
+    def _format_brl(self, value: Any) -> str:
+        formatted = f"{self._decimal(value):,.2f}"
+        return formatted.replace(",", "_").replace(".", ",").replace(
+            "_", "."
+        )
 
     @staticmethod
     def _duimp_siscomex_fee(duimp: dict[str, Any]) -> Any:
@@ -2117,6 +2349,63 @@ class ImportNfeService:
                 }
             )
 
+        transport = payload.get("transport") or {}
+        freight_mode = str(transport.get("freight_mode") or "9")
+        if freight_mode != "9" and not transport.get("carrier"):
+            warnings.append(
+                {
+                    "field": "transport.carrier",
+                    "code": "missing_transport_carrier",
+                    "message": (
+                        "A modalidade de frete indica transporte contratado, "
+                        "mas a transportadora ainda não foi informada."
+                    ),
+                }
+            )
+        volume = transport.get("volume") or {}
+        missing_volume_fields = [
+            field
+            for field in ("quantity", "species", "gross_weight")
+            if volume.get(field) in (None, "")
+        ]
+        if missing_volume_fields:
+            warnings.append(
+                {
+                    "field": "transport.volume",
+                    "code": "incomplete_transport_volume",
+                    "missing_fields": missing_volume_fields,
+                    "message": (
+                        "Complete os volumes da carga antes da emissão final: "
+                        + ", ".join(missing_volume_fields)
+                        + ". O peso líquido, quando disponível, é calculado "
+                        "automaticamente pelos itens da DUIMP."
+                    ),
+                }
+            )
+
+        has_icms_benefit = any(
+            bool(
+                item.get("benefit_code")
+                or (((item.get("tax_payload") or {}).get("icms") or {}).get(
+                    "benefit_code"
+                ))
+            )
+            for item in items
+        )
+        additional_info = payload.get("additional_info") or {}
+        if has_icms_benefit and not additional_info.get("legal_text_present"):
+            warnings.append(
+                {
+                    "field": "additional_info.legal_text",
+                    "code": "missing_fiscal_legal_text",
+                    "message": (
+                        "Há benefício fiscal de ICMS nos itens, mas o texto "
+                        "legal/TTD ainda não foi configurado para as "
+                        "informações complementares."
+                    ),
+                }
+            )
+
         reconciliation = payload.get("reconciliation") or {}
         if reconciliation.get("status") == "requires_review":
             failed_checks = [
@@ -2405,7 +2694,13 @@ class ImportNfeService:
         explicit: dict[str, Any] | None,
     ) -> dict[str, Any]:
         result = deepcopy(defaults or {})
-        result.update(explicit or {})
+        for key, value in (explicit or {}).items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = ImportNfeService._merge_defaults(
+                    result[key], value
+                )
+            else:
+                result[key] = deepcopy(value)
         return result
 
     @staticmethod

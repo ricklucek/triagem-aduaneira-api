@@ -399,8 +399,36 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
                 "ipi_cst": "49",
                 "pis_cst": "98",
                 "cofins_cst": "98",
+                "document_defaults": {
+                    "operation_nature": "Compra para comercialização",
+                    "presence_indicator": "9",
+                    "intermediary_indicator": "0",
+                },
+                "item_defaults": {
+                    "commercial_unit": "PCE",
+                    "taxable_unit": "UN",
+                },
+                "additional_info_defaults": {
+                    "automatic_summary": True,
+                    "legal_text": "Benefício fiscal de teste.",
+                },
             },
-            "transport_defaults": {"freight_mode": "9"},
+            "transport_defaults": {
+                "freight_mode": "1",
+                "carrier": {
+                    "tax_id": "06255344000128",
+                    "name": "Transportadora Teste",
+                    "state_registration": "9086113225",
+                    "address": "Rua da Transportadora, 800",
+                    "city_name": "Curitiba",
+                    "state": "PR",
+                },
+                "volume": {
+                    "quantity": 1,
+                    "species": "CAIXA",
+                    "gross_weight": "3.000",
+                },
+            },
             "payment_defaults": {"method": "90", "value": "0.00"},
         },
     )
@@ -439,6 +467,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
                         "ncm": "87087090",
                         "quantidade": "2",
                         "unidade": "UN",
+                        "pesoLiquido": "2.500",
                         "valorProduto": "100.00",
                         "valorUnitario": "50.00",
                         "tributos": {
@@ -503,12 +532,35 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
             "series": "1",
             "import_purpose": "resale",
             "duimp_snapshot_id": snapshot_id,
+            "document": {},
+            "item_defaults": {},
+            "transport": {},
+            "payment": {},
+            "additional_info": {},
         },
     )
     assert draft_response.status_code == 201, draft_response.get_json()
     body = draft_response.get_json()
     assert body["validation"]["valid"] is True
     assert body["tax_rule"]["id"] == rule_id
+    fiscal_payload = body["draft"]["fiscal_payload"]
+    assert fiscal_payload["document"]["operation_nature"] == (
+        "Compra para comercialização"
+    )
+    assert fiscal_payload["document"]["presence_indicator"] == "9"
+    assert fiscal_payload["document"]["intermediary_indicator"] == "0"
+    assert fiscal_payload["items"][0]["commercial_unit"] == "PCE"
+    assert fiscal_payload["items"][0]["taxable_unit"] == "UN"
+    assert fiscal_payload["transport"]["carrier"]["name"] == (
+        "Transportadora Teste"
+    )
+    assert fiscal_payload["transport"]["volume"]["net_weight"] == "2.500"
+    assert "II: R$ 18,00" in fiscal_payload["additional_info"][
+        "complementary"
+    ]
+    assert "Benefício fiscal de teste." in fiscal_payload[
+        "additional_info"
+    ]["complementary"]
     assert body["draft"]["fiscal_payload"]["source"] == {
         "duimp_source": "DUIMP",
         "fiscal_profile_id": profile_response.get_json()["id"],
@@ -516,3 +568,51 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         "tax_configuration_source": "client_import_tax_rule",
         "tax_rule_id": rule_id,
     }
+
+    draft_id = body["draft"]["id"]
+    update_response = client.patch(
+        f"/nfe-drafts/{draft_id}",
+        headers=headers,
+        json={
+            "document": {
+                "operation_nature": "Importação para revenda"
+            },
+            "item_defaults": {
+                "commercial_unit": "CX",
+                "taxable_unit": "KG",
+            },
+            "transport": {
+                "volume": {"quantity": 2}
+            },
+            "additional_info": {
+                "legal_text": "Complemento informado pelo operador."
+            },
+        },
+    )
+    assert update_response.status_code == 200, update_response.get_json()
+    updated = update_response.get_json()
+    assert updated["validation"]["valid"] is True
+    assert updated["requires_new_xml"] is False
+    updated_document = updated["draft"]["fiscal_payload"]["document"]
+    assert updated_document["operation_nature"] == "Importação para revenda"
+    assert updated_document["presence_indicator"] == "9"
+    assert updated_document["intermediary_indicator"] == "0"
+    assert updated_document["environment"] == "homologation"
+    assert updated_document["series"] == "1"
+    updated_transport = updated["draft"]["fiscal_payload"]["transport"]
+    assert updated_transport["carrier"]["name"] == "Transportadora Teste"
+    assert updated_transport["volume"] == {
+        "gross_weight": "3.000",
+        "net_weight": "2.500",
+        "net_weight_source": "duimp_items",
+        "quantity": 2,
+        "species": "CAIXA",
+    }
+    assert updated["items"][0]["commercial_unit"] == "CX"
+    assert updated["items"][0]["taxable_unit"] == "KG"
+    assert "Benefício fiscal de teste." in updated["draft"][
+        "fiscal_payload"
+    ]["additional_info"]["complementary"]
+    assert "Complemento informado pelo operador." in updated["draft"][
+        "fiscal_payload"
+    ]["additional_info"]["complementary"]

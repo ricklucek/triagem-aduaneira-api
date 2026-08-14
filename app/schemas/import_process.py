@@ -171,6 +171,97 @@ class FetchDuimpSchema(Schema):
     enrich_catalog = fields.Boolean(load_default=True)
 
 
+class NfeDocumentOptionsSchema(Schema):
+    operation_nature = fields.String(
+        allow_none=True,
+        validate=validate.Length(min=1, max=60),
+    )
+    presence_indicator = fields.String(
+        allow_none=True,
+        validate=validate.OneOf(["0", "1", "2", "3", "4", "5", "9"]),
+    )
+    intermediary_indicator = fields.String(
+        allow_none=True,
+        validate=validate.OneOf(["0", "1"]),
+    )
+
+
+class NfeItemDefaultsSchema(Schema):
+    commercial_unit = fields.String(
+        allow_none=True,
+        validate=validate.Length(min=1, max=6),
+    )
+    taxable_unit = fields.String(
+        allow_none=True,
+        validate=validate.Length(min=1, max=6),
+    )
+
+
+class NfeTransportCarrierSchema(Schema):
+    tax_id = fields.String(allow_none=True)
+    name = fields.String(
+        allow_none=True,
+        validate=validate.Length(min=1, max=60),
+    )
+    state_registration = fields.String(allow_none=True)
+    address = fields.String(allow_none=True)
+    city_name = fields.String(allow_none=True)
+    state = fields.String(
+        allow_none=True,
+        validate=validate.Length(equal=2),
+    )
+
+
+class NfeTransportVolumeSchema(Schema):
+    quantity = fields.Integer(
+        allow_none=True,
+        validate=validate.Range(min=1),
+    )
+    species = fields.String(allow_none=True)
+    brand = fields.String(allow_none=True)
+    numbering = fields.String(allow_none=True)
+    net_weight = fields.Decimal(
+        allow_none=True,
+        as_string=True,
+        validate=validate.Range(min=0),
+    )
+    gross_weight = fields.Decimal(
+        allow_none=True,
+        as_string=True,
+        validate=validate.Range(min=0),
+    )
+
+
+class NfeTransportSchema(Schema):
+    freight_mode = fields.String(
+        validate=validate.OneOf(["0", "1", "2", "3", "4", "9"]),
+    )
+    carrier = fields.Nested(
+        NfeTransportCarrierSchema,
+        allow_none=True,
+    )
+    volume = fields.Nested(
+        NfeTransportVolumeSchema,
+        allow_none=True,
+    )
+
+
+class NfePaymentSchema(Schema):
+    payment_indicator = fields.String(
+        validate=validate.OneOf(["0", "1"]),
+    )
+    method = fields.String(validate=validate.Length(equal=2))
+    description = fields.String(allow_none=True)
+    value = fields.Decimal(allow_none=True, as_string=True)
+
+
+class NfeAdditionalInfoSchema(Schema):
+    automatic_summary = fields.Boolean()
+    fiscal = fields.String(allow_none=True)
+    complementary = fields.String(allow_none=True)
+    legal_text = fields.String(allow_none=True)
+
+
 class CreateNfeDraftFromDuimpSchema(Schema):
     environment = fields.String(required=True, validate=validate.OneOf(FiscalEnvironment.values()))
     series = fields.String(required=True, validate=validate.Length(min=1, max=10))
@@ -192,9 +283,11 @@ class CreateNfeDraftFromDuimpSchema(Schema):
     additional_costs = fields.Dict(load_default=dict)
     foreign_supplier = fields.Dict(load_default=None, allow_none=True)
     duimp_overrides = fields.Dict(load_default=dict)
-    transport = fields.Dict(load_default=dict)
-    payment = fields.Dict(load_default=dict)
-    additional_info = fields.Dict(load_default=dict)
+    document = fields.Nested(NfeDocumentOptionsSchema, load_default=dict)
+    item_defaults = fields.Nested(NfeItemDefaultsSchema, load_default=dict)
+    transport = fields.Nested(NfeTransportSchema, load_default=dict)
+    payment = fields.Nested(NfePaymentSchema, load_default=dict)
+    additional_info = fields.Nested(NfeAdditionalInfoSchema, load_default=dict)
 
     @validates_schema
     def validate_tax_source(self, data, **kwargs):
@@ -224,6 +317,19 @@ class UpdateNfeDraftItemSchema(Schema):
     other_value = fields.Decimal(as_string=True)
     import_payload = fields.Dict(allow_none=True)
     tax_payload = fields.Dict(allow_none=True)
+
+
+class UpdateNfeDraftSchema(Schema):
+    document = fields.Nested(NfeDocumentOptionsSchema)
+    item_defaults = fields.Nested(NfeItemDefaultsSchema)
+    transport = fields.Nested(NfeTransportSchema)
+    payment = fields.Nested(NfePaymentSchema)
+    additional_info = fields.Nested(NfeAdditionalInfoSchema)
+
+    @validates_schema
+    def validate_has_changes(self, data, **kwargs):
+        if not data:
+            raise ValidationError("Informe ao menos uma seção para atualizar.")
 
 
 class GenerateXmlSchema(Schema):

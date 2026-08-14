@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -84,7 +85,12 @@ class NfeXmlBuilder:
         self._text(ide, "tpAmb", "1" if document.get("environment") == "production" else "2")
         self._text(ide, "finNFe", "1")
         self._text(ide, "indFinal", document.get("final_consumer") or "0")
-        self._text(ide, "indPres", document.get("presence_indicator") or "0")
+        self._text(ide, "indPres", document.get("presence_indicator") or "9")
+        self._optional(
+            ide,
+            "indIntermed",
+            document.get("intermediary_indicator") or "0",
+        )
         self._text(ide, "procEmi", "0")
         self._text(ide, "verProc", document.get("application_version") or "Triagem Aduaneira")
 
@@ -338,6 +344,23 @@ class NfeXmlBuilder:
     def _build_transport(self, parent: ET.Element, data: dict[str, Any]) -> None:
         transport = ET.SubElement(parent, self._tag("transp"))
         self._text(transport, "modFrete", data.get("freight_mode") or "9")
+        carrier = data.get("carrier") or {}
+        if carrier:
+            carrier_node = ET.SubElement(transport, self._tag("transporta"))
+            tax_id = re.sub(r"\D", "", str(carrier.get("tax_id") or ""))
+            if len(tax_id) == 14:
+                self._text(carrier_node, "CNPJ", tax_id)
+            elif len(tax_id) == 11:
+                self._text(carrier_node, "CPF", tax_id)
+            self._optional(carrier_node, "xNome", carrier.get("name"))
+            self._optional(
+                carrier_node,
+                "IE",
+                carrier.get("state_registration"),
+            )
+            self._optional(carrier_node, "xEnder", carrier.get("address"))
+            self._optional(carrier_node, "xMun", carrier.get("city_name"))
+            self._optional(carrier_node, "UF", carrier.get("state"))
         volume = data.get("volume") or {}
         if volume:
             vol = ET.SubElement(transport, self._tag("vol"))
@@ -345,8 +368,18 @@ class NfeXmlBuilder:
             self._optional(vol, "esp", volume.get("species"))
             self._optional(vol, "marca", volume.get("brand"))
             self._optional(vol, "nVol", volume.get("numbering"))
-            self._optional(vol, "pesoL", volume.get("net_weight"))
-            self._optional(vol, "pesoB", volume.get("gross_weight"))
+            if volume.get("net_weight") not in (None, ""):
+                self._text(
+                    vol,
+                    "pesoL",
+                    self._weight(volume.get("net_weight")),
+                )
+            if volume.get("gross_weight") not in (None, ""):
+                self._text(
+                    vol,
+                    "pesoB",
+                    self._weight(volume.get("gross_weight")),
+                )
 
     def _build_payment(self, parent: ET.Element, data: dict[str, Any], totals: dict[str, Any]) -> None:
         payment = ET.SubElement(parent, self._tag("pag"))
@@ -411,6 +444,9 @@ class NfeXmlBuilder:
 
     def _quantity(self, value: Any) -> str:
         return f"{self._decimal(value):.4f}"
+
+    def _weight(self, value: Any) -> str:
+        return f"{self._decimal(value):.3f}"
 
     def _unit_value(self, value: Any) -> str:
         return f"{self._decimal(value):.10f}"
