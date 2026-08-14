@@ -1098,6 +1098,7 @@ class ImportNfeService:
     # NFe draft
     # ------------------------------------------------------------------
     def create_nfe_draft_from_duimp(self, process: ImportProcess, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = self._json_compatible(payload)
         fiscal_profile = self.get_importer_fiscal_profile(process.importer_id)
         snapshot_id = payload.get("duimp_snapshot_id")
         if snapshot_id:
@@ -1271,6 +1272,10 @@ class ImportNfeService:
                 "não pode mais ser alterado."
             )
 
+        # Marshmallow desserializa fields.Decimal como Decimal. As colunas JSON
+        # do PostgreSQL aceitam apenas tipos JSON nativos, então a normalização
+        # precisa acontecer antes de qualquer consulta que dispare autoflush.
+        payload = self._json_compatible(payload)
         rows = (
             NfeDraftItem.query
             .filter(NfeDraftItem.nfe_draft_id == draft.id)
@@ -1286,6 +1291,13 @@ class ImportNfeService:
                     fiscal_payload.get(section),
                     payload[section],
                 )
+        volume_update = (
+            (payload.get("transport") or {}).get("volume") or {}
+        )
+        if volume_update.get("net_weight") not in (None, ""):
+            fiscal_payload.setdefault("transport", {}).setdefault(
+                "volume", {}
+            )["net_weight_source"] = "operator_override"
 
         if "additional_info" in payload:
             additional_update = deepcopy(payload["additional_info"] or {})
@@ -2702,6 +2714,23 @@ class ImportNfeService:
             else:
                 result[key] = deepcopy(value)
         return result
+
+    @staticmethod
+    def _json_compatible(value: Any) -> Any:
+        if isinstance(value, Decimal):
+            return str(value)
+        if isinstance(value, (datetime, date)):
+            return value.isoformat()
+        if isinstance(value, dict):
+            return {
+                key: ImportNfeService._json_compatible(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [
+                ImportNfeService._json_compatible(item) for item in value
+            ]
+        return value
 
     @staticmethod
     def _date_value(value: Any) -> date | None:

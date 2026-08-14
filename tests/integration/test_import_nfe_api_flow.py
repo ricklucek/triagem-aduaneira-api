@@ -582,8 +582,13 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
                 "taxable_unit": "KG",
             },
             "transport": {
-                "volume": {"quantity": 2}
+                "volume": {
+                    "quantity": 2,
+                    "net_weight": "4.000",
+                    "gross_weight": "4.500",
+                }
             },
+            "payment": {"method": "90", "value": "0.00"},
             "additional_info": {
                 "legal_text": "Complemento informado pelo operador."
             },
@@ -602,12 +607,13 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     updated_transport = updated["draft"]["fiscal_payload"]["transport"]
     assert updated_transport["carrier"]["name"] == "Transportadora Teste"
     assert updated_transport["volume"] == {
-        "gross_weight": "3.000",
-        "net_weight": "2.500",
-        "net_weight_source": "duimp_items",
+        "gross_weight": "4.500",
+        "net_weight": "4.000",
+        "net_weight_source": "operator_override",
         "quantity": 2,
         "species": "CAIXA",
     }
+    assert updated["draft"]["fiscal_payload"]["payment"]["value"] == "0.00"
     assert updated["items"][0]["commercial_unit"] == "CX"
     assert updated["items"][0]["taxable_unit"] == "KG"
     assert "Benefício fiscal de teste." in updated["draft"][
