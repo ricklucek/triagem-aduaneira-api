@@ -27,7 +27,10 @@ from ..schemas.import_process import (
     DuimpSnapshotSchema,
     ImportProcessListQuerySchema,
     ImportProcessSchema,
+    NfeDraftItemSchema,
     NfeDraftSchema,
+    NfeWorkflowStateQuerySchema,
+    NfeXmlVersionSchema,
     UpdateImportProcessSchema,
 )
 from ..services.import_process import ImportNfeService
@@ -46,6 +49,8 @@ import_process_bp = Blueprint(
 import_process_schema = ImportProcessSchema()
 duimp_snapshot_schema = DuimpSnapshotSchema()
 nfe_draft_schema = NfeDraftSchema()
+nfe_draft_item_schema = NfeDraftItemSchema()
+nfe_xml_version_schema = NfeXmlVersionSchema()
 
 
 def _service() -> ImportNfeService:
@@ -111,6 +116,36 @@ def get_import_process(process_id: str):
         .first_or_404()
     )
     return jsonify(import_process_schema.dump(process))
+
+
+@import_process_bp.get("/<process_id>/nfe-workflow-state")
+@auth_required
+def get_nfe_workflow_state(process_id: str):
+    process_uuid = uuid_or_404(process_id)
+    service = _service()
+    process = (
+        service.import_process_query_for_current_user()
+        .filter_by(id=process_uuid)
+        .first_or_404()
+    )
+
+    try:
+        params = NfeWorkflowStateQuerySchema().load(request.args)
+        state = service.get_nfe_workflow_state(process, params)
+        detail = state.get("latest_draft")
+        if detail:
+            state["latest_draft"] = {
+                "draft": nfe_draft_schema.dump(detail["draft"]),
+                "items": nfe_draft_item_schema.dump(detail["items"], many=True),
+                "xmlVersions": nfe_xml_version_schema.dump(
+                    detail["xml_versions"], many=True
+                ),
+            }
+        return jsonify(state)
+    except ValidationError as exc:
+        return validation_error_response(exc)
+    except ValueError as exc:
+        return bad_request_response(exc)
 
 
 @import_process_bp.put("/<process_id>")

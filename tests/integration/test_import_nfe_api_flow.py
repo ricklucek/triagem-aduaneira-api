@@ -558,6 +558,41 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert "II: R$ 18,00" in fiscal_payload["additional_info"][
         "complementary"
     ]
+
+    process_list = client.get(
+        "/import-processes",
+        headers=headers,
+        query_string={"created_by_me": "true"},
+    )
+    assert process_list.status_code == 200, process_list.get_json()
+    listed = process_list.get_json()
+    assert listed["total"] == 1
+    assert listed["items"][0]["id"] == process_id
+    assert listed["items"][0]["created_by_me"] is True
+
+    workflow = client.get(
+        f"/import-processes/{process_id}/nfe-workflow-state",
+        headers=headers,
+        query_string={
+            "import_purpose": "resale",
+            "environment": "homologation",
+            "series": "1",
+        },
+    )
+    assert workflow.status_code == 200, workflow.get_json()
+    workflow_body = workflow.get_json()
+    assert workflow_body["process"]["id"] == process_id
+    assert workflow_body["latest_snapshot"]["id"] == snapshot_id
+    assert workflow_body["latest_draft"]["draft"]["id"] == body["draft"]["id"]
+    assert workflow_body["prerequisites"] == {
+        "has_fiscal_profile": True,
+        "has_active_tax_rule": True,
+        "has_number_sequence": False,
+        "import_purpose": "resale",
+        "environment": "homologation",
+        "series": "1",
+    }
+    assert workflow_body["next_action"] == "configure_number_sequence"
     assert "Benefício fiscal de teste." in fiscal_payload[
         "additional_info"
     ]["complementary"]

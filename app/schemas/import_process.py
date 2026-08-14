@@ -102,8 +102,22 @@ class ImportProcessListQuerySchema(Schema):
     importer_id = fields.UUID(load_default=None)
     duimp_number = fields.String(load_default=None)
     q = fields.String(load_default=None)
+    created_by_me = fields.Boolean(load_default=False)
     limit = fields.Integer(load_default=25, validate=validate.Range(min=1, max=100))
     offset = fields.Integer(load_default=0, validate=validate.Range(min=0))
+
+
+class NfeWorkflowStateQuerySchema(Schema):
+    import_purpose = fields.String(
+        load_default=None,
+        allow_none=True,
+        validate=validate.OneOf(ImportPurpose.values()),
+    )
+    environment = fields.String(
+        load_default=FiscalEnvironment.HOMOLOGATION.value,
+        validate=validate.OneOf(FiscalEnvironment.values()),
+    )
+    series = fields.String(load_default="1", validate=validate.Length(min=1, max=10))
 
 
 class CreateImportProcessSchema(Schema):

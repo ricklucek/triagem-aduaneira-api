@@ -71,6 +71,7 @@ from app.models.nfe_issuance import (
     NfeIssuanceAttempt,
     NfeIssuanceEvent,
 )
+from app.models.import_process import NfeNumberSequence
 
 
 @dataclass
@@ -439,6 +440,8 @@ class ImportNfeService:
     def list_import_processes(self, params: dict[str, Any]) -> dict[str, Any]:
         query = self.import_process_query_for_current_user()
 
+        if params.get("created_by_me"):
+            query = query.filter(ImportProcess.created_by_user_id == self.user_id)
         if params.get("status"):
             query = query.filter(ImportProcess.status == params["status"])
         if params.get("source"):
@@ -489,6 +492,12 @@ class ImportNfeService:
             "duimp_version": process.duimp_version,
             "status": process.status,
             "source": process.source,
+            "created_by_user_id": (
+                str(process.created_by_user_id)
+                if process.created_by_user_id
+                else None
+            ),
+            "created_by_me": process.created_by_user_id == self.user_id,
             "has_fiscal_profile": profile_exists,
             "snapshots_count": snapshots_count,
             "latest_draft_id": str(latest_draft.id) if latest_draft else None,
@@ -496,6 +505,122 @@ class ImportNfeService:
             "items_count": items_count,
             "created_at": self._iso(process.created_at),
             "updated_at": self._iso(process.updated_at),
+        }
+
+    def get_nfe_workflow_state(
+        self,
+        process: ImportProcess,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        latest_snapshot = (
+            self.snapshot_query_for_current_user()
+            .filter(DuimpSnapshot.import_process_id == process.id)
+            .order_by(DuimpSnapshot.created_at.desc())
+            .first()
+        )
+        latest_draft = (
+            self.nfe_draft_query_for_current_user()
+            .filter(NfeDraft.import_process_id == process.id)
+            .order_by(
+                NfeDraft.updated_at.desc().nullslast(),
+                NfeDraft.created_at.desc(),
+            )
+            .first()
+        )
+
+        import_purpose = params.get("import_purpose")
+        environment = params["environment"]
+        series = params["series"]
+        if latest_draft:
+            document = (latest_draft.fiscal_payload or {}).get("document") or {}
+            import_purpose = import_purpose or document.get("import_purpose")
+            environment = self._enum_value(latest_draft.environment) or environment
+            series = latest_draft.series or series
+
+        fiscal_profile = self.get_importer_fiscal_profile_or_none(
+            process.importer_id
+        )
+        context = None
+        if latest_snapshot and import_purpose:
+            context = self.get_nfe_context(
+                process,
+                {
+                    "duimp_snapshot_id": latest_snapshot.id,
+                    "import_purpose": import_purpose,
+                },
+            )
+
+        comparable_series = {series, series.zfill(3)}
+        sequence = (
+            NfeNumberSequence.query.filter(
+                NfeNumberSequence.organization_id == self._require_organization_id(),
+                NfeNumberSequence.client_id == process.importer_id,
+                NfeNumberSequence.environment == environment,
+                NfeNumberSequence.model == NfeModel.NFE.value,
+                NfeNumberSequence.series.in_(comparable_series),
+            )
+            .order_by(NfeNumberSequence.updated_at.desc())
+            .first()
+        )
+
+        draft_detail = self.get_nfe_draft_detail(latest_draft) if latest_draft else None
+        latest_xml = (
+            draft_detail["xml_versions"][0]
+            if draft_detail and draft_detail["xml_versions"]
+            else None
+        )
+        active_tax_rule = bool(context and context.get("tax_rule"))
+
+        if latest_snapshot is None:
+            next_action = "fetch_duimp"
+        elif fiscal_profile is None:
+            next_action = "configure_fiscal_profile"
+        elif not import_purpose:
+            next_action = "select_import_purpose"
+        elif not active_tax_rule:
+            next_action = "configure_tax_rule"
+        elif context and not context.get("ready_for_draft"):
+            next_action = "resolve_context"
+        elif latest_draft is None:
+            next_action = "create_draft"
+        elif sequence is None:
+            next_action = "configure_number_sequence"
+        elif latest_draft.validation_errors:
+            next_action = "correct_draft"
+        elif not latest_draft.access_key:
+            next_action = "generate_access_key"
+        elif latest_xml is None:
+            next_action = "generate_xml"
+        elif latest_xml.xsd_valid is not True:
+            next_action = "validate_xml"
+        else:
+            next_action = "completed"
+
+        return {
+            "process": self.build_import_process_summary(process),
+            "latest_snapshot": (
+                {
+                    "id": str(latest_snapshot.id),
+                    "duimp_number": latest_snapshot.duimp_number,
+                    "duimp_version": latest_snapshot.duimp_version,
+                    "source_provider": self._enum_value(latest_snapshot.source_provider),
+                    "fetched_at": self._iso(latest_snapshot.fetched_at),
+                    "created_at": self._iso(latest_snapshot.created_at),
+                }
+                if latest_snapshot
+                else None
+            ),
+            "context": context,
+            "latest_draft": draft_detail,
+            "prerequisites": {
+                "has_fiscal_profile": fiscal_profile is not None,
+                "has_active_tax_rule": active_tax_rule,
+                "has_number_sequence": sequence is not None,
+                "import_purpose": import_purpose,
+                "environment": environment,
+                "series": series,
+            },
+            "next_action": next_action,
         }
 
     # ------------------------------------------------------------------
@@ -2819,6 +2944,10 @@ class ImportNfeService:
             return None
         value = str(value).strip()
         return value or None
+
+    @staticmethod
+    def _enum_value(value: Any) -> Any:
+        return getattr(value, "value", value)
 
     @staticmethod
     def _iso(value: datetime | None) -> str | None:
