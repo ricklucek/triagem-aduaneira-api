@@ -590,6 +590,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
             },
             "payment": {"method": "90", "value": "0.00"},
             "additional_info": {
+                "automatic_summary": True,
                 "legal_text": "Complemento informado pelo operador."
             },
         },
@@ -616,9 +617,11 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert updated["draft"]["fiscal_payload"]["payment"]["value"] == "0.00"
     assert updated["items"][0]["commercial_unit"] == "CX"
     assert updated["items"][0]["taxable_unit"] == "KG"
-    assert "Benefício fiscal de teste." in updated["draft"][
-        "fiscal_payload"
-    ]["additional_info"]["complementary"]
+    updated_complementary = updated["draft"]["fiscal_payload"][
+        "additional_info"
+    ]["complementary"]
+    assert "Benefício fiscal de teste." not in updated_complementary
+    assert updated_complementary.count("Conforme DUIMP:") == 1
     assert "Complemento informado pelo operador." in updated["draft"][
         "fiscal_payload"
     ]["additional_info"]["complementary"]

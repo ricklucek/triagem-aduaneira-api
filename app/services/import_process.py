@@ -1304,11 +1304,32 @@ class ImportNfeService:
             legal_text = str(
                 additional_update.pop("legal_text", "") or ""
             ).strip()
-            additional_info = self._merge_defaults(
-                fiscal_payload.get("additional_info"),
-                additional_update,
-            )
-            if legal_text:
+            if additional_update.get("automatic_summary") is True:
+                current_additional_info = (
+                    fiscal_payload.get("additional_info") or {}
+                )
+                summary_options = {
+                    "fiscal": current_additional_info.get("fiscal"),
+                    **additional_update,
+                    "legal_text": legal_text,
+                }
+                additional_info = self._build_import_additional_info(
+                    duimp=fiscal_payload.get("duimp") or {},
+                    totals=fiscal_payload.get("totals") or {},
+                    additional_costs=(
+                        fiscal_payload.get("additional_costs") or {}
+                    ),
+                    options=summary_options,
+                )
+            else:
+                additional_info = self._merge_defaults(
+                    fiscal_payload.get("additional_info"),
+                    additional_update,
+                )
+            if (
+                legal_text
+                and additional_update.get("automatic_summary") is not True
+            ):
                 complementary = str(
                     additional_info.get("complementary") or ""
                 ).strip()
