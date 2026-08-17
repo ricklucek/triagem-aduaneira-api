@@ -234,6 +234,21 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
     assert versions_response.get_json()[0]["xsd_valid"] is True
     assert versions_response.get_json()[0]["xsd_errors"] == []
 
+    history_response = client.get(
+        f"/import-processes/{process_id}/nfe-drafts",
+        headers=headers,
+    )
+    assert history_response.status_code == 200
+    history = history_response.get_json()["items"]
+    assert len(history) == 1
+    assert history[0]["id"] == draft_id
+    assert history[0]["items_count"] == 1
+    assert history[0]["access_key"] == xml_body["access_key"]
+    assert history[0]["xml_versions"][0]["id"] == xml_version_id
+    assert history[0]["xml_versions"][0]["xsd_valid"] is True
+    assert "xml_content" not in history[0]["xml_versions"][0]
+    assert "fiscal_payload" not in history[0]
+
     certificate_response = client.post(
         f"/clients/{importer_id}/fiscal-certificates",
         headers=headers,
