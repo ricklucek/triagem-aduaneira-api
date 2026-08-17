@@ -135,6 +135,35 @@ def test_builds_unsigned_import_nfe_with_foreign_recipient_and_duimp():
     assert root.find(".//{http://www.w3.org/2000/09/xmldsig#}Signature") is None
 
 
+
+def test_builds_xsd_valid_icms00_group():
+    data = payload()
+    data["items"][0]["tax_payload"]["icms"] = {
+        "origin": "1",
+        "cst": "00",
+        "base_method": "3",
+        "base": "9686.49",
+        "rate": "12",
+        "value": "1162.38",
+    }
+
+    xml = NfeXmlBuilder().build(
+        data,
+        access_key="41260700000000000191550010000144221763362375",
+    )
+    root = ET.fromstring(xml)
+    icms00 = root.find(".//nfe:ICMS00", NS)
+
+    assert icms00 is not None
+    assert icms00.findtext("nfe:orig", namespaces=NS) == "1"
+    assert icms00.findtext("nfe:CST", namespaces=NS) == "00"
+    assert icms00.findtext("nfe:modBC", namespaces=NS) == "3"
+    assert icms00.findtext("nfe:vBC", namespaces=NS) == "9686.49"
+    assert icms00.findtext("nfe:pICMS", namespaces=NS) == "12.0000"
+    assert icms00.findtext("nfe:vICMS", namespaces=NS) == "1162.38"
+    assert root.find(".//nfe:ICMS90", NS) is None
+    assert NfeXsdValidator().validate(xml, allow_unsigned=True).is_valid is True
+
 def test_normalizes_nfe_datetime_to_seconds():
     data = payload()
     data["document"]["issue_datetime"] = "2026-07-16T11:18:38.123456-03:00"
