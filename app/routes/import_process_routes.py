@@ -13,11 +13,14 @@ from ..models.import_process import (
     ImportProcessSource,
     ImportProcessStatus,
     ImportPurpose,
+    NfeDraft,
+    NfeDraftItem,
     NfeDraftStatus,
     NfeModel,
     NfeOperationType,
     NfePurpose,
     NfeXmlType,
+    NfeXmlVersion,
 )
 from ..schemas.import_process import (
     CreateImportProcessSchema,
@@ -229,6 +232,94 @@ def list_duimp_snapshots(process_id: str):
         .all()
     )
     return jsonify(duimp_snapshot_schema.dump(rows, many=True))
+
+
+@import_process_bp.get("/<process_id>/nfe-drafts")
+@auth_required
+def list_process_nfe_drafts(process_id: str):
+    process_uuid = uuid_or_404(process_id)
+    service = _service()
+    process = (
+        service.import_process_query_for_current_user()
+        .filter_by(id=process_uuid)
+        .first_or_404()
+    )
+    rows = (
+        service.nfe_draft_query_for_current_user()
+        .filter(NfeDraft.import_process_id == process.id)
+        .order_by(
+            NfeDraft.created_at.desc(),
+            NfeDraft.updated_at.desc().nullslast(),
+        )
+        .all()
+    )
+
+    items = []
+    for draft in rows:
+        xml_versions = (
+            NfeXmlVersion.query
+            .filter(NfeXmlVersion.nfe_draft_id == draft.id)
+            .order_by(
+                NfeXmlVersion.version_number.desc(),
+                NfeXmlVersion.generated_at.desc(),
+            )
+            .all()
+        )
+        items.append(
+            {
+                "id": str(draft.id),
+                "status": getattr(draft.status, "value", draft.status),
+                "environment": getattr(
+                    draft.environment, "value", draft.environment
+                ),
+                "series": draft.series,
+                "number": draft.number,
+                "access_key": draft.access_key,
+                "duimp_snapshot_id": (
+                    str(draft.duimp_snapshot_id)
+                    if draft.duimp_snapshot_id
+                    else None
+                ),
+                "items_count": (
+                    NfeDraftItem.query
+                    .filter(NfeDraftItem.nfe_draft_id == draft.id)
+                    .count()
+                ),
+                "validation_errors": draft.validation_errors or [],
+                "validation_warnings": draft.validation_warnings or [],
+                "created_at": (
+                    draft.created_at.isoformat() + "Z"
+                    if draft.created_at
+                    else None
+                ),
+                "updated_at": (
+                    draft.updated_at.isoformat() + "Z"
+                    if draft.updated_at
+                    else None
+                ),
+                "xml_versions": [
+                    {
+                        "id": str(version.id),
+                        "version_number": version.version_number,
+                        "xml_type": getattr(
+                            version.xml_type, "value", version.xml_type
+                        ),
+                        "xsd_valid": version.xsd_valid,
+                        "xsd_errors": version.xsd_errors or [],
+                        "access_key": version.access_key,
+                        "protocol_number": version.protocol_number,
+                        "generated_at": (
+                            version.generated_at.isoformat() + "Z"
+                            if version.generated_at
+                            else None
+                        ),
+                    }
+                    for version in xml_versions
+                ],
+            }
+        )
+
+    return jsonify({"items": items})
 
 
 @import_process_bp.post("/<process_id>/duimp/fetch")
