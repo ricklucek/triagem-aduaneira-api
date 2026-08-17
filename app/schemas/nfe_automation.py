@@ -91,10 +91,10 @@ class ClientImportTaxRuleSchema(Schema):
                         field_name="configuration_json",
                     ) from exc
         cst = str(configuration.get("icms_cst") or "90").zfill(2)
-        supported_csts = {"40", "41", "50", "51", "90"}
+        supported_csts = {"00", "40", "41", "50", "51", "90"}
         if cst not in supported_csts:
             raise ValidationError(
-                "configuration_json.icms_cst deve ser 40, 41, 50, 51 ou 90.",
+                "configuration_json.icms_cst deve ser 00, 40, 41, 50, 51 ou 90.",
                 field_name="configuration_json",
             )
         raw_rate = configuration.get("icms_rate")
