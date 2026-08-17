@@ -24,6 +24,24 @@ def test_accepts_diagnostic_icms51_without_nominal_rate():
     assert "icms_rate" not in result["configuration_json"]
 
 
+
+def test_accepts_icms00_with_nominal_rate():
+    payload = {
+        "name": "SP importação própria tributada",
+        "issuer_state": "SP",
+        "import_purpose": "resale",
+        "configuration_json": {
+            "icms_origin": "1",
+            "icms_cst": "00",
+            "icms_rate": "12",
+        },
+    }
+
+    result = ClientImportTaxRuleSchema().load(payload)
+
+    assert result["configuration_json"]["icms_cst"] == "00"
+    assert result["configuration_json"]["icms_rate"] == "12"
+
 def test_rejects_partial_deferment_without_nominal_rate():
     payload = diagnostic_icms51_rule()
     payload["configuration_json"]["icms_deferment_rate"] = "50"
