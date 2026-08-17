@@ -65,6 +65,26 @@ def test_reproduces_reference_import_tax_bases_for_first_item():
     assert totals["rtc_invoice_value"] == "7465.19"
 
 
+
+def test_calculates_taxed_icms00_import():
+    taxed_configuration = configuration()
+    taxed_configuration["icms_cst"] = "00"
+
+    items, totals = ImportTaxCalculator().calculate(
+        [reference_item()],
+        configuration=taxed_configuration,
+        additional_costs={"afrmm": "53.46", "other": "35.36"},
+    )
+
+    icms = items[0]["tax_payload"]["icms"]
+    assert icms["cst"] == "00"
+    assert icms["base_method"] == "3"
+    assert icms["base"] == "9686.49"
+    assert icms["rate"] == "12.0000"
+    assert icms["value"] == "1162.38"
+    assert totals["icms_base"] == "9686.49"
+    assert totals["icms_value"] == "1162.38"
+
 def test_allocates_costs_by_largest_remainder_with_exact_cent_total():
     calculator = ImportTaxCalculator()
     allocations = calculator.allocate(
