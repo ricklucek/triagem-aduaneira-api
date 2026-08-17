@@ -627,20 +627,56 @@ class ImportNfeService:
     # Provider connections
     # ------------------------------------------------------------------
     def create_provider_connection(self, payload: dict[str, Any]) -> ExternalProviderConnection:
+        """Cria ou atualiza a conexão do mesmo escopo, provider e ambiente."""
         now = datetime.utcnow()
-        connection = ExternalProviderConnection(
-            organization_id=self._require_organization_id(),
-            importer_id=payload.get("importer_id"),
-            provider=payload["provider"],
-            environment=payload["environment"],
-            auth_type=payload["auth_type"],
-            status=payload.get("status") or "active",
-            config_json=payload.get("config_json"),
-            credentials_ref=payload.get("credentials_ref"),
-            created_at=now,
-            updated_at=now,
+        organization_id = self._require_organization_id()
+        importer_id = payload.get("importer_id")
+        provider = payload["provider"]
+        environment = payload["environment"]
+        status = payload.get("status") or "active"
+        credentials_ref = self._empty_to_none(payload.get("credentials_ref"))
+
+        if importer_id:
+            self.get_client_for_current_user(importer_id)
+        if (
+            provider == ExternalProvider.PORTAL_UNICO.value
+            and status == "active"
+            and not credentials_ref
+        ):
+            raise ValueError(
+                "credentials_ref é obrigatório para uma conexão ativa do Portal Único."
+            )
+
+        query = self.provider_connection_query_for_current_user().filter(
+            ExternalProviderConnection.provider == provider,
+            ExternalProviderConnection.environment == environment,
         )
-        db.session.add(connection)
+        if importer_id:
+            query = query.filter(
+                ExternalProviderConnection.importer_id == importer_id
+            )
+        else:
+            query = query.filter(ExternalProviderConnection.importer_id.is_(None))
+
+        connection = query.order_by(
+            ExternalProviderConnection.updated_at.desc()
+        ).first()
+        if connection is None:
+            connection = ExternalProviderConnection(
+                organization_id=organization_id,
+                importer_id=importer_id,
+                provider=provider,
+                environment=environment,
+                created_at=now,
+            )
+            db.session.add(connection)
+
+        connection.auth_type = payload["auth_type"]
+        connection.status = status
+        connection.config_json = payload.get("config_json")
+        connection.credentials_ref = credentials_ref
+        connection.last_error = None
+        connection.updated_at = now
         db.session.flush()
         return connection
 
@@ -969,7 +1005,11 @@ class ImportNfeService:
             ).first()
         if connection is None:
             raise PortalUnicoIntegrationError(
-                "Conexão ativa com o Portal Único não configurada para o cliente e ambiente."
+                "Conexão ativa com o Portal Único não configurada para o ambiente "
+                f"{environment}. Cadastre uma conexão específica do cliente ou global "
+                "da organização em /external-provider-connections. Para consultar uma "
+                "DUIMP real, use provider_environment=production; o ambiente da NF-e "
+                "pode permanecer em homologation."
             )
         if not connection.credentials_ref:
             raise PortalUnicoIntegrationError(
