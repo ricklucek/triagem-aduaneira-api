@@ -13,7 +13,7 @@ class ImportTaxCalculator:
     MONEY = Decimal("0.01")
     RATE = Decimal("0.0001")
     NON_TAXED_ICMS_CSTS = {"40", "41", "50"}
-    SUPPORTED_ICMS_CSTS = NON_TAXED_ICMS_CSTS | {"51", "90"}
+    SUPPORTED_ICMS_CSTS = NON_TAXED_ICMS_CSTS | {"00", "51", "90"}
 
     def calculate(
         self,
@@ -28,7 +28,7 @@ class ImportTaxCalculator:
         icms_cst = str(configuration.get("icms_cst") or "90").zfill(2)
         if icms_cst not in self.SUPPORTED_ICMS_CSTS:
             raise ImportTaxCalculationError(
-                "ICMS CST não suportado. Informe 40, 41, 50, 51 ou 90."
+                "ICMS CST não suportado. Informe 00, 40, 41, 50, 51 ou 90."
             )
         raw_icms_rate = configuration.get("icms_rate")
         has_icms_rate = raw_icms_rate not in (None, "")
