@@ -708,7 +708,7 @@ def test_provider_connection_post_reactivates_existing_scope(api):
     )
     assert updated.status_code == 201
     assert updated.get_json()["id"] == connection_id
-    assert updated.get_json()["status"] == "active"
+    assert updated.get_json()["status"] == "ACTIVE"
     assert updated.get_json()["credentials_ref"] == "gcp:PORTAL_UNICO"
 
     listed = client.get(
