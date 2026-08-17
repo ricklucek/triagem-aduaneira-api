@@ -47,6 +47,6 @@ jobs:
             --network-tags=run-backend \
             --subnet=run-subnet \
             --vpc-egress=private-ranges-only \
-            --update-env-vars ${{ env.ENV_VARS }} \
+            --update-env-vars "${{ env.ENV_VARS }},GOOGLE_CLOUD_PROJECT=${{ secrets.GCP_PROJECT_ID }},PORTAL_UNICO_SECRET_VERSION=latest" \
             --update-secrets ${{ env.SECRETS }} \
             --allow-unauthenticated 
