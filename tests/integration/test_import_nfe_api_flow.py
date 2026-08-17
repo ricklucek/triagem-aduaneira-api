@@ -675,3 +675,49 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert "Complemento informado pelo operador." in updated["draft"][
         "fiscal_payload"
     ]["additional_info"]["complementary"]
+
+def test_provider_connection_post_reactivates_existing_scope(api):
+    client, headers, _ = api
+    payload = {
+        "provider": "portal_unico",
+        "environment": "production",
+        "auth_type": "api_key",
+        "status": "inactive",
+        "credentials_ref": "gcp:PORTAL_UNICO_OLD",
+        "config_json": {"role_type": "IMPEXP"},
+    }
+
+    created = client.post(
+        "/external-provider-connections",
+        headers=headers,
+        json=payload,
+    )
+    assert created.status_code == 201
+    connection_id = created.get_json()["id"]
+
+    payload.update(
+        {
+            "status": "active",
+            "credentials_ref": "gcp:PORTAL_UNICO",
+        }
+    )
+    updated = client.post(
+        "/external-provider-connections",
+        headers=headers,
+        json=payload,
+    )
+    assert updated.status_code == 201
+    assert updated.get_json()["id"] == connection_id
+    assert updated.get_json()["status"] == "active"
+    assert updated.get_json()["credentials_ref"] == "gcp:PORTAL_UNICO"
+
+    listed = client.get(
+        (
+            "/external-provider-connections"
+            "?provider=portal_unico&environment=production&status=active"
+        ),
+        headers=headers,
+    )
+    assert listed.status_code == 200
+    assert listed.get_json()["total"] == 1
+
