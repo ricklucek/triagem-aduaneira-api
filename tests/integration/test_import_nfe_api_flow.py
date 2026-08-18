@@ -283,7 +283,11 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
         },
     )
     assert workflow_after_edit.status_code == 200
-    assert workflow_after_edit.get_json()["next_action"] == "generate_xml"
+    # Este cenário usa tax_configuration ad hoc, sem regra persistida. O
+    # workflow preserva corretamente a precedência desse pré-requisito.
+    assert workflow_after_edit.get_json()["next_action"] == (
+        "configure_tax_rule"
+    )
 
     replacement_xml_response = client.post(
         f"/nfe-drafts/{draft_id}/generate-xml",
