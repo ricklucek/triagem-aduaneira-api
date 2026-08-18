@@ -2592,11 +2592,11 @@ class ImportNfeService:
                 "environment": environment,
                 "series": series,
                 "number": number,
-                "operation_nature": document_options.get("operation_nature")
-                or (
+                "operation_nature": (
                     "Importação de mercadorias"
                     if mixed_import_purposes
-                    else self._default_operation_nature(item_purposes[0])
+                    else document_options.get("operation_nature")
+                    or self._default_operation_nature(item_purposes[0])
                 ),
                 "presence_indicator": document_options.get(
                     "presence_indicator"
