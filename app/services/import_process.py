@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_
@@ -3395,8 +3396,16 @@ class ImportNfeService:
             import_payload=item_payload.get("import_payload"),
             tax_payload=item_payload.get("tax_payload"),
             import_purpose=item_payload.get("import_purpose"),
-            tax_rule_id=item_payload.get("tax_rule_id"),
-            item_classification_id=item_payload.get("item_classification_id"),
+            tax_rule_id=(
+                UUID(str(item_payload["tax_rule_id"]))
+                if item_payload.get("tax_rule_id")
+                else None
+            ),
+            item_classification_id=(
+                UUID(str(item_payload["item_classification_id"]))
+                if item_payload.get("item_classification_id")
+                else None
+            ),
             raw_source_payload=item_payload.get("raw_source_payload"),
             created_at=now,
             updated_at=now,
