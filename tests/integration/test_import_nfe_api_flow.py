@@ -627,6 +627,14 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
             "document": {
                 "operation_nature": "Importação para revenda"
             },
+            "foreign_supplier": {
+                "legal_name": "Foreign Supplier Corrected Ltd",
+                "country_code": "1600",
+                "country_name": "CHINA",
+                "address": {
+                    "city_name": "SHANGHAI",
+                },
+            },
             "item_defaults": {
                 "commercial_unit": "CX",
                 "taxable_unit": "KG",
@@ -655,6 +663,13 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert updated_document["intermediary_indicator"] == "0"
     assert updated_document["environment"] == "homologation"
     assert updated_document["series"] == "1"
+    updated_recipient = updated["draft"]["fiscal_payload"]["recipient"]
+    assert updated_recipient["legal_name"] == (
+        "Foreign Supplier Corrected Ltd"
+    )
+    assert updated_recipient["address"]["country_code"] == "1600"
+    assert updated_recipient["address"]["country_name"] == "CHINA"
+    assert updated_recipient["address"]["city_name"] == "SHANGHAI"
     updated_transport = updated["draft"]["fiscal_payload"]["transport"]
     assert updated_transport["carrier"]["name"] == "Transportadora Teste"
     assert updated_transport["volume"] == {
