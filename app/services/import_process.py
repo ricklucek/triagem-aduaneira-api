@@ -761,7 +761,7 @@ class ImportNfeService:
         elif classification_required:
             next_action = "classify_items"
         elif latest_draft is None:
-            next_action = "classify_items"
+            next_action = "create_draft"
         elif classification_newer_than_draft:
             next_action = "create_draft"
         elif sequence is None:
