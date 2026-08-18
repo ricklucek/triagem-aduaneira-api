@@ -675,6 +675,8 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         "has_fiscal_profile": True,
         "has_active_tax_rule": True,
         "has_number_sequence": False,
+        "has_item_classification": False,
+        "item_classification_ready": False,
         "import_purpose": "resale",
         "environment": "homologation",
         "series": "1",
@@ -689,7 +691,36 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         "import_process_id": process_id,
         "tax_configuration_source": "client_import_tax_rule",
         "tax_rule_id": rule_id,
+        "tax_rule_ids": [rule_id],
     }
+
+    classification_before = client.get(
+        f"/import-processes/{process_id}/item-classifications",
+        headers=headers,
+        query_string={"duimp_snapshot_id": snapshot_id},
+    )
+    assert classification_before.status_code == 200
+    assert classification_before.get_json()["pending_count"] == 1
+    assert classification_before.get_json()["items"][0]["status"] == "unclassified"
+
+    classification_saved = client.put(
+        f"/import-processes/{process_id}/item-classifications",
+        headers=headers,
+        json={
+            "duimp_snapshot_id": snapshot_id,
+            "items": [
+                {
+                    "duimp_item_number": "1",
+                    "import_purpose": "resale",
+                }
+            ],
+        },
+    )
+    assert classification_saved.status_code == 200, classification_saved.get_json()
+    classification_body = classification_saved.get_json()
+    assert classification_body["ready_for_draft"] is True
+    assert classification_body["items"][0]["cfop"] == "3102"
+    assert classification_body["items"][0]["tax_rule"]["id"] == rule_id
 
     draft_id = body["draft"]["id"]
     update_response = client.patch(
