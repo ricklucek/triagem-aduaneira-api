@@ -10,7 +10,7 @@ from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_
+from sqlalchemy import case, func, or_
 
 from app.cnpj import is_valid_cnpj, normalize_cnpj
 from ..extensions import db
@@ -501,61 +501,72 @@ class ImportNfeService:
         self,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        rows = (
-            self._filtered_import_process_query(params)
-            .order_by(
-                ImportProcess.updated_at.desc().nullslast(),
-                ImportProcess.created_at.desc(),
+        """Agrupa clientes no banco sem recalcular o workflow por processo."""
+        terminal_statuses = [
+            ImportProcessStatus.XML_VALIDATED.value,
+            ImportProcessStatus.XML_SIGNED.value,
+            ImportProcessStatus.AUTHORIZED.value,
+            ImportProcessStatus.CANCELLED.value,
+        ]
+        last_activity = func.max(
+            func.coalesce(
+                ImportProcess.updated_at,
+                ImportProcess.created_at,
             )
+        ).label("last_updated_at")
+        pending_count = func.sum(
+            case(
+                (
+                    ImportProcess.status.in_(terminal_statuses),
+                    0,
+                ),
+                else_=1,
+            )
+        ).label("pending_count")
+
+        grouped_query = (
+            self._filtered_import_process_query(params)
+            .with_entities(
+                Client.id.label("client_id"),
+                Client.nome_resumido.label("short_name"),
+                Client.razao_social.label("legal_name"),
+                Client.cnpj.label("cnpj"),
+                func.count(ImportProcess.id).label("process_count"),
+                pending_count,
+                last_activity,
+            )
+            .group_by(
+                Client.id,
+                Client.nome_resumido,
+                Client.razao_social,
+                Client.cnpj,
+            )
+        )
+        total = grouped_query.order_by(None).count()
+        rows = (
+            grouped_query
+            .order_by(last_activity.desc())
+            .limit(params["limit"])
+            .offset(params["offset"])
             .all()
         )
-        groups: dict[str, dict[str, Any]] = {}
-        group_dates: dict[str, datetime] = {}
 
-        for process in rows:
-            summary = self.build_import_process_list_summary(process)
-            client = process.importer
-            client_id = str(client.id)
-            group = groups.setdefault(
-                client_id,
-                {
-                    "client_id": client_id,
-                    "name": client.nome_resumido or client.razao_social,
-                    "legal_name": client.razao_social,
-                    "cnpj": client.cnpj,
-                    "process_count": 0,
-                    "pending_count": 0,
-                    "last_updated_at": None,
-                },
-            )
-            group["process_count"] += 1
-            if summary["pending"]:
-                group["pending_count"] += 1
-
-            activity_at = process.updated_at or process.created_at
-            if activity_at and (
-                client_id not in group_dates
-                or activity_at > group_dates[client_id]
-            ):
-                group_dates[client_id] = activity_at
-                group["last_updated_at"] = self._iso(activity_at)
-
-        ordered = sorted(
-            groups.values(),
-            key=lambda group: group_dates.get(
-                group["client_id"],
-                datetime.min,
-            ),
-            reverse=True,
-        )
-        total = len(ordered)
-        offset = params["offset"]
-        limit = params["limit"]
         return {
-            "items": ordered[offset : offset + limit],
+            "items": [
+                {
+                    "client_id": str(row.client_id),
+                    "name": row.short_name or row.legal_name,
+                    "legal_name": row.legal_name,
+                    "cnpj": row.cnpj,
+                    "process_count": int(row.process_count or 0),
+                    "pending_count": int(row.pending_count or 0),
+                    "last_updated_at": self._iso(row.last_updated_at),
+                }
+                for row in rows
+            ],
             "total": total,
-            "limit": limit,
-            "offset": offset,
+            "limit": params["limit"],
+            "offset": params["offset"],
             "q": params.get("q"),
             "created_by_me": params.get("created_by_me", False),
         }
@@ -650,6 +661,57 @@ class ImportNfeService:
             "items_count": items_count,
             "created_at": self._iso(process.created_at),
             "updated_at": self._iso(process.updated_at),
+        }
+
+    @staticmethod
+    def _workflow_navigation(next_action: str) -> dict[str, Any]:
+        steps = [
+            ("duimp", "DUIMP"),
+            ("context", "Contexto fiscal"),
+            ("purposes", "Finalidades"),
+            ("drafts", "Rascunho"),
+            ("xml", "XML"),
+            ("review", "Conferência"),
+        ]
+        action_step = {
+            "fetch_duimp": "duimp",
+            "configure_fiscal_profile": "context",
+            "select_import_purpose": "context",
+            "configure_tax_rule": "context",
+            "resolve_context": "context",
+            "classify_items": "purposes",
+            "create_draft": "drafts",
+            "configure_number_sequence": "drafts",
+            "correct_draft": "drafts",
+            "generate_access_key": "xml",
+            "generate_xml": "xml",
+            "validate_xml": "xml",
+            "completed": "review",
+        }
+        current_step = action_step.get(next_action, "duimp")
+        current_index = next(
+            index
+            for index, (key, _) in enumerate(steps)
+            if key == current_step
+        )
+        return {
+            "current_step": current_step,
+            "furthest_available_step": current_step,
+            "steps": [
+                {
+                    "key": key,
+                    "label": label,
+                    "status": (
+                        "completed"
+                        if index < current_index
+                        else "current"
+                        if index == current_index
+                        else "blocked"
+                    ),
+                    "can_view": index <= current_index,
+                }
+                for index, (key, label) in enumerate(steps)
+            ],
         }
 
     def get_nfe_workflow_state(
@@ -783,6 +845,8 @@ class ImportNfeService:
         else:
             next_action = "completed"
 
+        navigation = self._workflow_navigation(next_action)
+
         return {
             "process": self.build_import_process_summary(process),
             "latest_snapshot": (
@@ -817,6 +881,7 @@ class ImportNfeService:
                 "series": series,
             },
             "next_action": next_action,
+            **navigation,
         }
 
     # ------------------------------------------------------------------
