@@ -1456,6 +1456,31 @@ class ImportNfeService:
                     fiscal_payload.get(section),
                     payload[section],
                 )
+
+        if "foreign_supplier" in payload:
+            supplier_update = deepcopy(payload["foreign_supplier"] or {})
+            recipient_update: dict[str, Any] = {}
+            for field in (
+                "legal_name",
+                "foreign_id",
+                "country_iso_alpha_2",
+            ):
+                if supplier_update.get(field) not in (None, ""):
+                    recipient_update[field] = supplier_update[field]
+
+            address_update = deepcopy(supplier_update.get("address") or {})
+            for field in ("country_code", "country_name"):
+                if supplier_update.get(field) not in (None, ""):
+                    address_update[field] = supplier_update[field]
+            if address_update:
+                recipient_update["address"] = address_update
+
+            if recipient_update:
+                fiscal_payload["recipient"] = self._merge_defaults(
+                    fiscal_payload.get("recipient"),
+                    recipient_update,
+                )
+
         volume_update = (
             (payload.get("transport") or {}).get("volume") or {}
         )
