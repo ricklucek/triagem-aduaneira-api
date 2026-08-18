@@ -79,6 +79,12 @@ def test_context_resolver_keeps_unconfirmed_fields_missing():
     assert result["ready_for_draft"] is False
     assert "clearance_date" in result["missing_fields"]
     assert "foreign_supplier.country_code" in result["missing_fields"]
+    assert "foreign_supplier.country_name" in result["missing_fields"]
+    assert result["fields"]["foreign_supplier.country_name"] == {
+        "value": None,
+        "source": None,
+        "status": "missing",
+    }
     assert result["fields"]["clearance_date"] == {
         "value": None,
         "source": None,
