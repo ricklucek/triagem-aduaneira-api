@@ -815,3 +815,61 @@ def test_provider_connection_post_reactivates_existing_scope(api):
     assert listed.status_code == 200
     assert listed.get_json()["total"] == 1
 
+def test_process_dashboard_groups_by_client_and_exposes_next_action(api):
+    client, headers, importer_id = api
+
+    existing_client = db.session.get(Client, UUID(importer_id))
+    second_client = Client(
+        organization_id=existing_client.organization_id,
+        cnpj="11222333000181",
+        razao_social="Cliente Painel Aduaneiro Ltda",
+        nome_resumido="Cliente Painel",
+        ativo=True,
+    )
+    db.session.add(second_client)
+    db.session.commit()
+
+    created = client.post(
+        "/import-processes",
+        headers=headers,
+        json={
+            "importer_id": str(second_client.id),
+            "reference_code": "PAINEL-CLIENTE-001",
+            "duimp_number": "26BR0000999999-1",
+            "source": "manual",
+        },
+    )
+    assert created.status_code == 201
+
+    grouped = client.get(
+        "/import-processes/client-groups?q=11222333000181&created_by_me=true",
+        headers=headers,
+    )
+    assert grouped.status_code == 200
+    grouped_body = grouped.get_json()
+    assert grouped_body["total"] == 1
+    assert grouped_body["items"] == [
+        {
+            "client_id": str(second_client.id),
+            "name": "Cliente Painel",
+            "legal_name": "Cliente Painel Aduaneiro Ltda",
+            "cnpj": "11222333000181",
+            "process_count": 1,
+            "pending_count": 1,
+            "last_updated_at": grouped_body["items"][0]["last_updated_at"],
+        }
+    ]
+
+    processes = client.get(
+        f"/import-processes?importer_id={second_client.id}",
+        headers=headers,
+    )
+    assert processes.status_code == 200
+    process = processes.get_json()["items"][0]
+    assert process["importer"]["name"] == "Cliente Painel"
+    assert process["next_action"] == "fetch_duimp"
+    assert process["pending"] is True
+    assert process["planned_documents_count"] == 0
+    assert process["last_responsible"]["name"] == "Operador Teste"
+    assert process["last_responsible"]["is_current_user"] is True
+

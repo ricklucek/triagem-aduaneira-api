@@ -437,8 +437,11 @@ class ImportNfeService:
         db.session.flush()
         return process
 
-    def list_import_processes(self, params: dict[str, Any]) -> dict[str, Any]:
-        query = self.import_process_query_for_current_user()
+    def _filtered_import_process_query(self, params: dict[str, Any]):
+        query = self.import_process_query_for_current_user().join(
+            Client,
+            Client.id == ImportProcess.importer_id,
+        )
 
         if params.get("created_by_me"):
             query = query.filter(ImportProcess.created_by_user_id == self.user_id)
@@ -451,24 +454,158 @@ class ImportNfeService:
         if params.get("duimp_number"):
             query = query.filter(ImportProcess.duimp_number == params["duimp_number"])
         if params.get("q"):
-            term = f"%{params['q']}%"
+            term = f"%{str(params['q']).strip()}%"
             query = query.filter(
                 or_(
+                    Client.razao_social.ilike(term),
+                    Client.nome_resumido.ilike(term),
+                    Client.cnpj.ilike(term),
                     ImportProcess.reference_code.ilike(term),
                     ImportProcess.duimp_number.ilike(term),
                     ImportProcess.status.ilike(term),
                     ImportProcess.source.ilike(term),
                 )
             )
+        return query
 
+    def list_import_processes(self, params: dict[str, Any]) -> dict[str, Any]:
+        query = self._filtered_import_process_query(params)
         total = query.count()
         rows = (
-            query.order_by(ImportProcess.updated_at.desc().nullslast(), ImportProcess.created_at.desc())
+            query.order_by(
+                ImportProcess.updated_at.desc().nullslast(),
+                ImportProcess.created_at.desc(),
+            )
             .limit(params["limit"])
             .offset(params["offset"])
             .all()
         )
-        return {"items": [self.build_import_process_summary(row) for row in rows], "total": total, **params}
+        return {
+            "items": [
+                self.build_import_process_list_summary(row)
+                for row in rows
+            ],
+            "total": total,
+            **params,
+        }
+
+    def list_import_process_client_groups(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        rows = (
+            self._filtered_import_process_query(params)
+            .order_by(
+                ImportProcess.updated_at.desc().nullslast(),
+                ImportProcess.created_at.desc(),
+            )
+            .all()
+        )
+        groups: dict[str, dict[str, Any]] = {}
+        group_dates: dict[str, datetime] = {}
+
+        for process in rows:
+            summary = self.build_import_process_list_summary(process)
+            client = process.importer
+            client_id = str(client.id)
+            group = groups.setdefault(
+                client_id,
+                {
+                    "client_id": client_id,
+                    "name": client.nome_resumido or client.razao_social,
+                    "legal_name": client.razao_social,
+                    "cnpj": client.cnpj,
+                    "process_count": 0,
+                    "pending_count": 0,
+                    "last_updated_at": None,
+                },
+            )
+            group["process_count"] += 1
+            if summary["pending"]:
+                group["pending_count"] += 1
+
+            activity_at = process.updated_at or process.created_at
+            if activity_at and (
+                client_id not in group_dates
+                or activity_at > group_dates[client_id]
+            ):
+                group_dates[client_id] = activity_at
+                group["last_updated_at"] = self._iso(activity_at)
+
+        ordered = sorted(
+            groups.values(),
+            key=lambda group: group_dates.get(
+                group["client_id"],
+                datetime.min,
+            ),
+            reverse=True,
+        )
+        total = len(ordered)
+        offset = params["offset"]
+        limit = params["limit"]
+        return {
+            "items": ordered[offset : offset + limit],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "q": params.get("q"),
+            "created_by_me": params.get("created_by_me", False),
+        }
+
+    def build_import_process_list_summary(
+        self,
+        process: ImportProcess,
+    ) -> dict[str, Any]:
+        summary = self.build_import_process_summary(process)
+        workflow = self.get_nfe_workflow_state(
+            process,
+            {
+                "import_purpose": None,
+                "environment": FiscalEnvironment.HOMOLOGATION.value,
+                "series": "1",
+            },
+        )
+        next_action = workflow["next_action"]
+        process_status = self._enum_value(process.status)
+        terminal_statuses = {
+            ImportProcessStatus.XML_VALIDATED.value,
+            ImportProcessStatus.XML_SIGNED.value,
+            ImportProcessStatus.AUTHORIZED.value,
+            ImportProcessStatus.CANCELLED.value,
+        }
+        drafts_count = (
+            NfeDraft.query
+            .filter(NfeDraft.import_process_id == process.id)
+            .count()
+        )
+        responsible = process.created_by
+        importer = process.importer
+        summary.update(
+            {
+                "importer": {
+                    "id": str(importer.id),
+                    "name": importer.nome_resumido or importer.razao_social,
+                    "legal_name": importer.razao_social,
+                    "cnpj": importer.cnpj,
+                },
+                "next_action": next_action,
+                "pending": (
+                    next_action != "completed"
+                    and process_status not in terminal_statuses
+                ),
+                "planned_documents_count": drafts_count,
+                "last_responsible": (
+                    {
+                        "id": str(responsible.id),
+                        "name": responsible.nome,
+                        "is_current_user": responsible.id == self.user_id,
+                    }
+                    if responsible
+                    else None
+                ),
+            }
+        )
+        return summary
 
     def build_import_process_summary(self, process: ImportProcess) -> dict[str, Any]:
         latest_draft = (

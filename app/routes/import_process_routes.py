@@ -108,6 +108,16 @@ def list_import_processes():
         return validation_error_response(exc)
 
 
+@import_process_bp.get("/client-groups")
+@auth_required
+def list_import_process_client_groups():
+    try:
+        params = ImportProcessListQuerySchema().load(request.args)
+        return jsonify(_service().list_import_process_client_groups(params))
+    except ValidationError as exc:
+        return validation_error_response(exc)
+
+
 @import_process_bp.get("/<process_id>")
 @auth_required
 def get_import_process(process_id: str):
