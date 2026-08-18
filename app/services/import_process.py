@@ -1460,16 +1460,16 @@ class ImportNfeService:
         if "foreign_supplier" in payload:
             supplier_update = deepcopy(payload["foreign_supplier"] or {})
             recipient_update: dict[str, Any] = {}
-            for field in (
-                "legal_name",
-                "foreign_id",
-                "country_iso_alpha_2",
-            ):
+            for field in ("legal_name", "foreign_id"):
                 if supplier_update.get(field) not in (None, ""):
                     recipient_update[field] = supplier_update[field]
 
             address_update = deepcopy(supplier_update.get("address") or {})
-            for field in ("country_code", "country_name"):
+            for field in (
+                "country_code",
+                "country_name",
+                "country_iso_alpha_2",
+            ):
                 if supplier_update.get(field) not in (None, ""):
                     address_update[field] = supplier_update[field]
             if address_update:
