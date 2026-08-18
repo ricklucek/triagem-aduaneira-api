@@ -1771,15 +1771,6 @@ class ImportNfeService:
             raise ValueError(
                 "O XML não assinado deve ser aprovado no XSD antes da assinatura."
             )
-        if (
-            draft.updated_at
-            and xml_version.generated_at
-            and draft.updated_at > xml_version.generated_at
-        ):
-            raise ValueError(
-                "O XML está desatualizado em relação ao rascunho. "
-                "Gere e valide uma nova versão antes de assinar."
-            )
         latest_unsigned = (
             NfeXmlVersion.query.filter(
                 NfeXmlVersion.nfe_draft_id == draft.id,
@@ -1826,6 +1817,16 @@ class ImportNfeService:
                 "issuance": existing_issuance,
                 "replayed": True,
             }
+
+        if (
+            draft.updated_at
+            and xml_version.generated_at
+            and draft.updated_at > xml_version.generated_at
+        ):
+            raise ValueError(
+                "O XML está desatualizado em relação ao rascunho. "
+                "Gere e valide uma nova versão antes de assinar."
+            )
 
         environment = getattr(draft.environment, "value", draft.environment)
         certificate = self.certificate_registry.active_for(
