@@ -288,6 +288,62 @@ class DuimpSnapshot(Base):
     import_process = relationship("ImportProcess", back_populates="snapshots")
 
 
+class NfeItemClassification(Base):
+    __tablename__ = "nfe_item_classifications"
+
+    id = uuid_pk()
+    organization_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id"),
+        nullable=False,
+        index=True,
+    )
+    import_process_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("import_processes.id"),
+        nullable=False,
+        index=True,
+    )
+    duimp_snapshot_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("duimp_snapshots.id"),
+        nullable=False,
+        index=True,
+    )
+    duimp_item_number = Column(String(30), nullable=False)
+    import_purpose = Column(String(30), nullable=False, index=True)
+    tax_rule_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("client_import_tax_rules.id"),
+        nullable=True,
+        index=True,
+    )
+    cfop = Column(String(4), nullable=True)
+    source = Column(String(20), nullable=False, default="manual")
+    classified_by_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=True,
+        index=True,
+    )
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+
+    organization = relationship("Organization")
+    import_process = relationship("ImportProcess")
+    duimp_snapshot = relationship("DuimpSnapshot")
+    tax_rule = relationship("ClientImportTaxRule")
+    classified_by = relationship("User", foreign_keys=[classified_by_user_id])
+
+    __table_args__ = (
+        UniqueConstraint(
+            "duimp_snapshot_id",
+            "duimp_item_number",
+            name="uq_nfe_item_classification_snapshot_item",
+        ),
+    )
+
+
 class NfeDraft(Base):
     __tablename__ = "nfe_drafts"
 
@@ -369,12 +425,31 @@ class NfeDraftItem(Base):
     import_payload = Column(JSON, nullable=True)
     tax_payload = Column(JSON, nullable=True)
 
+    import_purpose = Column(String(30), nullable=True, index=True)
+    tax_rule_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("client_import_tax_rules.id"),
+        nullable=True,
+        index=True,
+    )
+    item_classification_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("nfe_item_classifications.id"),
+        nullable=True,
+        index=True,
+    )
+
     raw_source_payload = Column(JSON, nullable=True)
 
     created_at = Column(DateTime, nullable=False)
     updated_at = Column(DateTime, nullable=False)
 
     nfe_draft = relationship("NfeDraft", back_populates="items")
+    tax_rule = relationship("ClientImportTaxRule", foreign_keys=[tax_rule_id])
+    item_classification = relationship(
+        "NfeItemClassification",
+        foreign_keys=[item_classification_id],
+    )
 
     __table_args__ = (
         UniqueConstraint("nfe_draft_id", "item_number", name="uq_nfe_draft_item_number"),

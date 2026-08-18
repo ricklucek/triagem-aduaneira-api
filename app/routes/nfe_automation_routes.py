@@ -4,8 +4,10 @@ from marshmallow import ValidationError
 from ..auth import auth_required
 from ..extensions import db
 from ..schemas.nfe_automation import (
+    BulkNfeItemClassificationSchema,
     ClientImportTaxRuleSchema,
     NfeContextQuerySchema,
+    NfeItemClassificationQuerySchema,
     ResolveNfeContextSchema,
     UpdateClientImportTaxRuleSchema,
 )
@@ -110,6 +112,43 @@ def _process(service: ImportNfeService, process_id: str):
         .filter_by(id=process_uuid)
         .first_or_404()
     )
+
+
+@nfe_context_bp.get("/<process_id>/item-classifications")
+@auth_required
+def get_item_classifications(process_id: str):
+    service = _service()
+    process = _process(service, process_id)
+    try:
+        payload = NfeItemClassificationQuerySchema().load(request.args)
+        return jsonify(
+            service.get_item_classification_state(
+                process,
+                payload.get("duimp_snapshot_id"),
+            )
+        )
+    except ValidationError as exc:
+        return validation_error_response(exc)
+    except ValueError as exc:
+        return bad_request_response(exc)
+
+
+@nfe_context_bp.put("/<process_id>/item-classifications")
+@auth_required
+def save_item_classifications(process_id: str):
+    service = _service()
+    process = _process(service, process_id)
+    try:
+        payload = BulkNfeItemClassificationSchema().load(json_payload())
+        result = service.save_item_classifications(process, payload)
+        db.session.commit()
+        return jsonify(result)
+    except ValidationError as exc:
+        db.session.rollback()
+        return validation_error_response(exc)
+    except ValueError as exc:
+        db.session.rollback()
+        return bad_request_response(exc)
 
 
 @nfe_context_bp.get("/<process_id>/nfe-context")

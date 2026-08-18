@@ -34,6 +34,7 @@ from ..models import (
     ImportPurpose,
     NfeDraft,
     NfeDraftItem,
+    NfeItemClassification,
     NfeDraftStatus,
     NfeModel,
     NfeOperationType,
@@ -184,6 +185,14 @@ class ImportNfeService:
         query = DuimpSnapshot.query
         if self.organization_id:
             query = query.filter(DuimpSnapshot.organization_id == self.organization_id)
+        return query
+
+    def item_classification_query_for_current_user(self):
+        query = NfeItemClassification.query
+        if self.organization_id:
+            query = query.filter(
+                NfeItemClassification.organization_id == self.organization_id
+            )
         return query
 
     def client_fiscal_profile_query_for_current_user(self):
@@ -685,6 +694,23 @@ class ImportNfeService:
                 },
             )
 
+        classifications = None
+        latest_classification = None
+        if latest_snapshot and fiscal_profile:
+            classifications = self.get_item_classification_state(
+                process,
+                latest_snapshot.id,
+            )
+            latest_classification = (
+                self.item_classification_query_for_current_user()
+                .filter(
+                    NfeItemClassification.import_process_id == process.id,
+                    NfeItemClassification.duimp_snapshot_id == latest_snapshot.id,
+                )
+                .order_by(NfeItemClassification.updated_at.desc())
+                .first()
+            )
+
         comparable_series = {series, series.zfill(3)}
         sequence = (
             NfeNumberSequence.query.filter(
@@ -705,6 +731,21 @@ class ImportNfeService:
             else None
         )
         active_tax_rule = bool(context and context.get("tax_rule"))
+        classification_newer_than_draft = bool(
+            latest_draft
+            and latest_classification
+            and latest_classification.updated_at
+            and latest_draft.created_at
+            and latest_classification.updated_at > latest_draft.created_at
+        )
+        classification_required = bool(
+            classifications
+            and (
+                latest_draft is None
+                or classifications.get("has_classifications")
+            )
+            and not classifications.get("ready_for_draft")
+        )
 
         if latest_snapshot is None:
             next_action = "fetch_duimp"
@@ -716,7 +757,11 @@ class ImportNfeService:
             next_action = "configure_tax_rule"
         elif context and not context.get("ready_for_draft"):
             next_action = "resolve_context"
+        elif classification_required:
+            next_action = "classify_items"
         elif latest_draft is None:
+            next_action = "classify_items"
+        elif classification_newer_than_draft:
             next_action = "create_draft"
         elif sequence is None:
             next_action = "configure_number_sequence"
@@ -752,11 +797,20 @@ class ImportNfeService:
                 else None
             ),
             "context": context,
+            "item_classification": classifications,
             "latest_draft": draft_detail,
             "prerequisites": {
                 "has_fiscal_profile": fiscal_profile is not None,
                 "has_active_tax_rule": active_tax_rule,
                 "has_number_sequence": sequence is not None,
+                "has_item_classification": bool(
+                    classifications
+                    and classifications.get("has_classifications")
+                ),
+                "item_classification_ready": bool(
+                    classifications
+                    and classifications.get("ready_for_draft")
+                ),
                 "import_purpose": import_purpose,
                 "environment": environment,
                 "series": series,
@@ -1401,6 +1455,219 @@ class ImportNfeService:
         return str(value).strip() if value not in (None, "") else None
 
     # ------------------------------------------------------------------
+    # Classificação fiscal por item
+    # ------------------------------------------------------------------
+    def get_item_classification_state(
+        self,
+        process: ImportProcess,
+        snapshot_id=None,
+    ) -> dict[str, Any]:
+        snapshot = self._snapshot_for_process(process, snapshot_id)
+        normalized = (
+            snapshot.normalized_payload
+            or self.normalize_duimp_payload(snapshot.raw_payload)
+        )
+        rows = (
+            self.item_classification_query_for_current_user()
+            .filter(
+                NfeItemClassification.import_process_id == process.id,
+                NfeItemClassification.duimp_snapshot_id == snapshot.id,
+            )
+            .all()
+        )
+        by_number = {
+            str(row.duimp_item_number): row
+            for row in rows
+        }
+        items = []
+        purpose_counts: dict[str, int] = {}
+        latest_updated_at = None
+
+        for source in normalized.get("items") or []:
+            number = str(source.get("number") or "")
+            row = by_number.get(number)
+            purpose = row.import_purpose if row else None
+            rule = row.tax_rule if row else None
+            rule_active = bool(rule and rule.active)
+            if row and row.updated_at and (
+                latest_updated_at is None
+                or row.updated_at > latest_updated_at
+            ):
+                latest_updated_at = row.updated_at
+
+            if purpose:
+                purpose_counts[purpose] = purpose_counts.get(purpose, 0) + 1
+            if row is None:
+                status = "unclassified"
+            elif not rule:
+                status = "missing_tax_rule"
+            elif not rule_active:
+                status = "inactive_tax_rule"
+            elif not row.cfop:
+                status = "missing_cfop"
+            else:
+                status = "classified"
+
+            rule_cfop = (
+                str((rule.configuration_json or {}).get("cfop") or "")
+                if rule
+                else ""
+            )
+            items.append(
+                {
+                    "duimp_item_number": number,
+                    "product_code": source.get("product_code"),
+                    "description": source.get("description"),
+                    "ncm": source.get("ncm"),
+                    "exporter_code": (
+                        source.get("exporter_code")
+                        or normalized.get("exporter_code")
+                    ),
+                    "import_purpose": purpose,
+                    "cfop": row.cfop if row else None,
+                    "cfop_source": (
+                        "tax_rule"
+                        if row and rule_cfop == row.cfop
+                        else "purpose_default"
+                        if row and row.cfop
+                        else None
+                    ),
+                    "tax_rule": (
+                        {
+                            "id": str(rule.id),
+                            "name": rule.name,
+                            "active": rule.active,
+                        }
+                        if rule
+                        else None
+                    ),
+                    "status": status,
+                    "classified_by": (
+                        {
+                            "id": str(row.classified_by.id),
+                            "name": row.classified_by.nome,
+                        }
+                        if row and row.classified_by
+                        else None
+                    ),
+                    "updated_at": self._iso(row.updated_at) if row else None,
+                }
+            )
+
+        classified_count = sum(
+            1 for item in items if item["status"] == "classified"
+        )
+        return {
+            "process_id": str(process.id),
+            "snapshot_id": str(snapshot.id),
+            "items": items,
+            "total_items": len(items),
+            "classified_count": classified_count,
+            "pending_count": len(items) - classified_count,
+            "purpose_counts": purpose_counts,
+            "has_classifications": bool(rows),
+            "ready_for_draft": bool(items)
+            and classified_count == len(items),
+            "latest_updated_at": self._iso(latest_updated_at),
+        }
+
+    def save_item_classifications(
+        self,
+        process: ImportProcess,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        snapshot = self._snapshot_for_process(
+            process,
+            payload.get("duimp_snapshot_id"),
+        )
+        normalized = (
+            snapshot.normalized_payload
+            or self.normalize_duimp_payload(snapshot.raw_payload)
+        )
+        source_items = {
+            str(item.get("number") or ""): item
+            for item in normalized.get("items") or []
+        }
+        profile = self.get_importer_fiscal_profile(process.importer_id)
+        now = datetime.utcnow()
+
+        for requested in payload["items"]:
+            item_number = str(requested["duimp_item_number"])
+            source = source_items.get(item_number)
+            if source is None:
+                raise ValueError(
+                    f"Item {item_number} não pertence ao snapshot informado."
+                )
+            purpose = requested["import_purpose"]
+            rule = self.match_import_tax_rule(
+                client_id=process.importer_id,
+                issuer_state=profile.state,
+                tax_regime=profile.tax_regime,
+                import_purpose=purpose,
+                import_modality=normalized.get("import_modality"),
+                ncms=[self._digits(source.get("ncm"))],
+                reference_date=self._date_value(
+                    normalized.get("registration_date")
+                ),
+                rule_id=requested.get("tax_rule_id"),
+            )
+            configuration = dict(rule.configuration_json or {}) if rule else {}
+            configured_cfop = self._digits(configuration.get("cfop"))
+            cfop = (
+                configured_cfop
+                if len(configured_cfop) == 4
+                else self._resolve_cfop(purpose)
+                if rule
+                else None
+            )
+
+            row = (
+                self.item_classification_query_for_current_user()
+                .filter(
+                    NfeItemClassification.duimp_snapshot_id == snapshot.id,
+                    NfeItemClassification.duimp_item_number == item_number,
+                )
+                .first()
+            )
+            if row is None:
+                row = NfeItemClassification(
+                    organization_id=self._require_organization_id(),
+                    import_process_id=process.id,
+                    duimp_snapshot_id=snapshot.id,
+                    duimp_item_number=item_number,
+                    created_at=now,
+                )
+                db.session.add(row)
+            row.import_purpose = purpose
+            row.tax_rule_id = rule.id if rule else None
+            row.cfop = cfop
+            row.source = "manual"
+            row.classified_by_user_id = self.user_id
+            row.updated_at = now
+
+        process.updated_at = now
+        db.session.flush()
+        return self.get_item_classification_state(process, snapshot.id)
+
+    def _item_classification_map(
+        self,
+        process: ImportProcess,
+        snapshot: DuimpSnapshot,
+    ) -> dict[str, NfeItemClassification]:
+        rows = (
+            self.item_classification_query_for_current_user()
+            .filter(
+                NfeItemClassification.import_process_id == process.id,
+                NfeItemClassification.duimp_snapshot_id == snapshot.id,
+            )
+            .all()
+        )
+        return {
+            str(row.duimp_item_number): row
+            for row in rows
+        }
+
+    # ------------------------------------------------------------------
     # NFe draft
     # ------------------------------------------------------------------
     def create_nfe_draft_from_duimp(self, process: ImportProcess, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1426,9 +1693,31 @@ class ImportNfeService:
             normalized = fetch_result["normalized"]
             snapshot = fetch_result["snapshot"]
 
+        classification_map = self._item_classification_map(process, snapshot)
+        tax_rules: list[ClientImportTaxRule] = []
         tax_rule = None
         tax_configuration = payload.get("tax_configuration")
-        if tax_configuration is None:
+
+        if classification_map:
+            classification_state = self.get_item_classification_state(
+                process,
+                snapshot.id,
+            )
+            if not classification_state["ready_for_draft"]:
+                raise ValueError(
+                    "Todos os itens da DUIMP precisam ter finalidade, regra "
+                    "tributária e CFOP antes da criação do rascunho."
+                )
+            tax_rules = list(
+                {
+                    row.tax_rule.id: row.tax_rule
+                    for row in classification_map.values()
+                    if row.tax_rule
+                }.values()
+            )
+            tax_rule = tax_rules[0]
+            tax_configuration = deepcopy(tax_rule.configuration_json or {})
+        elif tax_configuration is None:
             tax_rule = self.match_import_tax_rule(
                 client_id=process.importer_id,
                 issuer_state=fiscal_profile.state,
@@ -1448,6 +1737,7 @@ class ImportNfeService:
                     "Nenhuma regra fiscal aplicável foi encontrada. Cadastre uma "
                     "regra para o cliente ou informe tax_configuration explicitamente."
                 )
+            tax_rules = [tax_rule]
             tax_configuration = deepcopy(tax_rule.configuration_json or {})
 
         additional_costs = self._merge_defaults(
@@ -1493,6 +1783,7 @@ class ImportNfeService:
             transport=transport,
             payment=payment,
             additional_info=additional_info,
+            item_classifications=classification_map or None,
         )
         fiscal_payload["source"]["tax_configuration_source"] = (
             "client_import_tax_rule" if tax_rule else "request"
@@ -1500,6 +1791,9 @@ class ImportNfeService:
         fiscal_payload["source"]["tax_rule_id"] = (
             str(tax_rule.id) if tax_rule else None
         )
+        fiscal_payload["source"]["tax_rule_ids"] = [
+            str(rule.id) for rule in tax_rules
+        ]
 
         validation = self.validate_nfe_payload(fiscal_payload)
         now = datetime.utcnow()
@@ -1545,6 +1839,10 @@ class ImportNfeService:
             "snapshot": snapshot,
             "validation": validation.to_dict(),
             "tax_rule": self._tax_rule_to_dict(tax_rule) if tax_rule else None,
+            "tax_rules": [
+                self._tax_rule_to_dict(rule)
+                for rule in tax_rules
+            ],
         }
 
     def get_nfe_draft_detail(self, draft: NfeDraft) -> dict[str, Any]:
@@ -2200,6 +2498,7 @@ class ImportNfeService:
         transport: dict[str, Any] | None = None,
         payment: dict[str, Any] | None = None,
         additional_info: dict[str, Any] | None = None,
+        item_classifications: dict[str, NfeItemClassification] | None = None,
     ) -> dict[str, Any]:
         resolved_additional_costs = self.resolve_additional_costs(
             duimp=duimp,
@@ -2208,6 +2507,7 @@ class ImportNfeService:
         items = self.map_duimp_items_to_nfe_items(
             duimp=duimp,
             import_purpose=import_purpose,
+            item_classifications=item_classifications,
         )
         item_defaults = item_defaults or {}
         for item in items:
@@ -2215,11 +2515,19 @@ class ImportNfeService:
                 item["commercial_unit"] = item_defaults["commercial_unit"]
             if item_defaults.get("taxable_unit"):
                 item["taxable_unit"] = item_defaults["taxable_unit"]
-        items, totals = self.tax_calculator.calculate(
-            items,
-            configuration=tax_configuration,
-            additional_costs=resolved_additional_costs,
-        )
+        if item_classifications:
+            items, totals = self._calculate_items_with_tax_rules(
+                items,
+                item_classifications=item_classifications,
+                fallback_configuration=tax_configuration,
+                additional_costs=resolved_additional_costs,
+            )
+        else:
+            items, totals = self.tax_calculator.calculate(
+                items,
+                configuration=tax_configuration,
+                additional_costs=resolved_additional_costs,
+            )
         expected_tax_totals = deepcopy(duimp.get("tax_totals") or {})
         icms_reference = (
             (duimp.get("automation_fiscal_references") or {}).get("icms") or {}
@@ -2258,6 +2566,13 @@ class ImportNfeService:
 
         authorization = self._authorization_metadata(items)
         document_options = document_options or {}
+        item_purposes = sorted(
+            {
+                str(item.get("import_purpose") or import_purpose)
+                for item in items
+            }
+        )
+        mixed_import_purposes = len(item_purposes) > 1
         resolved_transport = self._transport_with_automatic_weight(
             transport,
             items,
@@ -2278,7 +2593,11 @@ class ImportNfeService:
                 "series": series,
                 "number": number,
                 "operation_nature": document_options.get("operation_nature")
-                or self._default_operation_nature(import_purpose),
+                or (
+                    "Importação de mercadorias"
+                    if mixed_import_purposes
+                    else self._default_operation_nature(item_purposes[0])
+                ),
                 "presence_indicator": document_options.get(
                     "presence_indicator"
                 )
@@ -2288,6 +2607,8 @@ class ImportNfeService:
                 )
                 or "0",
                 "import_purpose": import_purpose,
+                "item_purposes": item_purposes,
+                "mixed_import_purposes": mixed_import_purposes,
                 "import_modality": duimp.get("import_modality"),
                 "currency": "BRL",
             },
@@ -2514,11 +2835,28 @@ class ImportNfeService:
             },
         }
 
-    def map_duimp_items_to_nfe_items(self, *, duimp: dict[str, Any], import_purpose: str) -> list[dict[str, Any]]:
+    def map_duimp_items_to_nfe_items(
+        self,
+        *,
+        duimp: dict[str, Any],
+        import_purpose: str,
+        item_classifications: dict[str, NfeItemClassification] | None = None,
+    ) -> list[dict[str, Any]]:
         mapped_items = []
-        cfop = self._resolve_cfop(import_purpose)
+        item_classifications = item_classifications or {}
 
         for index, item in enumerate(duimp.get("items", []), start=1):
+            classification = item_classifications.get(str(item["number"]))
+            item_purpose = (
+                classification.import_purpose
+                if classification
+                else import_purpose
+            )
+            cfop = (
+                classification.cfop
+                if classification and classification.cfop
+                else self._resolve_cfop(item_purpose)
+            )
             product_value = self._decimal(item.get("product_value"))
             quantity = self._decimal(item.get("quantity"))
             unit_value = self._decimal(item.get("unit_value"))
@@ -2542,6 +2880,17 @@ class ImportNfeService:
                     "additional_info": item_additional_info,
                     "ncm": item["ncm"],
                     "cfop": cfop,
+                    "import_purpose": item_purpose,
+                    "tax_rule_id": (
+                        str(classification.tax_rule_id)
+                        if classification and classification.tax_rule_id
+                        else None
+                    ),
+                    "item_classification_id": (
+                        str(classification.id)
+                        if classification
+                        else None
+                    ),
                     "cest": item.get("cest"),
                     "commercial_unit": item["commercial_unit"],
                     "commercial_quantity": str(quantity),
@@ -2586,6 +2935,60 @@ class ImportNfeService:
                 }
             )
         return mapped_items
+
+    def _calculate_items_with_tax_rules(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        item_classifications: dict[str, NfeItemClassification],
+        fallback_configuration: dict[str, Any],
+        additional_costs: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        rule_ids = {
+            str(row.tax_rule_id)
+            for row in item_classifications.values()
+            if row.tax_rule_id
+        }
+        if len(rule_ids) == 1:
+            only_rule = next(iter(item_classifications.values())).tax_rule
+            return self.tax_calculator.calculate(
+                items,
+                configuration=(
+                    deepcopy(only_rule.configuration_json or {})
+                    if only_rule
+                    else fallback_configuration
+                ),
+                additional_costs=additional_costs,
+            )
+
+        # O primeiro cálculo realiza um único rateio global das despesas.
+        # Em seguida cada item é recalculado com sua própria regra, sem repetir
+        # AFRMM, Siscomex, THC ou outras despesas.
+        allocated_items, _ = self.tax_calculator.calculate(
+            items,
+            configuration=fallback_configuration,
+            additional_costs=additional_costs,
+        )
+        calculated_items = []
+        for item in allocated_items:
+            classification = item_classifications.get(
+                str(item.get("duimp_item_number"))
+            )
+            configuration = (
+                deepcopy(classification.tax_rule.configuration_json or {})
+                if classification and classification.tax_rule
+                else fallback_configuration
+            )
+            calculated, _ = self.tax_calculator.calculate(
+                [item],
+                configuration=configuration,
+                additional_costs={},
+            )
+            calculated_items.append(calculated[0])
+        return (
+            calculated_items,
+            self.tax_calculator.calculate_totals(calculated_items),
+        )
 
     def calculate_nfe_totals(self, items: list[dict[str, Any]]) -> dict[str, Any]:
         return self.tax_calculator.calculate_totals(items)
@@ -2991,6 +3394,9 @@ class ImportNfeService:
             other_value=self._decimal(item_payload.get("other_value", 0)),
             import_payload=item_payload.get("import_payload"),
             tax_payload=item_payload.get("tax_payload"),
+            import_purpose=item_payload.get("import_purpose"),
+            tax_rule_id=item_payload.get("tax_rule_id"),
+            item_classification_id=item_payload.get("item_classification_id"),
             raw_source_payload=item_payload.get("raw_source_payload"),
             created_at=now,
             updated_at=now,
@@ -3017,6 +3423,13 @@ class ImportNfeService:
             "description": item.description,
             "ncm": item.ncm,
             "cfop": item.cfop,
+            "import_purpose": item.import_purpose,
+            "tax_rule_id": str(item.tax_rule_id) if item.tax_rule_id else None,
+            "item_classification_id": (
+                str(item.item_classification_id)
+                if item.item_classification_id
+                else None
+            ),
             "cest": item.cest,
             "benefit_code": (
                 ((item.tax_payload or {}).get("icms") or {}).get(

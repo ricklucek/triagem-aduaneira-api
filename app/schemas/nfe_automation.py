@@ -173,3 +173,40 @@ class NfeContextQuerySchema(Schema):
 class ResolveNfeContextSchema(NfeContextQuerySchema):
     refresh_external = fields.Boolean(load_default=True)
     overrides = fields.Dict(load_default=dict)
+
+class NfeItemClassificationQuerySchema(Schema):
+    duimp_snapshot_id = fields.UUID(load_default=None, allow_none=True)
+
+
+class NfeItemClassificationInputSchema(Schema):
+    duimp_item_number = fields.String(
+        required=True,
+        validate=validate.Length(min=1, max=30),
+    )
+    import_purpose = fields.String(
+        required=True,
+        validate=validate.OneOf(ImportPurpose.values()),
+    )
+    tax_rule_id = fields.UUID(load_default=None, allow_none=True)
+
+
+class BulkNfeItemClassificationSchema(Schema):
+    duimp_snapshot_id = fields.UUID(load_default=None, allow_none=True)
+    items = fields.List(
+        fields.Nested(NfeItemClassificationInputSchema),
+        required=True,
+        validate=validate.Length(min=1),
+    )
+
+    @validates_schema
+    def validate_unique_items(self, data, **kwargs):
+        numbers = [
+            item["duimp_item_number"]
+            for item in data.get("items") or []
+        ]
+        if len(numbers) != len(set(numbers)):
+            raise ValidationError(
+                "Cada item da DUIMP deve aparecer apenas uma vez.",
+                field_name="items",
+            )
+
