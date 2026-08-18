@@ -1677,6 +1677,7 @@ class ImportNfeService:
             .first()
         )
         version_number = (latest_version.version_number if latest_version else 0) + 1
+        generated_at = datetime.utcnow()
         row = NfeXmlVersion(
             nfe_draft_id=draft.id,
             version_number=version_number,
@@ -1686,12 +1687,12 @@ class ImportNfeService:
             xsd_errors=None,
             access_key=draft.access_key,
             generated_by_user_id=self.user_id,
-            generated_at=datetime.utcnow(),
+            generated_at=generated_at,
         )
         db.session.add(row)
 
         draft.status = NfeDraftStatus.XML_GENERATED.value
-        draft.updated_at = datetime.utcnow()
+        draft.updated_at = generated_at
 
         process = self.import_process_query_for_current_user().filter(ImportProcess.id == draft.import_process_id).first()
         if process:
