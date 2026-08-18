@@ -6,7 +6,7 @@ import pytest
 
 from app import create_app
 from app.extensions import db
-from app.models import Client, Organization, User
+from app.models import Client, NfeDraft, Organization, User
 from app.models.nfe_issuance import (
     NfeAttemptStatus,
     NfeIssuance,
@@ -929,6 +929,34 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert "Complemento informado pelo operador." in updated["draft"][
         "fiscal_payload"
     ]["additional_info"]["complementary"]
+
+    # Um processo totalmente classificado e ainda sem rascunho deve avançar
+    # diretamente para a criação do primeiro rascunho.
+    for existing_draft in NfeDraft.query.filter_by(
+        import_process_id=UUID(process_id)
+    ).all():
+        db.session.delete(existing_draft)
+    db.session.commit()
+
+    classified_workflow = client.get(
+        f"/import-processes/{process_id}/nfe-workflow-state",
+        headers=headers,
+        query_string={
+            "import_purpose": "resale",
+            "environment": "homologation",
+            "series": "1",
+        },
+    )
+    assert classified_workflow.status_code == 200
+    classified_workflow_body = classified_workflow.get_json()
+    assert (
+        classified_workflow_body["prerequisites"][
+            "item_classification_ready"
+        ]
+        is True
+    )
+    assert classified_workflow_body["latest_draft"] is None
+    assert classified_workflow_body["next_action"] == "create_draft"
 
 def test_provider_connection_post_reactivates_existing_scope(api):
     client, headers, _ = api
