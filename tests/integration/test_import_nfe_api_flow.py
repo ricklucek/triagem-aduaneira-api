@@ -249,6 +249,63 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
     assert "xml_content" not in history[0]["xml_versions"][0]
     assert "fiscal_payload" not in history[0]
 
+    original_xml_version_id = xml_version_id
+    edit_after_xml = client.patch(
+        f"/nfe-drafts/{draft_id}",
+        headers=headers,
+        json={
+            "issuer": {"state_registration": "123.456.789-0"},
+            "foreign_supplier": {"foreign_id": None},
+        },
+    )
+    assert edit_after_xml.status_code == 200, edit_after_xml.get_json()
+    assert edit_after_xml.get_json()["requires_new_xml"] is True
+    assert (
+        edit_after_xml.get_json()["draft"]["fiscal_payload"]["issuer"][
+            "state_registration"
+        ]
+        == "1234567890"
+    )
+    assert (
+        edit_after_xml.get_json()["draft"]["fiscal_payload"]["recipient"][
+            "foreign_id"
+        ]
+        is None
+    )
+
+    workflow_after_edit = client.get(
+        f"/import-processes/{process_id}/nfe-workflow-state",
+        headers=headers,
+        query_string={
+            "import_purpose": "resale",
+            "environment": "homologation",
+            "series": "1",
+        },
+    )
+    assert workflow_after_edit.status_code == 200
+    assert workflow_after_edit.get_json()["next_action"] == "generate_xml"
+
+    replacement_xml_response = client.post(
+        f"/nfe-drafts/{draft_id}/generate-xml",
+        headers=headers,
+        json={},
+    )
+    assert replacement_xml_response.status_code == 201
+    xml_body = replacement_xml_response.get_json()
+    xml_version_id = xml_body["id"]
+    assert xml_body["version_number"] == 2
+
+    replacement_xsd_response = client.post(
+        (
+            f"/nfe-drafts/{draft_id}/xml-versions/"
+            f"{xml_version_id}/validate-xsd"
+        ),
+        headers=headers,
+        json={},
+    )
+    assert replacement_xsd_response.status_code == 200
+    assert replacement_xsd_response.get_json()["xsd_valid"] is True
+
     certificate_response = client.post(
         f"/clients/{importer_id}/fiscal-certificates",
         headers=headers,
@@ -297,6 +354,17 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
     assert activation_response.get_json()["status"] == "active"
     assert activation_response.get_json()["is_active"] is True
 
+    stale_signature_response = client.post(
+        (
+            f"/nfe-drafts/{draft_id}/xml-versions/"
+            f"{original_xml_version_id}/sign"
+        ),
+        headers=headers,
+        json={"certificate_id": certificate_id},
+    )
+    assert stale_signature_response.status_code == 400
+    assert "desatualizado" in stale_signature_response.get_json()["message"]
+
     signature_response = client.post(
         f"/nfe-drafts/{draft_id}/xml-versions/{xml_version_id}/sign",
         headers=headers,
@@ -311,7 +379,7 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
     assert signature_body["replayed"] is False
     assert signature_body["issuance"]["status"] == "signed"
     assert signed_version["xml_type"] == "SIGNED"
-    assert signed_version["version_number"] == 1
+    assert signed_version["version_number"] == 2
     assert signed_version["xsd_valid"] is True
     assert signed_version["xsd_errors"] == []
     assert "<Signature" in signed_version["xml_content"]
@@ -339,7 +407,7 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
     assert signed_download.status_code == 200
     assert b"<Signature" in signed_download.data
     assert (
-        f"NFe-{xml_body['access_key']}-signed-v1.xml"
+        f"NFe-{xml_body['access_key']}-signed-v2.xml"
         in signed_download.headers["Content-Disposition"]
     )
 
@@ -627,8 +695,12 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
             "document": {
                 "operation_nature": "Importação para revenda"
             },
+            "issuer": {
+                "state_registration": "123.456.789-0",
+            },
             "foreign_supplier": {
                 "legal_name": "Foreign Supplier Corrected Ltd",
+                "foreign_id": None,
                 "country_code": "1600",
                 "country_name": "CHINA",
                 "address": {
@@ -663,7 +735,10 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert updated_document["intermediary_indicator"] == "0"
     assert updated_document["environment"] == "homologation"
     assert updated_document["series"] == "1"
+    updated_issuer = updated["draft"]["fiscal_payload"]["issuer"]
+    assert updated_issuer["state_registration"] == "1234567890"
     updated_recipient = updated["draft"]["fiscal_payload"]["recipient"]
+    assert updated_recipient["foreign_id"] is None
     assert updated_recipient["legal_name"] == (
         "Foreign Supplier Corrected Ltd"
     )
