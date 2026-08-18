@@ -480,6 +480,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
             "tax_regime": "3",
             "priority": 100,
             "configuration_json": {
+                "cfop": "3102",
                 "icms_rate": "12",
                 "icms_origin": "1",
                 "icms_cst": "90",
@@ -522,6 +523,33 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert rule_response.status_code == 201, rule_response.get_json()
     rule_id = rule_response.get_json()["id"]
 
+    consumption_rule_response = client.post(
+        f"/clients/{importer_id}/import-tax-rules",
+        headers=headers,
+        json={
+            "name": "PR uso e consumo direta",
+            "issuer_state": "PR",
+            "import_purpose": "use_consumption",
+            "import_modality": "direct",
+            "tax_regime": "3",
+            "priority": 100,
+            "configuration_json": {
+                "cfop": "3556",
+                "icms_rate": "12",
+                "icms_origin": "1",
+                "icms_cst": "90",
+                "ipi_cst": "49",
+                "pis_cst": "98",
+                "cofins_cst": "98",
+                "document_defaults": {
+                    "operation_nature": "Importação para uso ou consumo",
+                },
+            },
+        },
+    )
+    assert consumption_rule_response.status_code == 201
+    consumption_rule_id = consumption_rule_response.get_json()["id"]
+
     process_response = client.post(
         "/import-processes",
         headers=headers,
@@ -550,7 +578,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
                     {
                         "numeroItem": "1",
                         "codigoProduto": "PROD-001",
-                        "descricao": "Produto automatizado",
+                        "descricao": "Produto automatizado para revenda",
                         "ncm": "87087090",
                         "quantidade": "2",
                         "unidade": "UN",
@@ -563,7 +591,24 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
                             "pis": {"base": "100", "rate": "3.12", "value": "3.12"},
                             "cofins": {"base": "100", "rate": "14.37", "value": "14.37"},
                         },
-                    }
+                    },
+                    {
+                        "numeroItem": "2",
+                        "codigoProduto": "PROD-002",
+                        "descricao": "Produto automatizado para uso e consumo",
+                        "ncm": "84212300",
+                        "quantidade": "1",
+                        "unidade": "UN",
+                        "pesoLiquido": "1.000",
+                        "valorProduto": "50.00",
+                        "valorUnitario": "50.00",
+                        "tributos": {
+                            "ii": {"base": "50", "rate": "16", "value": "8"},
+                            "ipi": {"base": "58", "rate": "3.25", "value": "1.89"},
+                            "pis": {"base": "50", "rate": "3.12", "value": "1.56"},
+                            "cofins": {"base": "50", "rate": "14.37", "value": "7.19"},
+                        },
+                    },
                 ],
             },
         },
@@ -700,8 +745,11 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         query_string={"duimp_snapshot_id": snapshot_id},
     )
     assert classification_before.status_code == 200
-    assert classification_before.get_json()["pending_count"] == 1
-    assert classification_before.get_json()["items"][0]["status"] == "unclassified"
+    assert classification_before.get_json()["pending_count"] == 2
+    assert all(
+        item["status"] == "unclassified"
+        for item in classification_before.get_json()["items"]
+    )
 
     classification_saved = client.put(
         f"/import-processes/{process_id}/item-classifications",
@@ -712,15 +760,54 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
                 {
                     "duimp_item_number": "1",
                     "import_purpose": "resale",
-                }
+                },
+                {
+                    "duimp_item_number": "2",
+                    "import_purpose": "use_consumption",
+                },
             ],
         },
     )
     assert classification_saved.status_code == 200, classification_saved.get_json()
     classification_body = classification_saved.get_json()
     assert classification_body["ready_for_draft"] is True
-    assert classification_body["items"][0]["cfop"] == "3102"
-    assert classification_body["items"][0]["tax_rule"]["id"] == rule_id
+    classified_items = {
+        item["duimp_item_number"]: item
+        for item in classification_body["items"]
+    }
+    assert classified_items["1"]["cfop"] == "3102"
+    assert classified_items["1"]["tax_rule"]["id"] == rule_id
+    assert classified_items["2"]["cfop"] == "3556"
+    assert (
+        classified_items["2"]["tax_rule"]["id"]
+        == consumption_rule_id
+    )
+
+    mixed_draft_response = client.post(
+        f"/import-processes/{process_id}/nfe-draft/from-duimp",
+        headers=headers,
+        json={
+            "environment": "homologation",
+            "series": "1",
+            "import_purpose": "resale",
+            "duimp_snapshot_id": snapshot_id,
+        },
+    )
+    assert mixed_draft_response.status_code == 201, mixed_draft_response.get_json()
+    mixed_payload = mixed_draft_response.get_json()["draft"]["fiscal_payload"]
+    assert mixed_payload["document"]["mixed_import_purposes"] is True
+    assert (
+        mixed_payload["document"]["operation_nature"]
+        == "Importação de mercadorias"
+    )
+    mixed_items = {
+        item["duimp_item_number"]: item
+        for item in mixed_payload["items"]
+    }
+    assert mixed_items["1"]["import_purpose"] == "resale"
+    assert mixed_items["1"]["cfop"] == "3102"
+    assert mixed_items["2"]["import_purpose"] == "use_consumption"
+    assert mixed_items["2"]["cfop"] == "3556"
 
     draft_id = body["draft"]["id"]
     update_response = client.patch(
