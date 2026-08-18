@@ -200,13 +200,18 @@ class NfeContextResolver:
             )
             for field in self.REQUIRED_DUIMP_FIELDS
         }
-        supplier_country_code = (resolved.get("foreign_supplier") or {}).get(
-            "country_code"
-        )
+        supplier = resolved.get("foreign_supplier") or {}
+        supplier_country_code = supplier.get("country_code")
+        supplier_country_name = supplier.get("country_name")
         fields["foreign_supplier.country_code"] = self._field(
             supplier_country_code,
             sources.get("foreign_supplier.country_code")
             or previous_sources.get("foreign_supplier.country_code"),
+        )
+        fields["foreign_supplier.country_name"] = self._field(
+            supplier_country_name,
+            sources.get("foreign_supplier.country_name")
+            or previous_sources.get("foreign_supplier.country_name"),
         )
 
         missing = [
@@ -216,6 +221,8 @@ class NfeContextResolver:
         ]
         if not supplier_country_code:
             missing.append("foreign_supplier.country_code")
+        if not supplier_country_name:
+            missing.append("foreign_supplier.country_name")
 
         pcce = external.get("icms_declaration")
         suggested_costs: dict[str, str] = {}
