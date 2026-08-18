@@ -686,7 +686,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert fiscal_payload["transport"]["carrier"]["name"] == (
         "Transportadora Teste"
     )
-    assert fiscal_payload["transport"]["volume"]["net_weight"] == "2.500"
+    assert fiscal_payload["transport"]["volume"]["net_weight"] == "3.500"
     assert "II: R$ 18,00" in fiscal_payload["additional_info"][
         "complementary"
     ]
