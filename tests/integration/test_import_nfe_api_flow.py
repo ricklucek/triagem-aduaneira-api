@@ -367,7 +367,7 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
         json={"certificate_id": certificate_id},
     )
     assert stale_signature_response.status_code == 400
-    assert "desatualizado" in stale_signature_response.get_json()["message"]
+    assert "mais recente" in stale_signature_response.get_json()["message"]
 
     signature_response = client.post(
         f"/nfe-drafts/{draft_id}/xml-versions/{xml_version_id}/sign",
