@@ -333,6 +333,13 @@ class UpdateNfeDraftItemSchema(Schema):
     tax_payload = fields.Dict(allow_none=True)
 
 
+class NfeIssuerUpdateSchema(Schema):
+    state_registration = fields.String(
+        allow_none=True,
+        validate=validate.Length(min=2, max=20),
+    )
+
+
 class NfeForeignSupplierAddressUpdateSchema(Schema):
     street = fields.String(allow_none=True, validate=validate.Length(max=60))
     number = fields.String(allow_none=True, validate=validate.Length(max=60))
@@ -367,6 +374,7 @@ class NfeForeignSupplierUpdateSchema(Schema):
 
 class UpdateNfeDraftSchema(Schema):
     document = fields.Nested(NfeDocumentOptionsSchema)
+    issuer = fields.Nested(NfeIssuerUpdateSchema)
     foreign_supplier = fields.Nested(NfeForeignSupplierUpdateSchema)
     item_defaults = fields.Nested(NfeItemDefaultsSchema)
     transport = fields.Nested(NfeTransportSchema)
