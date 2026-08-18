@@ -462,8 +462,6 @@ class ImportNfeService:
                     Client.cnpj.ilike(term),
                     ImportProcess.reference_code.ilike(term),
                     ImportProcess.duimp_number.ilike(term),
-                    ImportProcess.status.ilike(term),
-                    ImportProcess.source.ilike(term),
                 )
             )
         return query
