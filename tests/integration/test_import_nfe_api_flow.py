@@ -7,6 +7,7 @@ import pytest
 from app import create_app
 from app.extensions import db
 from app.models import Client, NfeDraft, Organization, User
+from app.services.import_process import ImportNfeService
 from app.models.nfe_issuance import (
     NfeAttemptStatus,
     NfeIssuance,
@@ -957,6 +958,19 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     )
     assert classified_workflow_body["latest_draft"] is None
     assert classified_workflow_body["next_action"] == "create_draft"
+    assert classified_workflow_body["current_step"] == "drafts"
+    assert classified_workflow_body["furthest_available_step"] == "drafts"
+    assert [
+        (step["key"], step["status"], step["can_view"])
+        for step in classified_workflow_body["steps"]
+    ] == [
+        ("duimp", "completed", True),
+        ("context", "completed", True),
+        ("purposes", "completed", True),
+        ("drafts", "current", True),
+        ("xml", "blocked", False),
+        ("review", "blocked", False),
+    ]
 
 def test_provider_connection_post_reactivates_existing_scope(api):
     client, headers, _ = api
@@ -1003,7 +1017,10 @@ def test_provider_connection_post_reactivates_existing_scope(api):
     assert listed.status_code == 200
     assert listed.get_json()["total"] == 1
 
-def test_process_dashboard_groups_by_client_and_exposes_next_action(api):
+def test_process_dashboard_groups_by_client_and_exposes_next_action(
+    api,
+    monkeypatch,
+):
     client, headers, importer_id = api
 
     existing_client = db.session.get(Client, UUID(importer_id))
@@ -1029,10 +1046,21 @@ def test_process_dashboard_groups_by_client_and_exposes_next_action(api):
     )
     assert created.status_code == 201
 
-    grouped = client.get(
-        "/import-processes/client-groups?q=11222333000181&created_by_me=true",
-        headers=headers,
-    )
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            ImportNfeService,
+            "build_import_process_list_summary",
+            lambda *_args, **_kwargs: pytest.fail(
+                "O agrupamento não deve recalcular o workflow por processo."
+            ),
+        )
+        grouped = client.get(
+            (
+                "/import-processes/client-groups"
+                "?q=11222333000181&created_by_me=true"
+            ),
+            headers=headers,
+        )
     assert grouped.status_code == 200
     grouped_body = grouped.get_json()
     assert grouped_body["total"] == 1
