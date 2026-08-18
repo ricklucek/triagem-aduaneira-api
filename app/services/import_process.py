@@ -591,6 +591,12 @@ class ImportNfeService:
             next_action = "generate_access_key"
         elif latest_xml is None:
             next_action = "generate_xml"
+        elif (
+            latest_draft.updated_at
+            and latest_xml.generated_at
+            and latest_draft.updated_at > latest_xml.generated_at
+        ):
+            next_action = "generate_xml"
         elif latest_xml.xsd_valid is not True:
             next_action = "validate_xml"
         else:
@@ -1457,12 +1463,37 @@ class ImportNfeService:
                     payload[section],
                 )
 
+        if "issuer" in payload:
+            issuer_update = deepcopy(payload["issuer"] or {})
+            if "state_registration" in issuer_update:
+                state_registration = str(
+                    issuer_update.get("state_registration") or ""
+                ).strip().upper()
+                normalized_ie = (
+                    "ISENTO"
+                    if state_registration == "ISENTO"
+                    else self._digits(state_registration)
+                )
+                if normalized_ie != "ISENTO" and not (
+                    2 <= len(normalized_ie) <= 14
+                ):
+                    raise ValueError(
+                        "A inscrição estadual deve ser ISENTO ou conter "
+                        "entre 2 e 14 dígitos."
+                    )
+                fiscal_payload.setdefault("issuer", {})[
+                    "state_registration"
+                ] = normalized_ie
+
         if "foreign_supplier" in payload:
             supplier_update = deepcopy(payload["foreign_supplier"] or {})
             recipient_update: dict[str, Any] = {}
-            for field in ("legal_name", "foreign_id"):
-                if supplier_update.get(field) not in (None, ""):
-                    recipient_update[field] = supplier_update[field]
+            if supplier_update.get("legal_name") not in (None, ""):
+                recipient_update["legal_name"] = supplier_update["legal_name"]
+            if "foreign_id" in supplier_update:
+                recipient_update["foreign_id"] = self._empty_to_none(
+                    supplier_update.get("foreign_id")
+                )
 
             address_update = deepcopy(supplier_update.get("address") or {})
             for field in (
@@ -1738,6 +1769,15 @@ class ImportNfeService:
         if xml_version.xsd_valid is not True:
             raise ValueError(
                 "O XML não assinado deve ser aprovado no XSD antes da assinatura."
+            )
+        if (
+            draft.updated_at
+            and xml_version.generated_at
+            and draft.updated_at > xml_version.generated_at
+        ):
+            raise ValueError(
+                "O XML está desatualizado em relação ao rascunho. "
+                "Gere e valide uma nova versão antes de assinar."
             )
         latest_unsigned = (
             NfeXmlVersion.query.filter(
