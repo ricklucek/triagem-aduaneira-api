@@ -995,23 +995,17 @@ class ImportNfeService:
 
         matches: list[ClientImportTaxRule] = []
         for rule in query.all():
-            if rule.issuer_state != issuer_state:
-                continue
-            if rule.import_purpose != import_purpose:
-                continue
-            if rule.tax_regime and rule.tax_regime != tax_regime:
-                continue
-            if rule.import_modality and rule.import_modality != import_modality:
-                continue
-            if reference_date:
-                if rule.effective_from and reference_date < rule.effective_from:
-                    continue
-                if rule.effective_until and reference_date > rule.effective_until:
-                    continue
-            pattern = self._digits(rule.ncm_pattern)
-            if pattern and (not ncms or not all(ncm.startswith(pattern) for ncm in ncms)):
-                continue
-            matches.append(rule)
+            reasons = self._tax_rule_mismatch_reasons(
+                rule,
+                issuer_state=issuer_state,
+                tax_regime=tax_regime,
+                import_purpose=import_purpose,
+                import_modality=import_modality,
+                ncms=ncms,
+                reference_date=reference_date,
+            )
+            if not reasons:
+                matches.append(rule)
 
         def score(rule: ClientImportTaxRule):
             return (
@@ -1033,6 +1027,39 @@ class ImportNfeService:
                 "Ajuste a prioridade ou o escopo das regras."
             )
         return matches[0] if matches else None
+
+    def _tax_rule_mismatch_reasons(
+        self,
+        rule: ClientImportTaxRule,
+        *,
+        issuer_state: str,
+        tax_regime: str,
+        import_purpose: str,
+        import_modality: str | None,
+        ncms: list[str],
+        reference_date: date | None,
+    ) -> list[str]:
+        reasons: list[str] = []
+        if rule.issuer_state != issuer_state:
+            reasons.append("issuer_state")
+        if rule.import_purpose != import_purpose:
+            reasons.append("import_purpose")
+        if rule.tax_regime and rule.tax_regime != tax_regime:
+            reasons.append("tax_regime")
+        if rule.import_modality and rule.import_modality != import_modality:
+            reasons.append("import_modality")
+        if reference_date:
+            if rule.effective_from and reference_date < rule.effective_from:
+                reasons.append("effective_from")
+            if rule.effective_until and reference_date > rule.effective_until:
+                reasons.append("effective_until")
+        pattern = self._digits(rule.ncm_pattern)
+        if pattern and (
+            not ncms
+            or not all(ncm.startswith(pattern) for ncm in ncms)
+        ):
+            reasons.append("ncm_pattern")
+        return reasons
 
     @staticmethod
     def _validate_import_tax_rule(rule: ClientImportTaxRule) -> None:
@@ -1480,6 +1507,20 @@ class ImportNfeService:
             str(row.duimp_item_number): row
             for row in rows
         }
+        profile = self.get_importer_fiscal_profile_or_none(
+            process.importer_id
+        )
+        active_rules = (
+            self.import_tax_rule_query_for_current_user()
+            .filter(
+                ClientImportTaxRule.client_id == process.importer_id,
+                ClientImportTaxRule.active.is_(True),
+            )
+            .all()
+        )
+        registration_date = self._date_value(
+            normalized.get("registration_date")
+        )
         items = []
         purpose_counts: dict[str, int] = {}
         latest_updated_at = None
@@ -1514,6 +1555,58 @@ class ImportNfeService:
                 if rule
                 else ""
             )
+            rule_candidates = []
+            if (
+                purpose
+                and status != "classified"
+                and profile is not None
+            ):
+                item_ncms = [self._digits(source.get("ncm"))]
+                for candidate in active_rules:
+                    if candidate.import_purpose != purpose:
+                        continue
+                    reasons = self._tax_rule_mismatch_reasons(
+                        candidate,
+                        issuer_state=profile.state,
+                        tax_regime=profile.tax_regime,
+                        import_purpose=purpose,
+                        import_modality=normalized.get("import_modality"),
+                        ncms=item_ncms,
+                        reference_date=registration_date,
+                    )
+                    rule_candidates.append(
+                        {
+                            "id": str(candidate.id),
+                            "name": candidate.name,
+                            "mismatch_reasons": reasons,
+                            "issuer_state": candidate.issuer_state,
+                            "tax_regime": candidate.tax_regime,
+                            "import_modality": candidate.import_modality,
+                            "ncm_pattern": candidate.ncm_pattern,
+                            "effective_from": (
+                                candidate.effective_from.isoformat()
+                                if candidate.effective_from
+                                else None
+                            ),
+                            "effective_until": (
+                                candidate.effective_until.isoformat()
+                                if candidate.effective_until
+                                else None
+                            ),
+                            "cfop": str(
+                                (candidate.configuration_json or {}).get(
+                                    "cfop"
+                                )
+                                or self._resolve_cfop(purpose)
+                            ),
+                        }
+                    )
+                rule_candidates.sort(
+                    key=lambda candidate: (
+                        len(candidate["mismatch_reasons"]),
+                        candidate["name"],
+                    )
+                )
             items.append(
                 {
                     "duimp_item_number": number,
@@ -1543,6 +1636,7 @@ class ImportNfeService:
                         else None
                     ),
                     "status": status,
+                    "rule_candidates": rule_candidates[:3],
                     "classified_by": (
                         {
                             "id": str(row.classified_by.id),
@@ -1566,6 +1660,11 @@ class ImportNfeService:
             "classified_count": classified_count,
             "pending_count": len(items) - classified_count,
             "purpose_counts": purpose_counts,
+            "registration_date": (
+                registration_date.isoformat()
+                if registration_date
+                else None
+            ),
             "has_classifications": bool(rows),
             "ready_for_draft": bool(items)
             and classified_count == len(items),
