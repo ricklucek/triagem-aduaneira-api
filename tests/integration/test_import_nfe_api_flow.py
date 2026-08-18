@@ -533,6 +533,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
             "import_modality": "direct",
             "tax_regime": "3",
             "priority": 100,
+            "effective_from": "2026-08-18",
             "configuration_json": {
                 "cfop": "3556",
                 "icms_rate": "12",
@@ -770,13 +771,54 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     )
     assert classification_saved.status_code == 200, classification_saved.get_json()
     classification_body = classification_saved.get_json()
-    assert classification_body["ready_for_draft"] is True
+    assert classification_body["ready_for_draft"] is False
+    assert classification_body["registration_date"] == "2026-07-14"
     classified_items = {
         item["duimp_item_number"]: item
         for item in classification_body["items"]
     }
     assert classified_items["1"]["cfop"] == "3102"
     assert classified_items["1"]["tax_rule"]["id"] == rule_id
+    assert classified_items["2"]["status"] == "missing_tax_rule"
+    candidate = classified_items["2"]["rule_candidates"][0]
+    assert candidate["id"] == consumption_rule_id
+    assert candidate["mismatch_reasons"] == ["effective_from"]
+    assert candidate["effective_from"] == "2026-08-18"
+
+    rule_update = client.put(
+        (
+            f"/clients/{importer_id}/import-tax-rules/"
+            f"{consumption_rule_id}"
+        ),
+        headers=headers,
+        json={"effective_from": "2026-07-14"},
+    )
+    assert rule_update.status_code == 200, rule_update.get_json()
+
+    classification_reapplied = client.put(
+        f"/import-processes/{process_id}/item-classifications",
+        headers=headers,
+        json={
+            "duimp_snapshot_id": snapshot_id,
+            "items": [
+                {
+                    "duimp_item_number": "1",
+                    "import_purpose": "resale",
+                },
+                {
+                    "duimp_item_number": "2",
+                    "import_purpose": "use_consumption",
+                },
+            ],
+        },
+    )
+    assert classification_reapplied.status_code == 200
+    classification_body = classification_reapplied.get_json()
+    assert classification_body["ready_for_draft"] is True
+    classified_items = {
+        item["duimp_item_number"]: item
+        for item in classification_body["items"]
+    }
     assert classified_items["2"]["cfop"] == "3556"
     assert (
         classified_items["2"]["tax_rule"]["id"]
