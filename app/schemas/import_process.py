@@ -333,8 +333,41 @@ class UpdateNfeDraftItemSchema(Schema):
     tax_payload = fields.Dict(allow_none=True)
 
 
+class NfeForeignSupplierAddressUpdateSchema(Schema):
+    street = fields.String(allow_none=True, validate=validate.Length(max=60))
+    number = fields.String(allow_none=True, validate=validate.Length(max=60))
+    complement = fields.String(allow_none=True, validate=validate.Length(max=60))
+    district = fields.String(allow_none=True, validate=validate.Length(max=60))
+    city_name = fields.String(allow_none=True, validate=validate.Length(max=60))
+
+
+class NfeForeignSupplierUpdateSchema(Schema):
+    legal_name = fields.String(
+        allow_none=True,
+        validate=validate.Length(min=1, max=60),
+    )
+    foreign_id = fields.String(allow_none=True, validate=validate.Length(max=20))
+    country_code = fields.String(
+        allow_none=True,
+        validate=validate.Length(min=1, max=4),
+    )
+    country_name = fields.String(
+        allow_none=True,
+        validate=validate.Length(min=1, max=60),
+    )
+    country_iso_alpha_2 = fields.String(
+        allow_none=True,
+        validate=validate.Length(equal=2),
+    )
+    address = fields.Nested(
+        NfeForeignSupplierAddressUpdateSchema,
+        allow_none=True,
+    )
+
+
 class UpdateNfeDraftSchema(Schema):
     document = fields.Nested(NfeDocumentOptionsSchema)
+    foreign_supplier = fields.Nested(NfeForeignSupplierUpdateSchema)
     item_defaults = fields.Nested(NfeItemDefaultsSchema)
     transport = fields.Nested(NfeTransportSchema)
     payment = fields.Nested(NfePaymentSchema)
