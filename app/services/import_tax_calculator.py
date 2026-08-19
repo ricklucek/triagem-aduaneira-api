@@ -21,6 +21,7 @@ class ImportTaxCalculator:
         *,
         configuration: dict[str, Any],
         additional_costs: dict[str, Any] | None = None,
+        preallocated_costs: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, str]]:
         if not items:
             raise ImportTaxCalculationError("Não existem itens para calcular.")
@@ -125,7 +126,7 @@ class ImportTaxCalculator:
                 "para ratear as despesas adicionais."
             )
 
-        if cost_totals["afrmm"] and len(items) > 1 and any(
+        if preallocated_costs is None and cost_totals["afrmm"] and len(items) > 1 and any(
             weight <= 0 for weight in net_weight_weights
         ):
             raise ImportTaxCalculationError(
@@ -133,17 +134,35 @@ class ImportTaxCalculator:
                 "ratear o AFRMM."
             )
 
-        allocations = {
-            "afrmm": self.allocate(
-                cost_totals["afrmm"],
-                net_weight_weights if len(items) > 1 else [Decimal("1")],
-            ),
-            "siscomex_fee": self.allocate(
-                cost_totals["siscomex_fee"], customs_value_weights
-            ),
-            "thc": self.allocate(cost_totals["thc"], customs_value_weights),
-            "other": self.allocate(cost_totals["other"], customs_value_weights),
-        }
+        if preallocated_costs is not None:
+            if len(preallocated_costs) != len(items):
+                raise ImportTaxCalculationError(
+                    "O rateio persistido precisa corresponder aos itens da NF-e."
+                )
+            allocations = {
+                name: [
+                    self._money(row.get(name))
+                    for row in preallocated_costs
+                ]
+                for name in ("afrmm", "siscomex_fee", "thc", "other")
+            }
+            for name, values in allocations.items():
+                if sum(values, Decimal("0")) != cost_totals[name]:
+                    raise ImportTaxCalculationError(
+                        f"O rateio persistido de {name} não confere com o total da NF-e."
+                    )
+        else:
+            allocations = {
+                "afrmm": self.allocate(
+                    cost_totals["afrmm"],
+                    net_weight_weights if len(items) > 1 else [Decimal("1")],
+                ),
+                "siscomex_fee": self.allocate(
+                    cost_totals["siscomex_fee"], customs_value_weights
+                ),
+                "thc": self.allocate(cost_totals["thc"], customs_value_weights),
+                "other": self.allocate(cost_totals["other"], customs_value_weights),
+            }
 
         icms_base_allocations: list[Decimal] | None = None
         if (

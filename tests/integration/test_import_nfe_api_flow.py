@@ -1245,9 +1245,92 @@ def test_document_plan_groups_exporters_and_reconciles_shared_costs(api):
     )
     assert workflow.status_code == 200, workflow.get_json()
     workflow_body = workflow.get_json()
-    assert workflow_body["next_action"] == "review_document_plan"
-    assert workflow_body["current_step"] == "planning"
+    assert workflow_body["next_action"] == "create_child_drafts"
+    assert workflow_body["current_step"] == "drafts"
     assert workflow_body["prerequisites"]["planned_documents_count"] == 2
+
+    generated = client.post(
+        f"/import-processes/{process_id}/nfe-document-plan/generate-drafts",
+        headers=headers,
+        json={
+            "duimp_snapshot_id": snapshot_id,
+            "environment": "homologation",
+            "series": "1",
+        },
+    )
+    assert generated.status_code == 201, generated.get_json()
+    generated_body = generated.get_json()
+    assert len(generated_body["created_draft_ids"]) == 2
+    assert generated_body["plan"]["progress"]["all_drafts_created"] is True
+    child_documents = generated_body["plan"]["documents"]
+    assert all(document["draft"] for document in child_documents)
+    assert len({document["draft"]["id"] for document in child_documents}) == 2
+
+    replayed = client.post(
+        f"/import-processes/{process_id}/nfe-document-plan/generate-drafts",
+        headers=headers,
+        json={
+            "duimp_snapshot_id": snapshot_id,
+            "environment": "homologation",
+            "series": "1",
+        },
+    )
+    assert replayed.status_code == 200, replayed.get_json()
+    assert replayed.get_json()["created_draft_ids"] == []
+    assert len(replayed.get_json()["reused_draft_ids"]) == 2
+
+    drafts = client.get(
+        f"/import-processes/{process_id}/nfe-drafts",
+        headers=headers,
+    ).get_json()["items"]
+    assert len(drafts) == 2
+    assert {draft["items_count"] for draft in drafts} == {1, 2}
+
+    sequence = client.put(
+        f"/clients/{importer_id}/nfe-number-sequences",
+        headers=headers,
+        json={
+            "environment": "homologation",
+            "model": "55",
+            "series": "1",
+            "current_number": 100,
+        },
+    )
+    assert sequence.status_code == 200, sequence.get_json()
+
+    xml_batch = client.post(
+        f"/import-processes/{process_id}/nfe-document-plan/generate-xmls",
+        headers=headers,
+        json={"duimp_snapshot_id": snapshot_id},
+    )
+    assert xml_batch.status_code == 200, xml_batch.get_json()
+    xml_body = xml_batch.get_json()
+    assert len(xml_body["results"]) == 2
+    assert xml_body["all_valid"] is True
+    assert all(result.get("xml_version_id") for result in xml_body["results"]), xml_body
+    xml_documents = xml_body["plan"]["documents"]
+    assert len({document["draft"]["number"] for document in xml_documents}) == 2
+    assert len({document["draft"]["access_key"] for document in xml_documents}) == 2
+
+    bundle = client.get(
+        f"/import-processes/{process_id}/nfe-document-plan/xmls/download",
+        headers=headers,
+        query_string={"duimp_snapshot_id": snapshot_id},
+    )
+    assert bundle.status_code == 200
+    assert bundle.content_type == "application/zip"
+
+    completed_workflow = client.get(
+        f"/import-processes/{process_id}/nfe-workflow-state",
+        headers=headers,
+        query_string={
+            "import_purpose": "resale",
+            "environment": "homologation",
+            "series": "1",
+        },
+    )
+    assert completed_workflow.status_code == 200
+    assert completed_workflow.get_json()["next_action"] == "completed"
 
     legacy_draft = client.post(
         f"/import-processes/{process_id}/nfe-draft/from-duimp",

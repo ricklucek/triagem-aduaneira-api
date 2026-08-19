@@ -342,6 +342,13 @@ class CreateNfeDocumentPlanSchema(Schema):
                 )
 
 
+class GenerateNfeChildDraftsSchema(CreateNfeDraftFromDuimpSchema):
+    import_purpose = fields.String(
+        load_default=ImportPurpose.RESALE.value,
+        validate=validate.OneOf(ImportPurpose.values()),
+    )
+
+
 class UpdateNfeDraftItemSchema(Schema):
     product_code = fields.String(validate=validate.Length(min=1, max=80))
     description = fields.String(validate=validate.Length(min=1, max=500))

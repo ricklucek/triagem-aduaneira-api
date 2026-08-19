@@ -415,7 +415,7 @@ class NfeDocumentPlan(Base):
 
 
 class NfePlannedDocument(Base):
-    """NF-e filha planejada; ainda não possui número, chave ou XML."""
+    """NF-e filha planejada; seus artefatos fiscais vivem em rascunhos próprios."""
 
     __tablename__ = "nfe_planned_documents"
 
@@ -455,6 +455,12 @@ class NfePlannedDocument(Base):
         lazy=True,
         cascade="all, delete-orphan",
         order_by="NfePlannedDocumentItem.duimp_item_number",
+    )
+    drafts = relationship(
+        "NfeDraft",
+        back_populates="planned_document",
+        lazy=True,
+        order_by="NfeDraft.created_at",
     )
 
     __table_args__ = (
@@ -539,6 +545,12 @@ class NfeDraft(Base):
 
     importer_id = Column(UUID(as_uuid=True), ForeignKey("clients.id"), nullable=False, index=True)
     duimp_snapshot_id = Column(UUID(as_uuid=True), ForeignKey("duimp_snapshots.id"), nullable=True, index=True)
+    planned_document_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("nfe_planned_documents.id"),
+        nullable=True,
+        index=True,
+    )
 
     model = enum_column(NfeModel, name="nfe_model", default=NfeModel.NFE.value, length=2)
     purpose = enum_column(NfePurpose, name="nfe_purpose", default=NfePurpose.NORMAL.value)
@@ -572,6 +584,10 @@ class NfeDraft(Base):
     import_process = relationship("ImportProcess", back_populates="nfe_drafts")
     importer = relationship("Client", foreign_keys=[importer_id])
     duimp_snapshot = relationship("DuimpSnapshot")
+    planned_document = relationship(
+        "NfePlannedDocument",
+        back_populates="drafts",
+    )
     items = relationship("NfeDraftItem", back_populates="nfe_draft", lazy=True, cascade="all, delete-orphan")
     xml_versions = relationship("NfeXmlVersion", back_populates="nfe_draft", lazy=True, cascade="all, delete-orphan")
 

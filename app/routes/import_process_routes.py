@@ -1,4 +1,7 @@
-from flask import Blueprint, g, jsonify, request
+from io import BytesIO
+from zipfile import ZIP_DEFLATED, ZipFile
+
+from flask import Blueprint, Response, g, jsonify, request
 from marshmallow import ValidationError
 
 from ..auth import auth_required
@@ -26,6 +29,7 @@ from ..schemas.import_process import (
     CreateImportProcessSchema,
     CreateNfeDocumentPlanSchema,
     FetchDuimpSchema,
+    GenerateNfeChildDraftsSchema,
     CreateManualDuimpSnapshotSchema,
     CreateNfeDraftFromDuimpSchema,
     DuimpSnapshotSchema,
@@ -38,6 +42,7 @@ from ..schemas.import_process import (
     UpdateImportProcessSchema,
 )
 from ..services.import_process import ImportNfeService
+from ..services.nfe_xsd_validator import NfeXsdConfigurationError
 from .route_helpers import (
     bad_request_response,
     json_payload,
@@ -291,6 +296,21 @@ def list_process_nfe_drafts(process_id: str):
                     if draft.duimp_snapshot_id
                     else None
                 ),
+                "planned_document_id": (
+                    str(draft.planned_document_id)
+                    if draft.planned_document_id
+                    else None
+                ),
+                "exporter_code": (
+                    draft.planned_document.exporter_code
+                    if draft.planned_document
+                    else None
+                ),
+                "foreign_supplier": (
+                    draft.planned_document.foreign_supplier
+                    if draft.planned_document
+                    else None
+                ),
                 "items_count": (
                     NfeDraftItem.query
                     .filter(NfeDraftItem.nfe_draft_id == draft.id)
@@ -371,6 +391,104 @@ def create_process_nfe_document_plan(process_id: str):
     except ValueError as exc:
         db.session.rollback()
         return bad_request_response(exc)
+
+
+@import_process_bp.post("/<process_id>/nfe-document-plan/generate-drafts")
+@auth_required
+def generate_process_nfe_child_drafts(process_id: str):
+    process_uuid = uuid_or_404(process_id)
+    service = _service()
+    process = (
+        service.import_process_query_for_current_user()
+        .filter_by(id=process_uuid)
+        .first_or_404()
+    )
+    try:
+        payload = GenerateNfeChildDraftsSchema().load(json_payload())
+        result = service.generate_child_drafts(process, payload)
+        db.session.commit()
+        return jsonify(result), 201 if result["created_draft_ids"] else 200
+    except ValidationError as exc:
+        db.session.rollback()
+        return validation_error_response(exc)
+    except ValueError as exc:
+        db.session.rollback()
+        return bad_request_response(exc)
+
+
+@import_process_bp.post("/<process_id>/nfe-document-plan/generate-xmls")
+@auth_required
+def generate_process_nfe_child_xmls(process_id: str):
+    process_uuid = uuid_or_404(process_id)
+    service = _service()
+    process = (
+        service.import_process_query_for_current_user()
+        .filter_by(id=process_uuid)
+        .first_or_404()
+    )
+    try:
+        result = service.generate_and_validate_child_xmls(
+            process,
+            (json_payload() or {}).get("duimp_snapshot_id"),
+        )
+        db.session.commit()
+        return jsonify(result)
+    except NfeXsdConfigurationError as exc:
+        db.session.rollback()
+        return jsonify({"error": "xsd_schema_unavailable", "message": str(exc)}), 503
+    except ValueError as exc:
+        db.session.rollback()
+        return bad_request_response(exc)
+
+
+@import_process_bp.get("/<process_id>/nfe-document-plan/xmls/download")
+@auth_required
+def download_process_nfe_child_xmls(process_id: str):
+    process_uuid = uuid_or_404(process_id)
+    service = _service()
+    process = (
+        service.import_process_query_for_current_user()
+        .filter_by(id=process_uuid)
+        .first_or_404()
+    )
+    state = service.get_document_plan_state(
+        process,
+        request.args.get("duimp_snapshot_id"),
+    )
+    plan = state.get("plan")
+    if not plan:
+        return bad_request_response(ValueError("Plano de notas ativo não encontrado."))
+
+    xml_files = []
+    for document in plan["documents"]:
+        draft = document.get("draft") or {}
+        xml = draft.get("latest_xml") or {}
+        if not xml.get("id"):
+            continue
+        row = NfeXmlVersion.query.filter(
+            NfeXmlVersion.id == uuid_or_404(xml["id"]),
+            NfeXmlVersion.nfe_draft_id == uuid_or_404(draft["id"]),
+        ).first()
+        if row:
+            identifier = draft.get("access_key") or draft["id"]
+            xml_files.append(
+                (f"NFe-filha-{document['ordinal']}-{identifier}.xml", row.xml_content)
+            )
+    if not xml_files:
+        return bad_request_response(
+            ValueError("Nenhum XML de NF-e filha está disponível para download.")
+        )
+
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
+        for filename, content in xml_files:
+            archive.writestr(filename, content)
+    filename = f"NFe-filhas-{process.duimp_number or process.id}.zip"
+    return Response(
+        buffer.getvalue(),
+        content_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @import_process_bp.post("/<process_id>/duimp/fetch")
