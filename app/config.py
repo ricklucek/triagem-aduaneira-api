@@ -18,7 +18,7 @@ DEFAULT_NFE_XSD_PATH = (
 
 
 class Config:
-    SECRET_KEY = os.getenv("SECRET_KEY")
+    SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
     SQLALCHEMY_DATABASE_URI = URL.create(
