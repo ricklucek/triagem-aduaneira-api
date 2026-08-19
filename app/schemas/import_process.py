@@ -1,3 +1,5 @@
+from decimal import Decimal, InvalidOperation
+
 from marshmallow import EXCLUDE, Schema, ValidationError, fields, validate, validates_schema
 from marshmallow_sqlalchemy import SQLAlchemyAutoSchema, auto_field
 
@@ -310,6 +312,34 @@ class CreateNfeDraftFromDuimpSchema(Schema):
                 "Informe tax_configuration ou tax_rule_id, não ambos.",
                 field_name="tax_rule_id",
             )
+
+
+class CreateNfeDocumentPlanSchema(Schema):
+    duimp_snapshot_id = fields.UUID(load_default=None, allow_none=True)
+    additional_costs = fields.Dict(load_default=dict)
+
+    @validates_schema
+    def validate_additional_costs(self, data, **kwargs):
+        allowed = {"afrmm", "siscomex_fee", "thc", "other"}
+        costs = data.get("additional_costs") or {}
+        unknown = sorted(set(costs) - allowed)
+        if unknown:
+            raise ValidationError(
+                "Despesas não reconhecidas: " + ", ".join(unknown),
+                field_name="additional_costs",
+            )
+        for name, value in costs.items():
+            try:
+                if value is not None and Decimal(str(value)) < 0:
+                    raise ValidationError(
+                        "Despesas compartilhadas não podem ser negativas.",
+                        field_name=f"additional_costs.{name}",
+                    )
+            except (InvalidOperation, TypeError, ValueError):
+                raise ValidationError(
+                    "Informe um valor monetário válido.",
+                    field_name=f"additional_costs.{name}",
+                )
 
 
 class UpdateNfeDraftItemSchema(Schema):

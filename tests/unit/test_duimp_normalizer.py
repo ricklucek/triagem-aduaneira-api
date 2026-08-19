@@ -225,6 +225,29 @@ def test_rejects_mixed_modalities_in_same_duimp():
         raise AssertionError("Era esperado ValueError para modalidades diferentes")
 
 
+def test_normalizes_multiple_exporters_for_document_planning():
+    payload = portal_payload()
+    second = deepcopy(payload["itens"][0])
+    second["identificacao"] = {"numeroItem": 2}
+    second["exportador"] = {
+        "codigo": "EXP-2",
+        "nome": "Segundo Fornecedor Exterior",
+        "tin": "FOREIGN-002",
+        "pais": {"codigo": "DE", "descricao": "Alemanha"},
+    }
+    payload["itens"].append(second)
+
+    result = DuimpNormalizer().normalize(payload)
+
+    assert result["exporter_count"] == 2
+    assert [row["code"] for row in result["foreign_suppliers"]] == [
+        "EXP-1",
+        "EXP-2",
+    ]
+    assert result["foreign_supplier"]["code"] == "EXP-1"
+    assert result["items"][1]["exporter_code"] == "EXP-2"
+
+
 @pytest.mark.parametrize(
     ("portal_value", "expected"),
     [

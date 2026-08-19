@@ -24,6 +24,7 @@ from ..models.import_process import (
 )
 from ..schemas.import_process import (
     CreateImportProcessSchema,
+    CreateNfeDocumentPlanSchema,
     FetchDuimpSchema,
     CreateManualDuimpSnapshotSchema,
     CreateNfeDraftFromDuimpSchema,
@@ -330,6 +331,46 @@ def list_process_nfe_drafts(process_id: str):
         )
 
     return jsonify({"items": items})
+
+
+@import_process_bp.get("/<process_id>/nfe-document-plan")
+@auth_required
+def get_process_nfe_document_plan(process_id: str):
+    process_uuid = uuid_or_404(process_id)
+    service = _service()
+    process = (
+        service.import_process_query_for_current_user()
+        .filter_by(id=process_uuid)
+        .first_or_404()
+    )
+    snapshot_id = request.args.get("duimp_snapshot_id")
+    try:
+        return jsonify(service.get_document_plan_state(process, snapshot_id))
+    except ValueError as exc:
+        return bad_request_response(exc)
+
+
+@import_process_bp.post("/<process_id>/nfe-document-plan")
+@auth_required
+def create_process_nfe_document_plan(process_id: str):
+    process_uuid = uuid_or_404(process_id)
+    service = _service()
+    process = (
+        service.import_process_query_for_current_user()
+        .filter_by(id=process_uuid)
+        .first_or_404()
+    )
+    try:
+        payload = CreateNfeDocumentPlanSchema().load(json_payload())
+        plan = service.create_document_plan(process, payload)
+        db.session.commit()
+        return jsonify(plan), 201
+    except ValidationError as exc:
+        db.session.rollback()
+        return validation_error_response(exc)
+    except ValueError as exc:
+        db.session.rollback()
+        return bad_request_response(exc)
 
 
 @import_process_bp.post("/<process_id>/duimp/fetch")

@@ -59,19 +59,12 @@ class DuimpNormalizer:
             if item.get("third_party_tax_id")
         }
         exporters = [item.get("exporter") for item in items if item.get("exporter")]
-        exporter_codes = {
-            exporter.get("code") for exporter in exporters if exporter.get("code")
-        }
+        unique_exporters = self._unique_foreign_operators(exporters)
 
         if len(modalities) > 1:
             raise ValueError("A DUIMP possui itens com modalidades de importação diferentes.")
         if len(third_party_ids) > 1:
             raise ValueError("A DUIMP possui mais de um adquirente/encomendante nos itens.")
-        if len(exporter_codes) > 1:
-            raise ValueError(
-                "A DUIMP possui mais de um exportador; o destinatário da NF-e deve ser selecionado explicitamente."
-            )
-
         unit = cargo.get("unidadeDeclarada") or {}
         country = cargo.get("paisProcedencia") or {}
         registration_datetime = identification.get("dataRegistro")
@@ -108,7 +101,10 @@ class DuimpNormalizer:
                 "iso_alpha_2": self._string(country.get("codigo")),
                 "name": self._string(country.get("descricao")),
             },
-            "foreign_supplier": exporters[0] if exporters else None,
+            # Mantido para compatibilidade com o fluxo de exportador único.
+            "foreign_supplier": unique_exporters[0] if unique_exporters else None,
+            "foreign_suppliers": unique_exporters,
+            "exporter_count": len(unique_exporters),
             "items": items,
             "catalog_enrichment": payload.get("catalogEnrichment")
             or {
@@ -296,6 +292,9 @@ class DuimpNormalizer:
                     or raw_item.get("manufacturerCode"),
                     "exporter_code": raw_item.get("codigoExportador")
                     or raw_item.get("exporterCode"),
+                    "exporter": raw_item.get("exportador")
+                    or raw_item.get("foreignSupplier")
+                    or raw_item.get("exporter"),
                     "drawback_number": raw_item.get("numeroDrawback")
                     or raw_item.get("drawbackNumber"),
                     "freight_value": str(
@@ -327,6 +326,17 @@ class DuimpNormalizer:
         parsed_number = None
         if number:
             parsed_number = DuimpIdentifier.parse(number)
+        root_supplier = raw_payload.get("foreignSupplier") or raw_payload.get(
+            "fornecedorEstrangeiro"
+        )
+        item_exporters = [
+            item.get("exporter")
+            for item in normalized_items
+            if isinstance(item.get("exporter"), dict)
+        ]
+        unique_exporters = self._unique_foreign_operators(
+            item_exporters + ([root_supplier] if isinstance(root_supplier, dict) else [])
+        )
         return {
             "number": parsed_number.formatted if parsed_number else None,
             "api_number": parsed_number.compact if parsed_number else None,
@@ -354,11 +364,33 @@ class DuimpNormalizer:
             or raw_payload.get("modalidadeImportacao"),
             "exporter_code": raw_payload.get("codigoExportador")
             or raw_payload.get("exporterCode"),
-            "foreign_supplier": raw_payload.get("foreignSupplier")
-            or raw_payload.get("fornecedorEstrangeiro"),
+            "foreign_supplier": unique_exporters[0] if unique_exporters else root_supplier,
+            "foreign_suppliers": unique_exporters,
+            "exporter_count": len(unique_exporters),
             "items": normalized_items,
             "raw": raw_payload,
         }
+
+    @staticmethod
+    def _unique_foreign_operators(
+        operators: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        unique: dict[str, dict[str, Any]] = {}
+        for operator in operators:
+            if not isinstance(operator, dict):
+                continue
+            key = str(
+                operator.get("code")
+                or operator.get("codigo")
+                or operator.get("foreign_tax_id")
+                or operator.get("foreign_id")
+                or operator.get("name")
+                or operator.get("legal_name")
+                or ""
+            ).strip()
+            if key and key not in unique:
+                unique[key] = operator
+        return list(unique.values())
 
     def _normalize_taxes(self, calculated: list[dict[str, Any]]) -> dict[str, Any]:
         taxes: dict[str, Any] = {}

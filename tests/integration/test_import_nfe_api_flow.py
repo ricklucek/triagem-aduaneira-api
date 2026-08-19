@@ -724,6 +724,8 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         "has_number_sequence": False,
         "has_item_classification": False,
         "item_classification_ready": False,
+        "has_document_plan": False,
+        "planned_documents_count": 0,
         "import_purpose": "resale",
         "environment": "homologation",
         "series": "1",
@@ -931,8 +933,8 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         "fiscal_payload"
     ]["additional_info"]["complementary"]
 
-    # Um processo totalmente classificado e ainda sem rascunho deve avançar
-    # diretamente para a criação do primeiro rascunho.
+    # Um processo totalmente classificado e ainda sem rascunho deve montar
+    # primeiro o plano documental auditável.
     for existing_draft in NfeDraft.query.filter_by(
         import_process_id=UUID(process_id)
     ).all():
@@ -957,9 +959,9 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         is True
     )
     assert classified_workflow_body["latest_draft"] is None
-    assert classified_workflow_body["next_action"] == "create_draft"
-    assert classified_workflow_body["current_step"] == "drafts"
-    assert classified_workflow_body["furthest_available_step"] == "drafts"
+    assert classified_workflow_body["next_action"] == "create_document_plan"
+    assert classified_workflow_body["current_step"] == "planning"
+    assert classified_workflow_body["furthest_available_step"] == "planning"
     assert [
         (step["key"], step["status"], step["can_view"])
         for step in classified_workflow_body["steps"]
@@ -967,10 +969,299 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         ("duimp", "completed", True),
         ("context", "completed", True),
         ("purposes", "completed", True),
+        ("planning", "current", True),
+        ("drafts", "blocked", False),
+        ("xml", "blocked", False),
+        ("review", "blocked", False),
+    ]
+
+    plan_response = client.post(
+        f"/import-processes/{process_id}/nfe-document-plan",
+        headers=headers,
+        json={"duimp_snapshot_id": snapshot_id},
+    )
+    assert plan_response.status_code == 201, plan_response.get_json()
+    plan = plan_response.get_json()
+    assert plan["master"] == {
+        "type": "managerial",
+        "is_fiscal_document": False,
+        "has_number": False,
+        "has_access_key": False,
+        "has_xml": False,
+    }
+    assert plan["totals"]["documents_count"] == 1
+    assert plan["documents"][0]["mixed_import_purposes"] is True
+    assert plan["documents"][0]["operation_nature"] == (
+        "Importação de mercadorias"
+    )
+
+    planned_workflow = client.get(
+        f"/import-processes/{process_id}/nfe-workflow-state",
+        headers=headers,
+        query_string={
+            "import_purpose": "resale",
+            "environment": "homologation",
+            "series": "1",
+        },
+    )
+    assert planned_workflow.status_code == 200
+    planned_workflow_body = planned_workflow.get_json()
+    assert planned_workflow_body["next_action"] == "create_draft"
+    assert planned_workflow_body["current_step"] == "drafts"
+    assert planned_workflow_body["prerequisites"]["has_document_plan"] is True
+    assert planned_workflow_body["prerequisites"]["planned_documents_count"] == 1
+    assert [
+        (step["key"], step["status"], step["can_view"])
+        for step in planned_workflow_body["steps"]
+    ] == [
+        ("duimp", "completed", True),
+        ("context", "completed", True),
+        ("purposes", "completed", True),
+        ("planning", "completed", True),
         ("drafts", "current", True),
         ("xml", "blocked", False),
         ("review", "blocked", False),
     ]
+
+
+def test_document_plan_groups_exporters_and_reconciles_shared_costs(api):
+    client, headers, importer_id = api
+
+    profile = client.put(
+        f"/clients/{importer_id}/fiscal-profile",
+        headers=headers,
+        json={
+            "legal_name": "Importadora Teste Ltda",
+            "cnpj": "00000000000191",
+            "state_registration": "1234567890",
+            "tax_regime": "3",
+            "street": "Rua de Teste",
+            "number": "100",
+            "district": "Centro",
+            "city_code": "4106902",
+            "city_name": "Curitiba",
+            "state": "PR",
+            "zip_code": "80000000",
+        },
+    )
+    assert profile.status_code == 200
+
+    rule_ids = {}
+    for purpose, cfop in (("resale", "3102"), ("use_consumption", "3556")):
+        response = client.post(
+            f"/clients/{importer_id}/import-tax-rules",
+            headers=headers,
+            json={
+                "name": f"PR {purpose}",
+                "issuer_state": "PR",
+                "import_purpose": purpose,
+                "import_modality": "direct",
+                "tax_regime": "3",
+                "priority": 100,
+                "configuration_json": {
+                    "cfop": cfop,
+                    "icms_rate": "12",
+                    "icms_origin": "1",
+                    "icms_cst": "90",
+                    "ipi_cst": "49",
+                    "pis_cst": "98",
+                    "cofins_cst": "98",
+                },
+            },
+        )
+        assert response.status_code == 201, response.get_json()
+        rule_ids[purpose] = response.get_json()["id"]
+
+    process_response = client.post(
+        "/import-processes",
+        headers=headers,
+        json={
+            "importer_id": importer_id,
+            "reference_code": "PLANO-MULTI-EXPORTADOR",
+            "duimp_number": "26BR0000777777-1",
+            "source": "manual",
+        },
+    )
+    assert process_response.status_code == 201
+    process_id = process_response.get_json()["id"]
+
+    exporter_a = {
+        "code": "EXP-A",
+        "name": "Exporter Alpha Ltd",
+        "foreign_tax_id": "ALPHA-001",
+        "country_code": "1600",
+        "country_name": "CHINA",
+    }
+    exporter_b = {
+        "code": "EXP-B",
+        "name": "Exporter Beta GmbH",
+        "foreign_tax_id": "BETA-002",
+        "country_code": "0230",
+        "country_name": "ALEMANHA",
+    }
+    raw_items = [
+        {
+            "numeroItem": "1",
+            "codigoProduto": "A-REV",
+            "descricao": "Produto Alpha para revenda",
+            "ncm": "87087090",
+            "quantidade": "1",
+            "unidade": "UN",
+            "valorProduto": "300.00",
+            "valorAduaneiro": "300.00",
+            "codigoExportador": "EXP-A",
+            "exporter": exporter_a,
+        },
+        {
+            "numeroItem": "2",
+            "codigoProduto": "A-USO",
+            "descricao": "Produto Alpha para uso",
+            "ncm": "84212300",
+            "quantidade": "1",
+            "unidade": "UN",
+            "valorProduto": "100.00",
+            "valorAduaneiro": "100.00",
+            "codigoExportador": "EXP-A",
+            "exporter": exporter_a,
+        },
+        {
+            "numeroItem": "3",
+            "codigoProduto": "B-REV",
+            "descricao": "Produto Beta para revenda",
+            "ncm": "87087090",
+            "quantidade": "1",
+            "unidade": "UN",
+            "valorProduto": "100.00",
+            "valorAduaneiro": "100.00",
+            "codigoExportador": "EXP-B",
+            "exporter": exporter_b,
+        },
+    ]
+    snapshot_response = client.post(
+        f"/import-processes/{process_id}/duimp-snapshots",
+        headers=headers,
+        json={
+            "duimp_number": "26BR0000777777-1",
+            "duimp_version": "1",
+            "raw_payload": {
+                "numero": "26BR0000777777-1",
+                "versao": "1",
+                "dataRegistro": "2026-08-18",
+                "localDesembaraco": "PORTO DE PARANAGUA",
+                "ufDesembaraco": "PR",
+                "dataDesembaraco": "2026-08-18",
+                "viaTransporteCodigo": "1",
+                "modalidadeImportacao": "direct",
+                "foreignSupplier": exporter_a,
+                "itens": raw_items,
+            },
+        },
+    )
+    assert snapshot_response.status_code == 201, snapshot_response.get_json()
+    snapshot_id = snapshot_response.get_json()["id"]
+
+    classification = client.put(
+        f"/import-processes/{process_id}/item-classifications",
+        headers=headers,
+        json={
+            "duimp_snapshot_id": snapshot_id,
+            "items": [
+                {
+                    "duimp_item_number": "1",
+                    "import_purpose": "resale",
+                    "tax_rule_id": rule_ids["resale"],
+                },
+                {
+                    "duimp_item_number": "2",
+                    "import_purpose": "use_consumption",
+                    "tax_rule_id": rule_ids["use_consumption"],
+                },
+                {
+                    "duimp_item_number": "3",
+                    "import_purpose": "resale",
+                    "tax_rule_id": rule_ids["resale"],
+                },
+            ],
+        },
+    )
+    assert classification.status_code == 200, classification.get_json()
+    assert classification.get_json()["ready_for_draft"] is True
+
+    created = client.post(
+        f"/import-processes/{process_id}/nfe-document-plan",
+        headers=headers,
+        json={
+            "duimp_snapshot_id": snapshot_id,
+            "additional_costs": {
+                "afrmm": "0",
+                "siscomex_fee": "0",
+                "thc": "0",
+                "other": "0.07",
+            },
+        },
+    )
+    assert created.status_code == 201, created.get_json()
+    plan = created.get_json()
+    assert plan["allocation_basis"] == "customs_value"
+    assert plan["totals"] == {
+        "documents_count": 2,
+        "items_count": 3,
+        "customs_value": "500.00",
+        "shared_costs": "0.07",
+        "planned_value": "500.07",
+    }
+    assert plan["reconciliation"]["balanced"] is True
+
+    documents = {document["exporter_code"]: document for document in plan["documents"]}
+    assert set(documents) == {"EXP-A", "EXP-B"}
+    assert documents["EXP-A"]["items_count"] == 2
+    assert documents["EXP-A"]["mixed_import_purposes"] is True
+    assert documents["EXP-A"]["operation_nature"] == "Importação de mercadorias"
+    assert documents["EXP-A"]["item_purposes"] == ["resale", "use_consumption"]
+    alpha_items = {
+        item["duimp_item_number"]: item
+        for item in documents["EXP-A"]["items"]
+    }
+    assert alpha_items["1"]["allocated_shared_costs"]["other"] == "0.05"
+    assert alpha_items["2"]["allocated_shared_costs"]["other"] == "0.01"
+    assert documents["EXP-B"]["items"][0]["allocated_shared_costs"]["other"] == "0.01"
+
+    fetched = client.get(
+        f"/import-processes/{process_id}/nfe-document-plan",
+        headers=headers,
+        query_string={"duimp_snapshot_id": snapshot_id},
+    )
+    assert fetched.status_code == 200
+    assert fetched.get_json()["plan"]["id"] == plan["id"]
+
+    workflow = client.get(
+        f"/import-processes/{process_id}/nfe-workflow-state",
+        headers=headers,
+        query_string={
+            "import_purpose": "resale",
+            "environment": "homologation",
+            "series": "1",
+        },
+    )
+    assert workflow.status_code == 200, workflow.get_json()
+    workflow_body = workflow.get_json()
+    assert workflow_body["next_action"] == "review_document_plan"
+    assert workflow_body["current_step"] == "planning"
+    assert workflow_body["prerequisites"]["planned_documents_count"] == 2
+
+    legacy_draft = client.post(
+        f"/import-processes/{process_id}/nfe-draft/from-duimp",
+        headers=headers,
+        json={
+            "environment": "homologation",
+            "series": "1",
+            "import_purpose": "resale",
+            "duimp_snapshot_id": snapshot_id,
+        },
+    )
+    assert legacy_draft.status_code == 400
+    assert "múltiplos exportadores" in legacy_draft.get_json()["message"]
+
 
 def test_provider_connection_post_reactivates_existing_scope(api):
     client, headers, _ = api
@@ -1088,4 +1379,3 @@ def test_process_dashboard_groups_by_client_and_exposes_next_action(
     assert process["planned_documents_count"] == 0
     assert process["last_responsible"]["name"] == "Operador Teste"
     assert process["last_responsible"]["is_current_user"] is True
-

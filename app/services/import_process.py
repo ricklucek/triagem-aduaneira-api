@@ -5,7 +5,7 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -35,7 +35,10 @@ from ..models import (
     ImportPurpose,
     NfeDraft,
     NfeDraftItem,
+    NfeDocumentPlan,
     NfeItemClassification,
+    NfePlannedDocument,
+    NfePlannedDocumentItem,
     NfeDraftStatus,
     NfeModel,
     NfeOperationType,
@@ -193,6 +196,14 @@ class ImportNfeService:
         if self.organization_id:
             query = query.filter(
                 NfeItemClassification.organization_id == self.organization_id
+            )
+        return query
+
+    def document_plan_query_for_current_user(self):
+        query = NfeDocumentPlan.query
+        if self.organization_id:
+            query = query.filter(
+                NfeDocumentPlan.organization_id == self.organization_id
             )
         return query
 
@@ -597,6 +608,15 @@ class ImportNfeService:
             .filter(NfeDraft.import_process_id == process.id)
             .count()
         )
+        active_plan = (
+            self.document_plan_query_for_current_user()
+            .filter(
+                NfeDocumentPlan.import_process_id == process.id,
+                NfeDocumentPlan.status == "planned",
+            )
+            .order_by(NfeDocumentPlan.version_number.desc())
+            .first()
+        )
         responsible = process.created_by
         importer = process.importer
         summary.update(
@@ -612,7 +632,9 @@ class ImportNfeService:
                     next_action != "completed"
                     and process_status not in terminal_statuses
                 ),
-                "planned_documents_count": drafts_count,
+                "planned_documents_count": (
+                    len(active_plan.documents) if active_plan else drafts_count
+                ),
                 "last_responsible": (
                     {
                         "id": str(responsible.id),
@@ -669,6 +691,7 @@ class ImportNfeService:
             ("duimp", "DUIMP"),
             ("context", "Contexto fiscal"),
             ("purposes", "Finalidades"),
+            ("planning", "Plano de notas"),
             ("drafts", "Rascunho"),
             ("xml", "XML"),
             ("review", "Conferência"),
@@ -680,6 +703,8 @@ class ImportNfeService:
             "configure_tax_rule": "context",
             "resolve_context": "context",
             "classify_items": "purposes",
+            "create_document_plan": "planning",
+            "review_document_plan": "planning",
             "create_draft": "drafts",
             "configure_number_sequence": "drafts",
             "correct_draft": "drafts",
@@ -734,6 +759,18 @@ class ImportNfeService:
             )
             .first()
         )
+        latest_plan = None
+        if latest_snapshot:
+            latest_plan = (
+                self.document_plan_query_for_current_user()
+                .filter(
+                    NfeDocumentPlan.import_process_id == process.id,
+                    NfeDocumentPlan.duimp_snapshot_id == latest_snapshot.id,
+                    NfeDocumentPlan.status == "planned",
+                )
+                .order_by(NfeDocumentPlan.version_number.desc())
+                .first()
+            )
 
         import_purpose = params.get("import_purpose")
         environment = params["environment"]
@@ -801,6 +838,13 @@ class ImportNfeService:
             and latest_draft.created_at
             and latest_classification.updated_at > latest_draft.created_at
         )
+        classification_newer_than_plan = bool(
+            latest_plan
+            and latest_classification
+            and latest_classification.updated_at
+            and latest_plan.created_at
+            and latest_classification.updated_at > latest_plan.created_at
+        )
         classification_required = bool(
             classifications
             and (
@@ -822,6 +866,25 @@ class ImportNfeService:
             next_action = "resolve_context"
         elif classification_required:
             next_action = "classify_items"
+        elif (
+            classifications
+            and classifications.get("ready_for_draft")
+            and (
+                latest_plan is None
+                or classification_newer_than_plan
+            )
+            and (
+                latest_draft is None
+                or classification_newer_than_draft
+            )
+        ):
+            next_action = "create_document_plan"
+        elif (
+            latest_draft is None
+            and latest_plan is not None
+            and len(latest_plan.documents) > 1
+        ):
+            next_action = "review_document_plan"
         elif latest_draft is None:
             next_action = "create_draft"
         elif classification_newer_than_draft:
@@ -863,6 +926,11 @@ class ImportNfeService:
             ),
             "context": context,
             "item_classification": classifications,
+            "document_plan": (
+                self._serialize_document_plan(latest_plan)
+                if latest_plan
+                else None
+            ),
             "latest_draft": draft_detail,
             "prerequisites": {
                 "has_fiscal_profile": fiscal_profile is not None,
@@ -875,6 +943,10 @@ class ImportNfeService:
                 "item_classification_ready": bool(
                     classifications
                     and classifications.get("ready_for_draft")
+                ),
+                "has_document_plan": latest_plan is not None,
+                "planned_documents_count": (
+                    len(latest_plan.documents) if latest_plan else 0
                 ),
                 "import_purpose": import_purpose,
                 "environment": environment,
@@ -1471,7 +1543,15 @@ class ImportNfeService:
             DuimpSnapshot.import_process_id == process.id
         )
         if snapshot_id:
-            query = query.filter(DuimpSnapshot.id == snapshot_id)
+            try:
+                snapshot_uuid = (
+                    snapshot_id
+                    if isinstance(snapshot_id, UUID)
+                    else UUID(str(snapshot_id))
+                )
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise ValueError("Identificador do snapshot da DUIMP inválido.") from exc
+            query = query.filter(DuimpSnapshot.id == snapshot_uuid)
         snapshot = query.order_by(DuimpSnapshot.created_at.desc()).first()
         if snapshot is None:
             raise ValueError("Snapshot da DUIMP não encontrado para este processo.")
@@ -1833,6 +1913,448 @@ class ImportNfeService:
         }
 
     # ------------------------------------------------------------------
+    # Planejamento documental (Master gerencial e NF-e filhas)
+    # ------------------------------------------------------------------
+    def get_document_plan_state(
+        self,
+        process: ImportProcess,
+        snapshot_id=None,
+    ) -> dict[str, Any]:
+        snapshot = self._snapshot_for_process(process, snapshot_id)
+        plan = (
+            self.document_plan_query_for_current_user()
+            .filter(
+                NfeDocumentPlan.import_process_id == process.id,
+                NfeDocumentPlan.duimp_snapshot_id == snapshot.id,
+                NfeDocumentPlan.status == "planned",
+            )
+            .order_by(NfeDocumentPlan.version_number.desc())
+            .first()
+        )
+        return {
+            "process_id": str(process.id),
+            "snapshot_id": str(snapshot.id),
+            "plan": self._serialize_document_plan(plan) if plan else None,
+        }
+
+    def create_document_plan(
+        self,
+        process: ImportProcess,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = self._json_compatible(payload)
+        snapshot = self._snapshot_for_process(
+            process,
+            payload.get("duimp_snapshot_id"),
+        )
+        normalized = (
+            snapshot.normalized_payload
+            or self.normalize_duimp_payload(snapshot.raw_payload)
+        )
+        classification_state = self.get_item_classification_state(
+            process,
+            snapshot.id,
+        )
+        if not classification_state["ready_for_draft"]:
+            raise ValueError(
+                "Classifique a finalidade, a regra tributária e o CFOP de "
+                "todos os itens antes de gerar o planejamento documental."
+            )
+        classifications = self._item_classification_map(process, snapshot)
+        source_items = list(normalized.get("items") or [])
+        if not source_items:
+            raise ValueError("A DUIMP não possui itens para planejar.")
+
+        default_costs: dict[str, Any] = {}
+        for classification in classifications.values():
+            rule = classification.tax_rule
+            if rule and rule.additional_cost_defaults:
+                default_costs = self._merge_defaults(
+                    default_costs,
+                    rule.additional_cost_defaults,
+                )
+        default_costs = self._merge_defaults(
+            default_costs,
+            normalized.get("automation_additional_costs"),
+        )
+        default_costs.update(payload.get("additional_costs") or {})
+        shared_costs = self.resolve_additional_costs(
+            duimp=normalized,
+            additional_costs=default_costs,
+        )
+        shared_costs = {
+            name: self._money_text(self._decimal(shared_costs.get(name)))
+            for name in ("afrmm", "siscomex_fee", "thc", "other")
+        }
+
+        weights = [
+            self._decimal(item.get("customs_value") or item.get("product_value"))
+            for item in source_items
+        ]
+        if any(weight < 0 for weight in weights):
+            raise ValueError("O valor aduaneiro dos itens não pode ser negativo.")
+        if sum(weights, Decimal("0")) <= 0:
+            raise ValueError(
+                "O valor aduaneiro positivo é obrigatório para ratear os custos."
+            )
+        allocations = {
+            name: self._allocate_shared_cost_to_items(
+                self._decimal(value),
+                weights,
+            )
+            for name, value in shared_costs.items()
+        }
+
+        now = datetime.utcnow()
+        previous_plans = (
+            self.document_plan_query_for_current_user()
+            .filter(
+                NfeDocumentPlan.import_process_id == process.id,
+                NfeDocumentPlan.status == "planned",
+            )
+            .all()
+        )
+        for previous in previous_plans:
+            previous.status = "superseded"
+            previous.updated_at = now
+        latest_version = (
+            db.session.query(func.max(NfeDocumentPlan.version_number))
+            .filter(NfeDocumentPlan.duimp_snapshot_id == snapshot.id)
+            .scalar()
+            or 0
+        )
+        plan = NfeDocumentPlan(
+            organization_id=self._require_organization_id(),
+            import_process_id=process.id,
+            duimp_snapshot_id=snapshot.id,
+            version_number=latest_version + 1,
+            status="planned",
+            allocation_basis="customs_value",
+            shared_costs=shared_costs,
+            totals={},
+            reconciliation={},
+            created_by_user_id=self.user_id,
+            created_at=now,
+            updated_at=now,
+        )
+        db.session.add(plan)
+        db.session.flush()
+
+        groups: dict[str, dict[str, Any]] = {}
+        for index, source in enumerate(source_items):
+            item_number = str(source.get("number") or "")
+            classification = classifications[item_number]
+            exporter_key, exporter_code, supplier = self._document_exporter(
+                source,
+                normalized,
+            )
+            group = groups.setdefault(
+                exporter_key,
+                {
+                    "exporter_code": exporter_code,
+                    "foreign_supplier": supplier,
+                    "items": [],
+                },
+            )
+            group["items"].append(
+                {
+                    "source": source,
+                    "classification": classification,
+                    "customs_value": weights[index],
+                    "allocations": {
+                        name: values[index]
+                        for name, values in allocations.items()
+                    },
+                }
+            )
+
+        document_rows = []
+        for ordinal, (exporter_key, group) in enumerate(
+            sorted(groups.items(), key=lambda entry: entry[0]),
+            start=1,
+        ):
+            purposes = sorted(
+                {
+                    item["classification"].import_purpose
+                    for item in group["items"]
+                }
+            )
+            mixed = len(purposes) > 1
+            group_customs_value = sum(
+                (item["customs_value"] for item in group["items"]),
+                Decimal("0"),
+            )
+            group_costs = {
+                name: self._money_text(
+                    sum(
+                        (item["allocations"][name] for item in group["items"]),
+                        Decimal("0"),
+                    )
+                )
+                for name in shared_costs
+            }
+            group_cost_total = sum(
+                (self._decimal(value) for value in group_costs.values()),
+                Decimal("0"),
+            )
+            document = NfePlannedDocument(
+                organization_id=self._require_organization_id(),
+                document_plan_id=plan.id,
+                ordinal=ordinal,
+                exporter_key=exporter_key,
+                exporter_code=group["exporter_code"],
+                foreign_supplier=group["foreign_supplier"],
+                operation_nature=(
+                    "Importação de mercadorias"
+                    if mixed
+                    else self._default_operation_nature(purposes[0])
+                ),
+                item_purposes=purposes,
+                mixed_import_purposes=mixed,
+                items_count=len(group["items"]),
+                customs_value=group_customs_value.quantize(Decimal("0.01")),
+                allocated_shared_costs=group_costs,
+                totals={
+                    "customs_value": self._money_text(group_customs_value),
+                    "shared_costs": self._money_text(group_cost_total),
+                    "planned_value": self._money_text(
+                        group_customs_value + group_cost_total
+                    ),
+                },
+                status="planned",
+                created_at=now,
+                updated_at=now,
+            )
+            db.session.add(document)
+            db.session.flush()
+            document_rows.append(document)
+
+            for planned in group["items"]:
+                source = planned["source"]
+                classification = planned["classification"]
+                db.session.add(
+                    NfePlannedDocumentItem(
+                        organization_id=self._require_organization_id(),
+                        document_plan_id=plan.id,
+                        planned_document_id=document.id,
+                        duimp_snapshot_id=snapshot.id,
+                        item_classification_id=classification.id,
+                        duimp_item_number=str(source.get("number") or ""),
+                        exporter_key=exporter_key,
+                        exporter_code=group["exporter_code"],
+                        import_purpose=classification.import_purpose,
+                        cfop=classification.cfop,
+                        customs_value=planned["customs_value"].quantize(
+                            Decimal("0.01")
+                        ),
+                        allocated_shared_costs={
+                            name: self._money_text(value)
+                            for name, value in planned["allocations"].items()
+                        },
+                        raw_source_payload=source,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+
+        total_customs_value = sum(weights, Decimal("0"))
+        total_shared_costs = sum(
+            (self._decimal(value) for value in shared_costs.values()),
+            Decimal("0"),
+        )
+        checks = []
+        for name, expected_text in shared_costs.items():
+            allocated = sum(allocations[name], Decimal("0"))
+            expected = self._decimal(expected_text)
+            difference = expected - allocated
+            checks.append(
+                {
+                    "name": name,
+                    "expected": self._money_text(expected),
+                    "allocated": self._money_text(allocated),
+                    "difference": self._money_text(difference),
+                    "balanced": difference == Decimal("0"),
+                }
+            )
+        plan.totals = {
+            "documents_count": len(document_rows),
+            "items_count": len(source_items),
+            "customs_value": self._money_text(total_customs_value),
+            "shared_costs": self._money_text(total_shared_costs),
+            "planned_value": self._money_text(
+                total_customs_value + total_shared_costs
+            ),
+        }
+        plan.reconciliation = {
+            "balanced": all(check["balanced"] for check in checks),
+            "checks": checks,
+            "unassigned_items": 0,
+        }
+        process.updated_at = now
+        db.session.flush()
+        return self._serialize_document_plan(plan)
+
+    @staticmethod
+    def _allocate_shared_cost_to_items(
+        total: Decimal,
+        weights: list[Decimal],
+    ) -> list[Decimal]:
+        money = Decimal("0.01")
+        total = total.quantize(money)
+        if not weights:
+            return []
+        if total == 0:
+            return [Decimal("0.00") for _ in weights]
+        weight_total = sum(weights, Decimal("0"))
+        if weight_total <= 0:
+            raise ValueError(
+                "Não é possível ratear custos sem valor aduaneiro positivo."
+            )
+        total_cents = int(total / money)
+        allocations = [
+            int(
+                (Decimal(total_cents) * weight / weight_total).quantize(
+                    Decimal("1"),
+                    rounding=ROUND_DOWN,
+                )
+            )
+            for weight in weights
+        ]
+        remainder = total_cents - sum(allocations)
+        largest_item = max(
+            range(len(weights)),
+            key=lambda index: (weights[index], -index),
+        )
+        allocations[largest_item] += remainder
+        return [Decimal(cents) * money for cents in allocations]
+
+    def _document_exporter(
+        self,
+        item: dict[str, Any],
+        duimp: dict[str, Any],
+    ) -> tuple[str, str | None, dict[str, Any] | None]:
+        supplier = item.get("exporter")
+        supplier = supplier if isinstance(supplier, dict) else None
+        exporter_code = self._empty_to_none(
+            item.get("exporter_code")
+            or (supplier or {}).get("code")
+            or (supplier or {}).get("codigo")
+            or duimp.get("exporter_code")
+        )
+        suppliers = [
+            row
+            for row in (duimp.get("foreign_suppliers") or [])
+            if isinstance(row, dict)
+        ]
+        if supplier is None and exporter_code:
+            supplier = next(
+                (
+                    row
+                    for row in suppliers
+                    if self._empty_to_none(row.get("code") or row.get("codigo"))
+                    == exporter_code
+                ),
+                None,
+            )
+        if supplier is None and len(suppliers) == 1:
+            supplier = suppliers[0]
+        if supplier is None and isinstance(duimp.get("foreign_supplier"), dict):
+            supplier = duimp["foreign_supplier"]
+
+        foreign_id = self._empty_to_none(
+            (supplier or {}).get("foreign_tax_id")
+            or (supplier or {}).get("foreign_id")
+            or (supplier or {}).get("tin")
+        )
+        name = self._empty_to_none(
+            (supplier or {}).get("name")
+            or (supplier or {}).get("legal_name")
+            or (supplier or {}).get("razaoSocial")
+        )
+        if exporter_code:
+            key = f"code:{exporter_code}"
+        elif foreign_id:
+            key = f"foreign_id:{foreign_id}"
+        elif name:
+            key = f"name:{name.upper()}"
+        else:
+            key = "single:default"
+        return key, exporter_code, supplier
+
+    def _serialize_document_plan(
+        self,
+        plan: NfeDocumentPlan,
+    ) -> dict[str, Any]:
+        return {
+            "id": str(plan.id),
+            "process_id": str(plan.import_process_id),
+            "snapshot_id": str(plan.duimp_snapshot_id),
+            "version_number": plan.version_number,
+            "status": plan.status,
+            "allocation_basis": plan.allocation_basis,
+            "shared_costs": plan.shared_costs or {},
+            "totals": plan.totals or {},
+            "reconciliation": plan.reconciliation or {},
+            "master": {
+                "type": "managerial",
+                "is_fiscal_document": False,
+                "has_number": False,
+                "has_access_key": False,
+                "has_xml": False,
+            },
+            "documents": [
+                {
+                    "id": str(document.id),
+                    "ordinal": document.ordinal,
+                    "status": document.status,
+                    "exporter_key": document.exporter_key,
+                    "exporter_code": document.exporter_code,
+                    "foreign_supplier": document.foreign_supplier,
+                    "operation_nature": document.operation_nature,
+                    "item_purposes": document.item_purposes or [],
+                    "mixed_import_purposes": document.mixed_import_purposes,
+                    "items_count": document.items_count,
+                    "customs_value": self._money_text(document.customs_value),
+                    "allocated_shared_costs": (
+                        document.allocated_shared_costs or {}
+                    ),
+                    "totals": document.totals or {},
+                    "items": [
+                        {
+                            "id": str(item.id),
+                            "duimp_item_number": item.duimp_item_number,
+                            "exporter_code": item.exporter_code,
+                            "import_purpose": item.import_purpose,
+                            "cfop": item.cfop,
+                            "customs_value": self._money_text(
+                                item.customs_value
+                            ),
+                            "allocated_shared_costs": (
+                                item.allocated_shared_costs or {}
+                            ),
+                        }
+                        for item in document.items
+                    ],
+                }
+                for document in plan.documents
+            ],
+            "created_by": (
+                {
+                    "id": str(plan.created_by.id),
+                    "name": plan.created_by.nome,
+                }
+                if plan.created_by
+                else None
+            ),
+            "created_at": self._iso(plan.created_at),
+            "updated_at": self._iso(plan.updated_at),
+        }
+
+    @staticmethod
+    def _money_text(value: Any) -> str:
+        return f"{Decimal(str(value or '0')).quantize(Decimal('0.01')):.2f}"
+
+    # ------------------------------------------------------------------
     # NFe draft
     # ------------------------------------------------------------------
     def create_nfe_draft_from_duimp(self, process: ImportProcess, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1857,6 +2379,17 @@ class ImportNfeService:
             fetch_result = self.fetch_duimp_for_process(process, payload)
             normalized = fetch_result["normalized"]
             snapshot = fetch_result["snapshot"]
+
+        exporter_keys = {
+            self._document_exporter(item, normalized)[0]
+            for item in (normalized.get("items") or [])
+        }
+        if len(exporter_keys) > 1:
+            raise ValueError(
+                "A DUIMP possui múltiplos exportadores. Revise o plano de notas; "
+                "os rascunhos independentes de cada NF-e filha serão gerados na "
+                "próxima etapa do fluxo."
+            )
 
         classification_map = self._item_classification_map(process, snapshot)
         tax_rules: list[ClientImportTaxRule] = []
