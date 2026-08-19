@@ -8,8 +8,8 @@ on:
 env:
   SERVICE_NAME: ta-api
   REGION: southamerica-east1
-  ENV_VARS: DB_HOST=10.10.1.10,DB_PORT=5432,DB_NAME=appdb,DB_USER=appuser,SECRET_KEY=supersecretkey,JWT_ACCESS_EXPIRES_SECONDS=3600
-  SECRETS: DB_PASSWORD=DB_PASSWORD:latest
+  ENV_VARS: DB_HOST=10.10.1.10,DB_PORT=5432,DB_NAME=appdb,DB_USER=appuser,JWT_ACCESS_EXPIRES_SECONDS=3600
+  SECRETS: DB_PASSWORD=DB_PASSWORD:latest,SECRET_KEY=SECRET_KEY:latest
 
 jobs:
   deploy:
@@ -47,6 +47,6 @@ jobs:
             --network-tags=run-backend \
             --subnet=run-subnet \
             --vpc-egress=private-ranges-only \
-            --update-env-vars ${{ env.ENV_VARS }} \
+            --update-env-vars "${{ env.ENV_VARS }},GOOGLE_CLOUD_PROJECT=${{ secrets.GCP_PROJECT_ID }},PORTAL_UNICO_SECRET_VERSION=latest" \
             --update-secrets ${{ env.SECRETS }} \
             --allow-unauthenticated 

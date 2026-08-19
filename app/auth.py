@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from functools import wraps
+from uuid import UUID
 
 import jwt
 from flask import current_app, g, jsonify, request
@@ -24,7 +25,11 @@ def serialize_identity(identity) -> dict:
 
 
 def resolve_identity(principal_id: str):
-    return User.query.get(principal_id)
+    try:
+        identity_id = UUID(str(principal_id))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return db.session.get(User, identity_id)
 
 
 def _jwt_payload(identity, principal_type: str, token_type: str, expires_in: int) -> dict:

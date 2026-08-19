@@ -1,9 +1,11 @@
 
+from datetime import datetime
+
 from app.models.utils import TimestampMixin, uuid_pk
 
 from sqlalchemy.dialects.postgresql import UUID
 
-from sqlalchemy import Column, ForeignKey, String, Boolean, Text, UniqueConstraint
+from sqlalchemy import Column, DateTime, ForeignKey, String, Boolean, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from ..extensions import Base
@@ -71,3 +73,68 @@ class ClientContact(TimestampMixin, Base):
     ativo = Column(Boolean, nullable=False, default=True)
 
     client = relationship("Client", back_populates="contatos")
+    
+class ClientFiscalProfile(Base):
+    __tablename__ = "client_fiscal_profiles"
+
+    id = uuid_pk()
+
+    organization_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id"),
+        nullable=False,
+        index=True,
+    )
+
+    client_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("clients.id"),
+        nullable=False,
+        index=True,
+    )
+
+    legal_name = Column(String(255), nullable=False)
+    trade_name = Column(String(255), nullable=True)
+
+    cnpj = Column(String(14), nullable=False)
+    state_registration = Column(String(30), nullable=True)
+
+    tax_regime = Column(String(1), nullable=False)
+    # 1 = Simples Nacional
+    # 2 = Simples Nacional - excesso sublimite
+    # 3 = Regime Normal
+
+    street = Column(String(255), nullable=False)
+    number = Column(String(60), nullable=False)
+    complement = Column(String(255), nullable=True)
+    district = Column(String(120), nullable=False)
+
+    city_code = Column(String(7), nullable=False)
+    city_name = Column(String(120), nullable=False)
+    state = Column(String(2), nullable=False)
+    zip_code = Column(String(8), nullable=False)
+
+    country_code = Column(String(4), nullable=False, default="1058")
+    country_name = Column(String(60), nullable=False, default="Brasil")
+
+    phone = Column(String(20), nullable=True)
+    email = Column(String(255), nullable=True)
+
+    is_default = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "client_id",
+            "is_default",
+            name="uq_client_fiscal_profile_default",
+        ),
+    )

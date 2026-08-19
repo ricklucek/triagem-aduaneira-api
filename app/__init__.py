@@ -27,6 +27,16 @@ def create_app(config_object=Config):
     from .routes.prepostos import prepostos_bp
     from .routes.client_routes import client_bp
     from .routes.organization_routes import organization_bp
+    from .routes.client_fiscal_profile_routes import client_fiscal_profile_bp
+    from .routes.fiscal_certificate_routes import fiscal_certificate_bp
+    from .routes.import_process_routes import import_process_bp
+    from .routes.nfe_draft_routes import nfe_draft_bp
+    from .routes.nfe_number_sequence_routes import nfe_number_sequence_bp
+    from .routes.provider_connection_routes import provider_connection_bp
+    from .routes.nfe_automation_routes import (
+        client_import_tax_rule_bp,
+        nfe_context_bp,
+    )
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(scope_bp)
@@ -36,6 +46,14 @@ def create_app(config_object=Config):
     app.register_blueprint(prepostos_bp)
     app.register_blueprint(client_bp)
     app.register_blueprint(organization_bp)
+    app.register_blueprint(import_process_bp)
+    app.register_blueprint(provider_connection_bp)
+    app.register_blueprint(nfe_draft_bp)
+    app.register_blueprint(client_fiscal_profile_bp)
+    app.register_blueprint(fiscal_certificate_bp)
+    app.register_blueprint(nfe_number_sequence_bp)
+    app.register_blueprint(client_import_tax_rule_bp)
+    app.register_blueprint(nfe_context_bp)
 
     @app.get("/health")
     def health():
