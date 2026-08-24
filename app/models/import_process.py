@@ -185,6 +185,12 @@ class ImportProcess(Base):
 
     snapshots = relationship("DuimpSnapshot", back_populates="import_process", lazy=True, cascade="all, delete-orphan")
     nfe_drafts = relationship("NfeDraft", back_populates="import_process", lazy=True, cascade="all, delete-orphan")
+    document_plans = relationship(
+        "NfeDocumentPlan",
+        back_populates="import_process",
+        lazy=True,
+        cascade="all, delete-orphan",
+    )
     api_logs = relationship("ExternalApiRequestLog", back_populates="import_process", lazy=True)
 
     __table_args__ = (
@@ -288,6 +294,247 @@ class DuimpSnapshot(Base):
     import_process = relationship("ImportProcess", back_populates="snapshots")
 
 
+class NfeItemClassification(Base):
+    __tablename__ = "nfe_item_classifications"
+
+    id = uuid_pk()
+    organization_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id"),
+        nullable=False,
+        index=True,
+    )
+    import_process_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("import_processes.id"),
+        nullable=False,
+        index=True,
+    )
+    duimp_snapshot_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("duimp_snapshots.id"),
+        nullable=False,
+        index=True,
+    )
+    duimp_item_number = Column(String(30), nullable=False)
+    import_purpose = Column(String(30), nullable=False, index=True)
+    tax_rule_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("client_import_tax_rules.id"),
+        nullable=True,
+        index=True,
+    )
+    cfop = Column(String(4), nullable=True)
+    source = Column(String(20), nullable=False, default="manual")
+    classified_by_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=True,
+        index=True,
+    )
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+
+    organization = relationship("Organization")
+    import_process = relationship("ImportProcess")
+    duimp_snapshot = relationship("DuimpSnapshot")
+    tax_rule = relationship("ClientImportTaxRule")
+    classified_by = relationship("User", foreign_keys=[classified_by_user_id])
+
+    __table_args__ = (
+        UniqueConstraint(
+            "duimp_snapshot_id",
+            "duimp_item_number",
+            name="uq_nfe_item_classification_snapshot_item",
+        ),
+    )
+
+
+class NfeDocumentPlan(Base):
+    """Master gerencial que planeja as NF-e filhas de um snapshot."""
+
+    __tablename__ = "nfe_document_plans"
+
+    id = uuid_pk()
+    organization_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id"),
+        nullable=False,
+        index=True,
+    )
+    import_process_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("import_processes.id"),
+        nullable=False,
+        index=True,
+    )
+    duimp_snapshot_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("duimp_snapshots.id"),
+        nullable=False,
+        index=True,
+    )
+    version_number = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="planned", index=True)
+    allocation_basis = Column(
+        String(40),
+        nullable=False,
+        default="customs_value",
+    )
+    shared_costs = Column(JSON, nullable=False)
+    totals = Column(JSON, nullable=False)
+    reconciliation = Column(JSON, nullable=False)
+    created_by_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=True,
+        index=True,
+    )
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+
+    organization = relationship("Organization")
+    import_process = relationship("ImportProcess", back_populates="document_plans")
+    duimp_snapshot = relationship("DuimpSnapshot")
+    created_by = relationship("User", foreign_keys=[created_by_user_id])
+    documents = relationship(
+        "NfePlannedDocument",
+        back_populates="document_plan",
+        lazy=True,
+        cascade="all, delete-orphan",
+        order_by="NfePlannedDocument.ordinal",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "duimp_snapshot_id",
+            "version_number",
+            name="uq_nfe_document_plan_snapshot_version",
+        ),
+    )
+
+
+class NfePlannedDocument(Base):
+    """NF-e filha planejada; seus artefatos fiscais vivem em rascunhos próprios."""
+
+    __tablename__ = "nfe_planned_documents"
+
+    id = uuid_pk()
+    organization_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id"),
+        nullable=False,
+        index=True,
+    )
+    document_plan_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("nfe_document_plans.id"),
+        nullable=False,
+        index=True,
+    )
+    ordinal = Column(Integer, nullable=False)
+    exporter_key = Column(String(255), nullable=False)
+    exporter_code = Column(String(100), nullable=True, index=True)
+    foreign_supplier = Column(JSON, nullable=True)
+    operation_nature = Column(String(60), nullable=False)
+    item_purposes = Column(JSON, nullable=False)
+    mixed_import_purposes = Column(Boolean, nullable=False, default=False)
+    items_count = Column(Integer, nullable=False)
+    customs_value = Column(Numeric(18, 2), nullable=False)
+    allocated_shared_costs = Column(JSON, nullable=False)
+    totals = Column(JSON, nullable=False)
+    status = Column(String(20), nullable=False, default="planned", index=True)
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+
+    organization = relationship("Organization")
+    document_plan = relationship("NfeDocumentPlan", back_populates="documents")
+    items = relationship(
+        "NfePlannedDocumentItem",
+        back_populates="planned_document",
+        lazy=True,
+        cascade="all, delete-orphan",
+        order_by="NfePlannedDocumentItem.duimp_item_number",
+    )
+    drafts = relationship(
+        "NfeDraft",
+        back_populates="planned_document",
+        lazy=True,
+        order_by="NfeDraft.created_at",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "document_plan_id",
+            "exporter_key",
+            name="uq_nfe_planned_document_plan_exporter",
+        ),
+    )
+
+
+class NfePlannedDocumentItem(Base):
+    __tablename__ = "nfe_planned_document_items"
+
+    id = uuid_pk()
+    organization_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id"),
+        nullable=False,
+        index=True,
+    )
+    document_plan_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("nfe_document_plans.id"),
+        nullable=False,
+        index=True,
+    )
+    planned_document_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("nfe_planned_documents.id"),
+        nullable=False,
+        index=True,
+    )
+    duimp_snapshot_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("duimp_snapshots.id"),
+        nullable=False,
+        index=True,
+    )
+    item_classification_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("nfe_item_classifications.id"),
+        nullable=True,
+        index=True,
+    )
+    duimp_item_number = Column(String(30), nullable=False)
+    exporter_key = Column(String(255), nullable=False)
+    exporter_code = Column(String(100), nullable=True)
+    import_purpose = Column(String(30), nullable=False, index=True)
+    cfop = Column(String(4), nullable=False)
+    customs_value = Column(Numeric(18, 2), nullable=False)
+    allocated_shared_costs = Column(JSON, nullable=False)
+    raw_source_payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+
+    organization = relationship("Organization")
+    document_plan = relationship("NfeDocumentPlan")
+    planned_document = relationship(
+        "NfePlannedDocument",
+        back_populates="items",
+    )
+    duimp_snapshot = relationship("DuimpSnapshot")
+    item_classification = relationship("NfeItemClassification")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "document_plan_id",
+            "duimp_item_number",
+            name="uq_nfe_planned_document_item_plan_item",
+        ),
+    )
+
+
 class NfeDraft(Base):
     __tablename__ = "nfe_drafts"
 
@@ -298,6 +545,12 @@ class NfeDraft(Base):
 
     importer_id = Column(UUID(as_uuid=True), ForeignKey("clients.id"), nullable=False, index=True)
     duimp_snapshot_id = Column(UUID(as_uuid=True), ForeignKey("duimp_snapshots.id"), nullable=True, index=True)
+    planned_document_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("nfe_planned_documents.id"),
+        nullable=True,
+        index=True,
+    )
 
     model = enum_column(NfeModel, name="nfe_model", default=NfeModel.NFE.value, length=2)
     purpose = enum_column(NfePurpose, name="nfe_purpose", default=NfePurpose.NORMAL.value)
@@ -331,6 +584,10 @@ class NfeDraft(Base):
     import_process = relationship("ImportProcess", back_populates="nfe_drafts")
     importer = relationship("Client", foreign_keys=[importer_id])
     duimp_snapshot = relationship("DuimpSnapshot")
+    planned_document = relationship(
+        "NfePlannedDocument",
+        back_populates="drafts",
+    )
     items = relationship("NfeDraftItem", back_populates="nfe_draft", lazy=True, cascade="all, delete-orphan")
     xml_versions = relationship("NfeXmlVersion", back_populates="nfe_draft", lazy=True, cascade="all, delete-orphan")
 
@@ -369,12 +626,31 @@ class NfeDraftItem(Base):
     import_payload = Column(JSON, nullable=True)
     tax_payload = Column(JSON, nullable=True)
 
+    import_purpose = Column(String(30), nullable=True, index=True)
+    tax_rule_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("client_import_tax_rules.id"),
+        nullable=True,
+        index=True,
+    )
+    item_classification_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("nfe_item_classifications.id"),
+        nullable=True,
+        index=True,
+    )
+
     raw_source_payload = Column(JSON, nullable=True)
 
     created_at = Column(DateTime, nullable=False)
     updated_at = Column(DateTime, nullable=False)
 
     nfe_draft = relationship("NfeDraft", back_populates="items")
+    tax_rule = relationship("ClientImportTaxRule", foreign_keys=[tax_rule_id])
+    item_classification = relationship(
+        "NfeItemClassification",
+        foreign_keys=[item_classification_id],
+    )
 
     __table_args__ = (
         UniqueConstraint("nfe_draft_id", "item_number", name="uq_nfe_draft_item_number"),

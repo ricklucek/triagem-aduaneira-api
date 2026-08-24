@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -31,6 +32,9 @@ class DuimpNormalizer:
         general = payload.get("dadosGerais") or {}
         identification = general.get("identificacao") or {}
         cargo = general.get("carga") or {}
+        general_taxes = (general.get("tributos") or {}).get(
+            "tributosCalculados"
+        ) or []
         importer = identification.get("importador") or {}
         raw_items = payload.get("itens") or []
 
@@ -38,7 +42,16 @@ class DuimpNormalizer:
             payload.get("numero") or identification.get("numero")
         )
         version = payload.get("versao") or identification.get("versao")
-        items = [self._normalize_portal_item(item) for item in raw_items]
+        addition_references = self._addition_references(general)
+        items = [
+            self._normalize_portal_item(
+                item,
+                addition_reference=addition_references.get(
+                    str((item.get("identificacao") or {}).get("numeroItem") or "")
+                ),
+            )
+            for item in raw_items
+        ]
         modalities = {item.get("import_modality") for item in items if item.get("import_modality")}
         third_party_ids = {
             item.get("third_party_tax_id")
@@ -46,19 +59,12 @@ class DuimpNormalizer:
             if item.get("third_party_tax_id")
         }
         exporters = [item.get("exporter") for item in items if item.get("exporter")]
-        exporter_codes = {
-            exporter.get("code") for exporter in exporters if exporter.get("code")
-        }
+        unique_exporters = self._unique_foreign_operators(exporters)
 
         if len(modalities) > 1:
             raise ValueError("A DUIMP possui itens com modalidades de importação diferentes.")
         if len(third_party_ids) > 1:
             raise ValueError("A DUIMP possui mais de um adquirente/encomendante nos itens.")
-        if len(exporter_codes) > 1:
-            raise ValueError(
-                "A DUIMP possui mais de um exportador; o destinatário da NF-e deve ser selecionado explicitamente."
-            )
-
         unit = cargo.get("unidadeDeclarada") or {}
         country = cargo.get("paisProcedencia") or {}
         registration_datetime = identification.get("dataRegistro")
@@ -81,6 +87,7 @@ class DuimpNormalizer:
                 cargo.get("viaTransporteCodigo") or general.get("viaTransporteCodigo")
             ),
             "afrmm_value": str(self._extract_afrmm(cargo)),
+            "tax_totals": self._normalize_taxes(general_taxes),
             "intermediation_type": self._string(
                 general.get("tipoIntermedio") or "1"
             ),
@@ -94,12 +101,28 @@ class DuimpNormalizer:
                 "iso_alpha_2": self._string(country.get("codigo")),
                 "name": self._string(country.get("descricao")),
             },
-            "foreign_supplier": exporters[0] if exporters else None,
+            # Mantido para compatibilidade com o fluxo de exportador único.
+            "foreign_supplier": unique_exporters[0] if unique_exporters else None,
+            "foreign_suppliers": unique_exporters,
+            "exporter_count": len(unique_exporters),
             "items": items,
+            "catalog_enrichment": payload.get("catalogEnrichment")
+            or {
+                "products_requested": 0,
+                "products_enriched": 0,
+                "operators_requested": 0,
+                "operators_enriched": 0,
+                "failures": [],
+            },
             "raw": payload,
         }
 
-    def _normalize_portal_item(self, raw_item: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_portal_item(
+        self,
+        raw_item: dict[str, Any],
+        *,
+        addition_reference: tuple[str, str] | None = None,
+    ) -> dict[str, Any]:
         identification = raw_item.get("identificacao") or {}
         product = raw_item.get("produto") or {}
         merchandise = raw_item.get("mercadoria") or {}
@@ -111,47 +134,87 @@ class DuimpNormalizer:
         manufacturer = raw_item.get("fabricante") or {}
 
         quantity = self._decimal(merchandise.get("quantidadeComercial"))
+        source_freight = self._decimal((sale.get("frete") or {}).get("valorBRL"))
+        source_insurance = self._decimal(
+            (sale.get("seguro") or {}).get("valorBRL")
+        )
         customs_value = self._decimal(
             calculated_merchandise.get("valorAduaneiroBRL")
             or sale.get("valorBRL")
         )
-        unit_value = customs_value / quantity if quantity else Decimal("0")
+        local_shipment_value = self._decimal(
+            calculated_merchandise.get("valorLocalEmbarqueBRL")
+            or sale.get("valorBRL")
+            or customs_value
+        )
+        unit_value = (
+            local_shipment_value / quantity if quantity else Decimal("0")
+        )
+        net_weight = self._decimal(merchandise.get("pesoLiquido"))
         modality_code = self._string(characterization.get("indicador"))
+        catalog = product.get("catalogo") or {}
+        if not isinstance(catalog, dict):
+            catalog = {}
+        description, additional_info = self._nfe_product_text(
+            product.get("denominacao")
+            or product.get("descricao")
+            or merchandise.get("descricao"),
+            catalog.get("descricao"),
+        )
+        addition_number, sequence_number = addition_reference or ("1", "1")
+        manufacturer_code = self._string(manufacturer.get("codigo"))
 
         return {
             "number": str(identification.get("numeroItem") or ""),
-            "product_code": str(product.get("codigo") or identification.get("numeroItem") or ""),
-            "product_version": self._string(product.get("versao")),
-            "description": self._string(
-                product.get("descricao")
-                or product.get("denominacao")
-                or merchandise.get("descricao")
-                or "Mercadoria importada"
+            "product_code": str(
+                product.get("codigoInternoNfe")
+                or product.get("codigoInterno")
+                or product.get("codigo")
+                or identification.get("numeroItem")
+                or ""
             ),
+            "product_version": self._string(product.get("versao")),
+            "description": description,
+            "additional_info": additional_info,
             "complementary_description": self._string(merchandise.get("descricao")),
             "ncm": self._digits(product.get("ncm")),
-            "commercial_unit": self._string(merchandise.get("unidadeComercial") or "UN"),
+            "cest": self._digits(product.get("cest") or catalog.get("cest"))
+            or None,
+            "commercial_unit": self._nfe_unit(
+                merchandise.get("unidadeComercial") or "UN"
+            ),
             "quantity": str(quantity),
             "unit_value": str(unit_value),
-            "product_value": str(customs_value),
-            "taxable_unit": self._string(merchandise.get("unidadeComercial") or "UN"),
+            "customs_value": str(customs_value),
+            "product_value": str(local_shipment_value),
+            "taxable_unit": self._nfe_unit(
+                merchandise.get("unidadeComercial") or "UN"
+            ),
             "taxable_quantity": str(quantity),
             "taxable_unit_value": str(unit_value),
-            "addition_number": self._string(raw_item.get("numeroAdicao") or "1"),
-            "sequence_number": self._string(raw_item.get("sequenciaAdicao") or "1"),
-            "manufacturer_code": self._string(manufacturer.get("codigo")),
+            "addition_number": self._string(
+                raw_item.get("numeroAdicao") or addition_number
+            ),
+            "sequence_number": self._string(
+                raw_item.get("sequenciaAdicao") or sequence_number
+            ),
+            "manufacturer_code": manufacturer_code,
+            "manufacturer_code_missing_from_portal": (
+                "fabricante" in raw_item and manufacturer_code is None
+            ),
             "exporter_code": self._string(exporter.get("codigo")),
             "drawback_number": self._string(
                 (raw_item.get("dadosInsumoDrawbackIsencao") or {}).get(
                     "numeroAtoDuimpInsumo"
                 )
             ),
-            "freight_value": str(
-                self._decimal((sale.get("frete") or {}).get("valorBRL"))
-            ),
-            "insurance_value": str(
-                self._decimal((sale.get("seguro") or {}).get("valorBRL"))
-            ),
+            # A NF-e discrimina o valor local da mercadoria, o frete e o seguro.
+            # O valor aduaneiro permanece separado para rateios e conferências.
+            "freight_value": str(source_freight),
+            "insurance_value": str(source_insurance),
+            "customs_freight_value": str(source_freight),
+            "customs_insurance_value": str(source_insurance),
+            "net_weight": str(net_weight),
             "discount_value": str(self._sale_adjustment(sale, "DEDUCAO")),
             "other_value": str(self._sale_adjustment(sale, "ACRESCIMO")),
             "import_modality": self.MODALITY_MAP.get(modality_code, modality_code.lower() or None),
@@ -196,6 +259,13 @@ class DuimpNormalizer:
                     "quantity": str(quantity),
                     "unit_value": str(unit_value),
                     "product_value": str(product_value),
+                    "customs_value": str(
+                        self._decimal(
+                            raw_item.get("valorAduaneiro")
+                            or raw_item.get("customsValue")
+                            or product_value
+                        )
+                    ),
                     "taxable_unit": raw_item.get("unidadeTributavel")
                     or raw_item.get("taxableUnit")
                     or raw_item.get("unidade")
@@ -222,6 +292,9 @@ class DuimpNormalizer:
                     or raw_item.get("manufacturerCode"),
                     "exporter_code": raw_item.get("codigoExportador")
                     or raw_item.get("exporterCode"),
+                    "exporter": raw_item.get("exportador")
+                    or raw_item.get("foreignSupplier")
+                    or raw_item.get("exporter"),
                     "drawback_number": raw_item.get("numeroDrawback")
                     or raw_item.get("drawbackNumber"),
                     "freight_value": str(
@@ -238,6 +311,12 @@ class DuimpNormalizer:
                             raw_item.get("valorOutrasDespesas") or raw_item.get("otherValue")
                         )
                     ),
+                    "net_weight": str(
+                        self._decimal(
+                            raw_item.get("pesoLiquido")
+                            or raw_item.get("netWeight")
+                        )
+                    ),
                     "taxes": raw_item.get("tributos") or raw_item.get("taxes") or {},
                     "raw": raw_item,
                 }
@@ -247,6 +326,17 @@ class DuimpNormalizer:
         parsed_number = None
         if number:
             parsed_number = DuimpIdentifier.parse(number)
+        root_supplier = raw_payload.get("foreignSupplier") or raw_payload.get(
+            "fornecedorEstrangeiro"
+        )
+        item_exporters = [
+            item.get("exporter")
+            for item in normalized_items
+            if isinstance(item.get("exporter"), dict)
+        ]
+        unique_exporters = self._unique_foreign_operators(
+            item_exporters + ([root_supplier] if isinstance(root_supplier, dict) else [])
+        )
         return {
             "number": parsed_number.formatted if parsed_number else None,
             "api_number": parsed_number.compact if parsed_number else None,
@@ -264,6 +354,9 @@ class DuimpNormalizer:
             "afrmm_value": str(
                 self._decimal(raw_payload.get("valorAfrmm") or raw_payload.get("afrmmValue"))
             ),
+            "tax_totals": raw_payload.get("totaisTributos")
+            or raw_payload.get("taxTotals")
+            or {},
             "intermediation_type": raw_payload.get("tipoIntermedio")
             or raw_payload.get("intermediationType")
             or "1",
@@ -271,11 +364,33 @@ class DuimpNormalizer:
             or raw_payload.get("modalidadeImportacao"),
             "exporter_code": raw_payload.get("codigoExportador")
             or raw_payload.get("exporterCode"),
-            "foreign_supplier": raw_payload.get("foreignSupplier")
-            or raw_payload.get("fornecedorEstrangeiro"),
+            "foreign_supplier": unique_exporters[0] if unique_exporters else root_supplier,
+            "foreign_suppliers": unique_exporters,
+            "exporter_count": len(unique_exporters),
             "items": normalized_items,
             "raw": raw_payload,
         }
+
+    @staticmethod
+    def _unique_foreign_operators(
+        operators: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        unique: dict[str, dict[str, Any]] = {}
+        for operator in operators:
+            if not isinstance(operator, dict):
+                continue
+            key = str(
+                operator.get("code")
+                or operator.get("codigo")
+                or operator.get("foreign_tax_id")
+                or operator.get("foreign_id")
+                or operator.get("name")
+                or operator.get("legal_name")
+                or ""
+            ).strip()
+            if key and key not in unique:
+                unique[key] = operator
+        return list(unique.values())
 
     def _normalize_taxes(self, calculated: list[dict[str, Any]]) -> dict[str, Any]:
         taxes: dict[str, Any] = {}
@@ -288,7 +403,15 @@ class DuimpNormalizer:
             value = (
                 values.get("devido")
                 if values.get("devido") is not None
-                else values.get("calculado")
+                else (
+                    values.get("calculado")
+                    if values.get("calculado") is not None
+                    else (
+                        values.get("aRecolher")
+                        if values.get("aRecolher") is not None
+                        else values.get("recolhido")
+                    )
+                )
             )
             taxes[tax_type] = {
                 "value": str(self._decimal(value)),
@@ -315,6 +438,17 @@ class DuimpNormalizer:
             total += self._decimal(afrmm.get("valorDevido") or afrmm.get("valorPago"))
         return total
 
+    @staticmethod
+    def _addition_references(general: dict[str, Any]) -> dict[str, tuple[str, str]]:
+        references: dict[str, tuple[str, str]] = {}
+        for addition in general.get("adicoes") or []:
+            addition_number = str(addition.get("numero") or "").strip()
+            if not addition_number:
+                continue
+            for sequence, item_number in enumerate(addition.get("itens") or [], start=1):
+                references[str(item_number)] = (addition_number, str(sequence))
+        return references
+
     def _sale_adjustment(self, sale: dict[str, Any], adjustment_type: str) -> Decimal:
         return sum(
             (
@@ -339,6 +473,19 @@ class DuimpNormalizer:
 
     def _foreign_operator(self, payload: dict[str, Any]) -> dict[str, Any]:
         country = payload.get("pais") or {}
+        if not isinstance(country, dict):
+            country = {}
+        address = payload.get("endereco") or {}
+        if not isinstance(address, dict):
+            address = {}
+        if payload.get("logradouro"):
+            address["logradouro"] = payload["logradouro"]
+        if payload.get("nomeCidade"):
+            address["city_name"] = payload["nomeCidade"]
+        if payload.get("codigoSubdivisaoPais"):
+            address["subdivision_code"] = payload["codigoSubdivisaoPais"]
+        if payload.get("cep"):
+            address["zip_code"] = payload["cep"]
         return {
             "code": self._string(payload.get("codigo")),
             "version": self._string(payload.get("versao")),
@@ -346,10 +493,57 @@ class DuimpNormalizer:
             "foreign_tax_id": self._string(
                 payload.get("tin") or payload.get("numeroIdentificacao")
             ),
-            "country_iso_alpha_2": self._string(country.get("codigo")),
+            "country_iso_alpha_2": self._string(
+                country.get("codigo") or payload.get("codigoPais")
+            ),
             "country_name": self._string(country.get("descricao")),
-            "address": payload.get("endereco"),
+            "address": address or None,
         }
+
+    @staticmethod
+    def _nfe_product_text(
+        denomination: Any,
+        complementary_detail: Any = None,
+    ) -> tuple[str, str | None]:
+        parts = []
+        for value in (denomination, complementary_detail):
+            normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+            if normalized and normalized not in parts:
+                parts.append(normalized)
+
+        description = " ".join(parts) or "Mercadoria importada"
+        if len(description) <= 120:
+            return description, None
+
+        truncated = description[:120].rstrip()
+        if (
+            len(truncated) == 120
+            and not description[120].isspace()
+            and " " in truncated
+        ):
+            truncated = truncated.rsplit(" ", 1)[0]
+        return truncated, description[:500]
+
+    @classmethod
+    def _nfe_product_description(
+        cls,
+        denomination: Any,
+        complementary_detail: Any = None,
+    ) -> str:
+        return cls._nfe_product_text(denomination, complementary_detail)[0]
+
+    @classmethod
+    def _nfe_unit(cls, value: Any) -> str:
+        normalized = re.sub(r"\s+", " ", str(value or "UN")).strip().upper()
+        aliases = {
+            "UNIDADE": "UN",
+            "UNIDADES": "UN",
+            "PECA": "PC",
+            "PECAS": "PC",
+            "QUILOGRAMA": "KG",
+            "QUILOGRAMAS": "KG",
+        }
+        return aliases.get(normalized, normalized[:6] or "UN")
 
     @staticmethod
     def _date_part(value: Any) -> str | None:

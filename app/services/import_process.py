@@ -4,22 +4,25 @@ import hashlib
 import json
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_
+from sqlalchemy import case, func, or_
 
+from app.cnpj import is_valid_cnpj, normalize_cnpj
 from ..extensions import db
 from ..integrations.portal_unico import (
-    EnvironmentPortalCredentialResolver,
+    DefaultPortalCredentialResolver,
     PortalUnicoDuimpGateway,
     PortalUnicoIntegrationError,
 )
 from ..models import Client
 from ..models import (
     ClientFiscalProfile,
+    ClientImportTaxRule,
     DuimpSnapshot,
     ExternalApiRequestLog,
     ExternalProvider,
@@ -32,6 +35,10 @@ from ..models import (
     ImportPurpose,
     NfeDraft,
     NfeDraftItem,
+    NfeDocumentPlan,
+    NfeItemClassification,
+    NfePlannedDocument,
+    NfePlannedDocumentItem,
     NfeDraftStatus,
     NfeModel,
     NfeOperationType,
@@ -43,8 +50,33 @@ from ..models import (
 from app.services.nfe_access_key_service import NfeAccessKeyService
 from app.services.nfe_number_service import NfeNumberSequenceService
 from app.services.duimp_normalizer import DuimpNormalizer
+from app.services.fiscal_certificate import (
+    CertificateVault,
+    DefaultCertificateVault,
+    FiscalCertificateError,
+)
+from app.services.fiscal_certificate_registry import FiscalCertificateRegistry
 from app.services.import_tax_calculator import ImportTaxCalculator
+from app.services.nfe_issuance_state import NfeIdempotency
+from app.services.nfe_context import NfeContextResolver
 from app.services.nfe_xml_builder import NfeXmlBuilder
+from app.services.nfe_xml_signer import (
+    NfeXmlSignatureError,
+    NfeXmlSigner,
+)
+from app.services.nfe_xsd_validator import (
+    NfeXsdConfigurationError,
+    NfeXsdValidationResult,
+    NfeXsdValidator,
+)
+from app.models.nfe_issuance import (
+    NfeAttemptOperation,
+    NfeAttemptStatus,
+    NfeIssuance,
+    NfeIssuanceAttempt,
+    NfeIssuanceEvent,
+)
+from app.models.import_process import NfeNumberSequence
 
 
 @dataclass
@@ -63,7 +95,13 @@ class ValidationResult:
 class MockDuimpGateway:
     """Gateway temporário para desenvolvimento sem dependência do Portal Único."""
 
-    def fetch_duimp(self, *, duimp_number: str, duimp_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def fetch_duimp(
+        self,
+        *,
+        duimp_number: str,
+        duimp_payload: dict[str, Any] | None = None,
+        enrich_catalog: bool = True,
+    ) -> dict[str, Any]:
         if duimp_payload:
             return duimp_payload
 
@@ -101,17 +139,30 @@ class ImportNfeService:
         current_user,
         duimp_gateway: Any | None = None,
         credential_resolver: Any | None = None,
+        xsd_validator: NfeXsdValidator | None = None,
+        certificate_vault: CertificateVault | None = None,
+        xml_signer: NfeXmlSigner | None = None,
     ):
         self.current_user = current_user
         self.organization_id = getattr(current_user, "organization_id", None)
         self.user_id = getattr(current_user, "id", None)
         self.duimp_gateway = duimp_gateway
         self.credential_resolver = (
-            credential_resolver or EnvironmentPortalCredentialResolver()
+            credential_resolver or DefaultPortalCredentialResolver()
         )
         self.duimp_normalizer = DuimpNormalizer()
         self.tax_calculator = ImportTaxCalculator()
+        self.nfe_context_resolver = NfeContextResolver()
         self.xml_builder = NfeXmlBuilder()
+        self.xsd_validator = xsd_validator or NfeXsdValidator()
+        self.certificate_vault = (
+            certificate_vault or DefaultCertificateVault()
+        )
+        self.certificate_registry = FiscalCertificateRegistry(
+            current_user=current_user,
+            vault=self.certificate_vault,
+        )
+        self.xml_signer = xml_signer or NfeXmlSigner()
 
     # ------------------------------------------------------------------
     # Query helpers
@@ -140,10 +191,34 @@ class ImportNfeService:
             query = query.filter(DuimpSnapshot.organization_id == self.organization_id)
         return query
 
+    def item_classification_query_for_current_user(self):
+        query = NfeItemClassification.query
+        if self.organization_id:
+            query = query.filter(
+                NfeItemClassification.organization_id == self.organization_id
+            )
+        return query
+
+    def document_plan_query_for_current_user(self):
+        query = NfeDocumentPlan.query
+        if self.organization_id:
+            query = query.filter(
+                NfeDocumentPlan.organization_id == self.organization_id
+            )
+        return query
+
     def client_fiscal_profile_query_for_current_user(self):
         query = ClientFiscalProfile.query
         if self.organization_id:
             query = query.filter(ClientFiscalProfile.organization_id == self.organization_id)
+        return query
+
+    def import_tax_rule_query_for_current_user(self):
+        query = ClientImportTaxRule.query
+        if self.organization_id:
+            query = query.filter(
+                ClientImportTaxRule.organization_id == self.organization_id
+            )
         return query
     
     def get_nfe_draft_or_404(self, draft_id) -> NfeDraft:
@@ -173,7 +248,7 @@ class ImportNfeService:
                 "Rascunho fiscal inválido. Corrija os erros antes de gerar a chave de acesso."
             )
 
-        now = datetime.now(ZoneInfo("America/Sao_Paulo"))
+        now = datetime.now(ZoneInfo("America/Sao_Paulo")).replace(microsecond=0)
 
         if not draft.number:
             sequence_service = NfeNumberSequenceService(current_user=self.current_user)
@@ -278,7 +353,13 @@ class ImportNfeService:
         if not client_id:
             raise ValueError("client_id é obrigatório.")
 
-        self.get_client_for_current_user(client_id)
+        client = self.get_client_for_current_user(client_id)
+
+        payload_cnpj = normalize_cnpj(payload["cnpj"])
+        if payload_cnpj != normalize_cnpj(client.cnpj):
+            raise ValueError(
+                "O CNPJ do perfil fiscal deve ser igual ao CNPJ do cliente."
+            )
 
         profile = self.get_importer_fiscal_profile_or_none(client_id)
         now = datetime.utcnow()
@@ -295,7 +376,7 @@ class ImportNfeService:
 
         profile.legal_name = str(payload["legal_name"]).strip()
         profile.trade_name = self._empty_to_none(payload.get("trade_name"))
-        profile.cnpj = self._digits(payload["cnpj"])
+        profile.cnpj = payload_cnpj
         profile.state_registration = self._empty_to_none(self._digits(payload.get("state_registration")))
         profile.tax_regime = str(payload["tax_regime"])
 
@@ -321,8 +402,10 @@ class ImportNfeService:
 
     def validate_client_fiscal_profile(self, profile: ClientFiscalProfile) -> None:
         errors = []
-        if len(self._digits(profile.cnpj)) != 14:
-            errors.append("CNPJ do perfil fiscal deve conter 14 dígitos.")
+        if not is_valid_cnpj(profile.cnpj):
+            errors.append(
+                "CNPJ do perfil fiscal deve conter 14 caracteres e dígitos verificadores válidos."
+            )
         if not profile.legal_name:
             errors.append("Razão social do perfil fiscal é obrigatória.")
         if profile.tax_regime not in {"1", "2", "3"}:
@@ -375,9 +458,14 @@ class ImportNfeService:
         db.session.flush()
         return process
 
-    def list_import_processes(self, params: dict[str, Any]) -> dict[str, Any]:
-        query = self.import_process_query_for_current_user()
+    def _filtered_import_process_query(self, params: dict[str, Any]):
+        query = self.import_process_query_for_current_user().join(
+            Client,
+            Client.id == ImportProcess.importer_id,
+        )
 
+        if params.get("created_by_me"):
+            query = query.filter(ImportProcess.created_by_user_id == self.user_id)
         if params.get("status"):
             query = query.filter(ImportProcess.status == params["status"])
         if params.get("source"):
@@ -387,24 +475,178 @@ class ImportNfeService:
         if params.get("duimp_number"):
             query = query.filter(ImportProcess.duimp_number == params["duimp_number"])
         if params.get("q"):
-            term = f"%{params['q']}%"
+            term = f"%{str(params['q']).strip()}%"
             query = query.filter(
                 or_(
+                    Client.razao_social.ilike(term),
+                    Client.nome_resumido.ilike(term),
+                    Client.cnpj.ilike(term),
                     ImportProcess.reference_code.ilike(term),
                     ImportProcess.duimp_number.ilike(term),
-                    ImportProcess.status.ilike(term),
-                    ImportProcess.source.ilike(term),
                 )
             )
+        return query
 
+    def list_import_processes(self, params: dict[str, Any]) -> dict[str, Any]:
+        query = self._filtered_import_process_query(params)
         total = query.count()
         rows = (
-            query.order_by(ImportProcess.updated_at.desc().nullslast(), ImportProcess.created_at.desc())
+            query.order_by(
+                ImportProcess.updated_at.desc().nullslast(),
+                ImportProcess.created_at.desc(),
+            )
             .limit(params["limit"])
             .offset(params["offset"])
             .all()
         )
-        return {"items": [self.build_import_process_summary(row) for row in rows], "total": total, **params}
+        return {
+            "items": [
+                self.build_import_process_list_summary(row)
+                for row in rows
+            ],
+            "total": total,
+            **params,
+        }
+
+    def list_import_process_client_groups(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Agrupa clientes no banco sem recalcular o workflow por processo."""
+        terminal_statuses = [
+            ImportProcessStatus.XML_VALIDATED.value,
+            ImportProcessStatus.XML_SIGNED.value,
+            ImportProcessStatus.AUTHORIZED.value,
+            ImportProcessStatus.CANCELLED.value,
+        ]
+        last_activity = func.max(
+            func.coalesce(
+                ImportProcess.updated_at,
+                ImportProcess.created_at,
+            )
+        ).label("last_updated_at")
+        pending_count = func.sum(
+            case(
+                (
+                    ImportProcess.status.in_(terminal_statuses),
+                    0,
+                ),
+                else_=1,
+            )
+        ).label("pending_count")
+
+        grouped_query = (
+            self._filtered_import_process_query(params)
+            .with_entities(
+                Client.id.label("client_id"),
+                Client.nome_resumido.label("short_name"),
+                Client.razao_social.label("legal_name"),
+                Client.cnpj.label("cnpj"),
+                func.count(ImportProcess.id).label("process_count"),
+                pending_count,
+                last_activity,
+            )
+            .group_by(
+                Client.id,
+                Client.nome_resumido,
+                Client.razao_social,
+                Client.cnpj,
+            )
+        )
+        total = grouped_query.order_by(None).count()
+        rows = (
+            grouped_query
+            .order_by(last_activity.desc())
+            .limit(params["limit"])
+            .offset(params["offset"])
+            .all()
+        )
+
+        return {
+            "items": [
+                {
+                    "client_id": str(row.client_id),
+                    "name": row.short_name or row.legal_name,
+                    "legal_name": row.legal_name,
+                    "cnpj": row.cnpj,
+                    "process_count": int(row.process_count or 0),
+                    "pending_count": int(row.pending_count or 0),
+                    "last_updated_at": self._iso(row.last_updated_at),
+                }
+                for row in rows
+            ],
+            "total": total,
+            "limit": params["limit"],
+            "offset": params["offset"],
+            "q": params.get("q"),
+            "created_by_me": params.get("created_by_me", False),
+        }
+
+    def build_import_process_list_summary(
+        self,
+        process: ImportProcess,
+    ) -> dict[str, Any]:
+        summary = self.build_import_process_summary(process)
+        workflow = self.get_nfe_workflow_state(
+            process,
+            {
+                "import_purpose": None,
+                "environment": FiscalEnvironment.HOMOLOGATION.value,
+                "series": "1",
+            },
+        )
+        next_action = workflow["next_action"]
+        process_status = self._enum_value(process.status)
+        terminal_statuses = {
+            ImportProcessStatus.XML_VALIDATED.value,
+            ImportProcessStatus.XML_SIGNED.value,
+            ImportProcessStatus.AUTHORIZED.value,
+            ImportProcessStatus.CANCELLED.value,
+        }
+        drafts_count = (
+            NfeDraft.query
+            .filter(NfeDraft.import_process_id == process.id)
+            .count()
+        )
+        active_plan = (
+            self.document_plan_query_for_current_user()
+            .filter(
+                NfeDocumentPlan.import_process_id == process.id,
+                NfeDocumentPlan.status == "planned",
+            )
+            .order_by(NfeDocumentPlan.version_number.desc())
+            .first()
+        )
+        responsible = process.created_by
+        importer = process.importer
+        summary.update(
+            {
+                "importer": {
+                    "id": str(importer.id),
+                    "name": importer.nome_resumido or importer.razao_social,
+                    "legal_name": importer.razao_social,
+                    "cnpj": importer.cnpj,
+                },
+                "next_action": next_action,
+                "pending": (
+                    next_action != "completed"
+                    and process_status not in terminal_statuses
+                ),
+                "planned_documents_count": (
+                    len(active_plan.documents) if active_plan else drafts_count
+                ),
+                "last_responsible": (
+                    {
+                        "id": str(responsible.id),
+                        "name": responsible.nome,
+                        "is_current_user": responsible.id == self.user_id,
+                    }
+                    if responsible
+                    else None
+                ),
+            }
+        )
+        return summary
 
     def build_import_process_summary(self, process: ImportProcess) -> dict[str, Any]:
         latest_draft = (
@@ -428,6 +670,12 @@ class ImportNfeService:
             "duimp_version": process.duimp_version,
             "status": process.status,
             "source": process.source,
+            "created_by_user_id": (
+                str(process.created_by_user_id)
+                if process.created_by_user_id
+                else None
+            ),
+            "created_by_me": process.created_by_user_id == self.user_id,
             "has_fiscal_profile": profile_exists,
             "snapshots_count": snapshots_count,
             "latest_draft_id": str(latest_draft.id) if latest_draft else None,
@@ -437,24 +685,374 @@ class ImportNfeService:
             "updated_at": self._iso(process.updated_at),
         }
 
+    @staticmethod
+    def _workflow_navigation(next_action: str) -> dict[str, Any]:
+        steps = [
+            ("duimp", "DUIMP"),
+            ("context", "Contexto fiscal"),
+            ("purposes", "Finalidades"),
+            ("planning", "Plano de notas"),
+            ("drafts", "Rascunho"),
+            ("xml", "XML"),
+            ("review", "Conferência"),
+        ]
+        action_step = {
+            "fetch_duimp": "duimp",
+            "configure_fiscal_profile": "context",
+            "select_import_purpose": "context",
+            "configure_tax_rule": "context",
+            "resolve_context": "context",
+            "classify_items": "purposes",
+            "create_document_plan": "planning",
+            "review_document_plan": "planning",
+            "create_child_drafts": "drafts",
+            "create_draft": "drafts",
+            "configure_number_sequence": "drafts",
+            "correct_child_drafts": "drafts",
+            "correct_draft": "drafts",
+            "generate_child_xmls": "xml",
+            "validate_child_xmls": "xml",
+            "generate_access_key": "xml",
+            "generate_xml": "xml",
+            "validate_xml": "xml",
+            "completed": "review",
+        }
+        current_step = action_step.get(next_action, "duimp")
+        current_index = next(
+            index
+            for index, (key, _) in enumerate(steps)
+            if key == current_step
+        )
+        return {
+            "current_step": current_step,
+            "furthest_available_step": current_step,
+            "steps": [
+                {
+                    "key": key,
+                    "label": label,
+                    "status": (
+                        "completed"
+                        if index < current_index
+                        else "current"
+                        if index == current_index
+                        else "blocked"
+                    ),
+                    "can_view": index <= current_index,
+                }
+                for index, (key, label) in enumerate(steps)
+            ],
+        }
+
+    def get_nfe_workflow_state(
+        self,
+        process: ImportProcess,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        latest_snapshot = (
+            self.snapshot_query_for_current_user()
+            .filter(DuimpSnapshot.import_process_id == process.id)
+            .order_by(DuimpSnapshot.created_at.desc())
+            .first()
+        )
+        latest_draft = (
+            self.nfe_draft_query_for_current_user()
+            .filter(NfeDraft.import_process_id == process.id)
+            .order_by(
+                NfeDraft.updated_at.desc().nullslast(),
+                NfeDraft.created_at.desc(),
+            )
+            .first()
+        )
+        latest_plan = None
+        if latest_snapshot:
+            latest_plan = (
+                self.document_plan_query_for_current_user()
+                .filter(
+                    NfeDocumentPlan.import_process_id == process.id,
+                    NfeDocumentPlan.duimp_snapshot_id == latest_snapshot.id,
+                    NfeDocumentPlan.status == "planned",
+                )
+                .order_by(NfeDocumentPlan.version_number.desc())
+                .first()
+            )
+
+        import_purpose = params.get("import_purpose")
+        environment = params["environment"]
+        series = params["series"]
+        if latest_draft:
+            document = (latest_draft.fiscal_payload or {}).get("document") or {}
+            import_purpose = import_purpose or document.get("import_purpose")
+            environment = self._enum_value(latest_draft.environment) or environment
+            series = latest_draft.series or series
+
+        fiscal_profile = self.get_importer_fiscal_profile_or_none(
+            process.importer_id
+        )
+        context = None
+        if latest_snapshot and import_purpose:
+            context = self.get_nfe_context(
+                process,
+                {
+                    "duimp_snapshot_id": latest_snapshot.id,
+                    "import_purpose": import_purpose,
+                },
+            )
+
+        classifications = None
+        latest_classification = None
+        if latest_snapshot and fiscal_profile:
+            classifications = self.get_item_classification_state(
+                process,
+                latest_snapshot.id,
+            )
+            latest_classification = (
+                self.item_classification_query_for_current_user()
+                .filter(
+                    NfeItemClassification.import_process_id == process.id,
+                    NfeItemClassification.duimp_snapshot_id == latest_snapshot.id,
+                )
+                .order_by(NfeItemClassification.updated_at.desc())
+                .first()
+            )
+
+        comparable_series = {series, series.zfill(3)}
+        sequence = (
+            NfeNumberSequence.query.filter(
+                NfeNumberSequence.organization_id == self._require_organization_id(),
+                NfeNumberSequence.client_id == process.importer_id,
+                NfeNumberSequence.environment == environment,
+                NfeNumberSequence.model == NfeModel.NFE.value,
+                NfeNumberSequence.series.in_(comparable_series),
+            )
+            .order_by(NfeNumberSequence.updated_at.desc())
+            .first()
+        )
+
+        draft_detail = self.get_nfe_draft_detail(latest_draft) if latest_draft else None
+        latest_xml = (
+            draft_detail["xml_versions"][0]
+            if draft_detail and draft_detail["xml_versions"]
+            else None
+        )
+        active_tax_rule = bool(context and context.get("tax_rule"))
+        classification_newer_than_draft = bool(
+            latest_draft
+            and latest_classification
+            and latest_classification.updated_at
+            and latest_draft.created_at
+            and latest_classification.updated_at > latest_draft.created_at
+        )
+        classification_newer_than_plan = bool(
+            latest_plan
+            and latest_classification
+            and latest_classification.updated_at
+            and latest_plan.created_at
+            and latest_classification.updated_at > latest_plan.created_at
+        )
+        classification_required = bool(
+            classifications
+            and (
+                latest_draft is None
+                or classifications.get("has_classifications")
+            )
+            and not classifications.get("ready_for_draft")
+        )
+        child_documents = list(latest_plan.documents) if latest_plan else []
+        is_multi_document_plan = len(child_documents) > 1
+        child_drafts = [
+            document.drafts[-1] if document.drafts else None
+            for document in child_documents
+        ]
+        missing_child_drafts = bool(is_multi_document_plan) and any(
+            draft is None for draft in child_drafts
+        )
+        child_correction_required = bool(is_multi_document_plan) and any(
+            draft is not None and bool(draft.validation_errors)
+            for draft in child_drafts
+        )
+        child_xmls = []
+        for draft in child_drafts:
+            if draft is None:
+                child_xmls.append(None)
+                continue
+            child_xmls.append(
+                NfeXmlVersion.query.filter(
+                    NfeXmlVersion.nfe_draft_id == draft.id,
+                    NfeXmlVersion.xml_type == NfeXmlType.UNSIGNED.value,
+                )
+                .order_by(NfeXmlVersion.version_number.desc())
+                .first()
+            )
+        missing_child_xmls = bool(is_multi_document_plan) and any(
+            xml is None for xml in child_xmls
+        )
+        invalid_child_xmls = bool(is_multi_document_plan) and any(
+            xml is not None and xml.xsd_valid is not True
+            for xml in child_xmls
+        )
+
+        if latest_snapshot is None:
+            next_action = "fetch_duimp"
+        elif fiscal_profile is None:
+            next_action = "configure_fiscal_profile"
+        elif not import_purpose:
+            next_action = "select_import_purpose"
+        elif not active_tax_rule:
+            next_action = "configure_tax_rule"
+        elif context and not context.get("ready_for_draft"):
+            next_action = "resolve_context"
+        elif classification_required:
+            next_action = "classify_items"
+        elif (
+            classifications
+            and classifications.get("ready_for_draft")
+            and (
+                latest_plan is None
+                or classification_newer_than_plan
+            )
+            and (
+                latest_draft is None
+                or classification_newer_than_draft
+            )
+        ):
+            next_action = "create_document_plan"
+        elif is_multi_document_plan and missing_child_drafts:
+            next_action = "create_child_drafts"
+        elif is_multi_document_plan and child_correction_required:
+            next_action = "correct_child_drafts"
+        elif is_multi_document_plan and sequence is None:
+            next_action = "configure_number_sequence"
+        elif is_multi_document_plan and missing_child_xmls:
+            next_action = "generate_child_xmls"
+        elif is_multi_document_plan and invalid_child_xmls:
+            next_action = "validate_child_xmls"
+        elif is_multi_document_plan:
+            next_action = "completed"
+        elif latest_draft is None:
+            next_action = "create_draft"
+        elif classification_newer_than_draft:
+            next_action = "create_draft"
+        elif sequence is None:
+            next_action = "configure_number_sequence"
+        elif latest_draft.validation_errors:
+            next_action = "correct_draft"
+        elif not latest_draft.access_key:
+            next_action = "generate_access_key"
+        elif latest_xml is None:
+            next_action = "generate_xml"
+        elif (
+            latest_draft.updated_at
+            and latest_xml.generated_at
+            and latest_draft.updated_at > latest_xml.generated_at
+        ):
+            next_action = "generate_xml"
+        elif latest_xml.xsd_valid is not True:
+            next_action = "validate_xml"
+        else:
+            next_action = "completed"
+
+        navigation = self._workflow_navigation(next_action)
+
+        return {
+            "process": self.build_import_process_summary(process),
+            "latest_snapshot": (
+                {
+                    "id": str(latest_snapshot.id),
+                    "duimp_number": latest_snapshot.duimp_number,
+                    "duimp_version": latest_snapshot.duimp_version,
+                    "source_provider": self._enum_value(latest_snapshot.source_provider),
+                    "fetched_at": self._iso(latest_snapshot.fetched_at),
+                    "created_at": self._iso(latest_snapshot.created_at),
+                }
+                if latest_snapshot
+                else None
+            ),
+            "context": context,
+            "item_classification": classifications,
+            "document_plan": (
+                self._serialize_document_plan(latest_plan)
+                if latest_plan
+                else None
+            ),
+            "latest_draft": draft_detail,
+            "prerequisites": {
+                "has_fiscal_profile": fiscal_profile is not None,
+                "has_active_tax_rule": active_tax_rule,
+                "has_number_sequence": sequence is not None,
+                "has_item_classification": bool(
+                    classifications
+                    and classifications.get("has_classifications")
+                ),
+                "item_classification_ready": bool(
+                    classifications
+                    and classifications.get("ready_for_draft")
+                ),
+                "has_document_plan": latest_plan is not None,
+                "planned_documents_count": (
+                    len(latest_plan.documents) if latest_plan else 0
+                ),
+                "import_purpose": import_purpose,
+                "environment": environment,
+                "series": series,
+            },
+            "next_action": next_action,
+            **navigation,
+        }
+
     # ------------------------------------------------------------------
     # Provider connections
     # ------------------------------------------------------------------
     def create_provider_connection(self, payload: dict[str, Any]) -> ExternalProviderConnection:
+        """Cria ou atualiza a conexão do mesmo escopo, provider e ambiente."""
         now = datetime.utcnow()
-        connection = ExternalProviderConnection(
-            organization_id=self._require_organization_id(),
-            importer_id=payload.get("importer_id"),
-            provider=payload["provider"],
-            environment=payload["environment"],
-            auth_type=payload["auth_type"],
-            status=payload.get("status") or "active",
-            config_json=payload.get("config_json"),
-            credentials_ref=payload.get("credentials_ref"),
-            created_at=now,
-            updated_at=now,
+        organization_id = self._require_organization_id()
+        importer_id = payload.get("importer_id")
+        provider = payload["provider"]
+        environment = payload["environment"]
+        status = payload.get("status") or "active"
+        credentials_ref = self._empty_to_none(payload.get("credentials_ref"))
+
+        if importer_id:
+            self.get_client_for_current_user(importer_id)
+        if (
+            provider == ExternalProvider.PORTAL_UNICO.value
+            and status == "active"
+            and not credentials_ref
+        ):
+            raise ValueError(
+                "credentials_ref é obrigatório para uma conexão ativa do Portal Único."
+            )
+
+        query = self.provider_connection_query_for_current_user().filter(
+            ExternalProviderConnection.provider == provider,
+            ExternalProviderConnection.environment == environment,
         )
-        db.session.add(connection)
+        if importer_id:
+            query = query.filter(
+                ExternalProviderConnection.importer_id == importer_id
+            )
+        else:
+            query = query.filter(ExternalProviderConnection.importer_id.is_(None))
+
+        connection = query.order_by(
+            ExternalProviderConnection.updated_at.desc()
+        ).first()
+        if connection is None:
+            connection = ExternalProviderConnection(
+                organization_id=organization_id,
+                importer_id=importer_id,
+                provider=provider,
+                environment=environment,
+                created_at=now,
+            )
+            db.session.add(connection)
+
+        connection.auth_type = payload["auth_type"]
+        connection.status = status
+        connection.config_json = payload.get("config_json")
+        connection.credentials_ref = credentials_ref
+        connection.last_error = None
+        connection.updated_at = now
         db.session.flush()
         return connection
 
@@ -472,6 +1070,187 @@ class ImportNfeService:
             .all()
         )
         return {"items": rows, "total": total, "limit": params["limit"], "offset": params["offset"]}
+
+    # ------------------------------------------------------------------
+    # Regras fiscais de importação
+    # ------------------------------------------------------------------
+    def list_import_tax_rules(self, client_id) -> list[ClientImportTaxRule]:
+        self.get_client_for_current_user(client_id)
+        return (
+            self.import_tax_rule_query_for_current_user()
+            .filter(ClientImportTaxRule.client_id == client_id)
+            .order_by(
+                ClientImportTaxRule.active.desc(),
+                ClientImportTaxRule.priority.desc(),
+                ClientImportTaxRule.name.asc(),
+            )
+            .all()
+        )
+
+    def create_import_tax_rule(
+        self,
+        client_id,
+        payload: dict[str, Any],
+    ) -> ClientImportTaxRule:
+        self.get_client_for_current_user(client_id)
+        now = datetime.utcnow()
+        rule = ClientImportTaxRule(
+            organization_id=self._require_organization_id(),
+            client_id=client_id,
+            created_by_user_id=self.user_id,
+            created_at=now,
+            updated_at=now,
+            **payload,
+        )
+        self._validate_import_tax_rule(rule)
+        db.session.add(rule)
+        db.session.flush()
+        return rule
+
+    def update_import_tax_rule(
+        self,
+        rule: ClientImportTaxRule,
+        payload: dict[str, Any],
+    ) -> ClientImportTaxRule:
+        for field in (
+            "name",
+            "issuer_state",
+            "import_purpose",
+            "import_modality",
+            "tax_regime",
+            "ncm_pattern",
+            "priority",
+            "configuration_json",
+            "additional_cost_defaults",
+            "transport_defaults",
+            "payment_defaults",
+            "active",
+            "effective_from",
+            "effective_until",
+        ):
+            if field in payload:
+                setattr(rule, field, payload[field])
+        rule.updated_at = datetime.utcnow()
+        self._validate_import_tax_rule(rule)
+        db.session.flush()
+        return rule
+
+    def get_import_tax_rule(self, client_id, rule_id) -> ClientImportTaxRule:
+        self.get_client_for_current_user(client_id)
+        rule = (
+            self.import_tax_rule_query_for_current_user()
+            .filter(
+                ClientImportTaxRule.id == rule_id,
+                ClientImportTaxRule.client_id == client_id,
+            )
+            .first()
+        )
+        if rule is None:
+            raise ValueError("Regra fiscal de importação não encontrada.")
+        return rule
+
+    def deactivate_import_tax_rule(self, rule: ClientImportTaxRule) -> None:
+        rule.active = False
+        rule.updated_at = datetime.utcnow()
+        db.session.flush()
+
+    def match_import_tax_rule(
+        self,
+        *,
+        client_id,
+        issuer_state: str,
+        tax_regime: str,
+        import_purpose: str,
+        import_modality: str | None,
+        ncms: list[str],
+        reference_date: date | None,
+        rule_id=None,
+    ) -> ClientImportTaxRule | None:
+        query = self.import_tax_rule_query_for_current_user().filter(
+            ClientImportTaxRule.client_id == client_id,
+            ClientImportTaxRule.active.is_(True),
+        )
+        if rule_id:
+            query = query.filter(ClientImportTaxRule.id == rule_id)
+
+        matches: list[ClientImportTaxRule] = []
+        for rule in query.all():
+            reasons = self._tax_rule_mismatch_reasons(
+                rule,
+                issuer_state=issuer_state,
+                tax_regime=tax_regime,
+                import_purpose=import_purpose,
+                import_modality=import_modality,
+                ncms=ncms,
+                reference_date=reference_date,
+            )
+            if not reasons:
+                matches.append(rule)
+
+        def score(rule: ClientImportTaxRule):
+            return (
+                rule.priority,
+                len(self._digits(rule.ncm_pattern)),
+                bool(rule.import_modality),
+                bool(rule.tax_regime),
+            )
+
+        matches.sort(key=score, reverse=True)
+        if rule_id and not matches:
+            raise ValueError(
+                "A regra fiscal informada não é aplicável ao cliente, UF, "
+                "finalidade, modalidade, NCMs ou período da DUIMP."
+            )
+        if len(matches) > 1 and score(matches[0]) == score(matches[1]):
+            raise ValueError(
+                "Mais de uma regra fiscal com a mesma especificidade é aplicável. "
+                "Ajuste a prioridade ou o escopo das regras."
+            )
+        return matches[0] if matches else None
+
+    def _tax_rule_mismatch_reasons(
+        self,
+        rule: ClientImportTaxRule,
+        *,
+        issuer_state: str,
+        tax_regime: str,
+        import_purpose: str,
+        import_modality: str | None,
+        ncms: list[str],
+        reference_date: date | None,
+    ) -> list[str]:
+        reasons: list[str] = []
+        if rule.issuer_state != issuer_state:
+            reasons.append("issuer_state")
+        if rule.import_purpose != import_purpose:
+            reasons.append("import_purpose")
+        if rule.tax_regime and rule.tax_regime != tax_regime:
+            reasons.append("tax_regime")
+        if rule.import_modality and rule.import_modality != import_modality:
+            reasons.append("import_modality")
+        if reference_date:
+            if rule.effective_from and reference_date < rule.effective_from:
+                reasons.append("effective_from")
+            if rule.effective_until and reference_date > rule.effective_until:
+                reasons.append("effective_until")
+        pattern = self._digits(rule.ncm_pattern)
+        if pattern and (
+            not ncms
+            or not all(ncm.startswith(pattern) for ncm in ncms)
+        ):
+            reasons.append("ncm_pattern")
+        return reasons
+
+    @staticmethod
+    def _validate_import_tax_rule(rule: ClientImportTaxRule) -> None:
+        if (
+            rule.effective_from
+            and rule.effective_until
+            and rule.effective_until < rule.effective_from
+        ):
+            raise ValueError(
+                "effective_until não pode ser anterior a effective_from."
+            )
 
     # ------------------------------------------------------------------
     # DUIMP snapshot
@@ -517,6 +1296,7 @@ class ImportNfeService:
             raw_duimp = gateway.fetch_duimp(
                 duimp_number=duimp_number,
                 duimp_payload=manual_payload,
+                enrich_catalog=payload.get("enrich_catalog", True),
             )
             finished_at = datetime.utcnow()
             self._log_external_request(
@@ -524,7 +1304,10 @@ class ImportNfeService:
                 provider=provider,
                 endpoint_name="duimp.fetch",
                 method=HttpMethod.GET.value,
-                request_payload={"duimp_number": duimp_number},
+                request_payload={
+                    "duimp_number": duimp_number,
+                    "enrich_catalog": payload.get("enrich_catalog", True),
+                },
                 response_payload=raw_duimp,
                 success=True,
                 status_code=200,
@@ -625,7 +1408,11 @@ class ImportNfeService:
             ).first()
         if connection is None:
             raise PortalUnicoIntegrationError(
-                "Conexão ativa com o Portal Único não configurada para o cliente e ambiente."
+                "Conexão ativa com o Portal Único não configurada para o ambiente "
+                f"{environment}. Cadastre uma conexão específica do cliente ou global "
+                "da organização em /external-provider-connections. Para consultar uma "
+                "DUIMP real, use provider_environment=production; o ambiente da NF-e "
+                "pode permanecer em homologation."
             )
         if not connection.credentials_ref:
             raise PortalUnicoIntegrationError(
@@ -634,9 +1421,1208 @@ class ImportNfeService:
         return connection
 
     # ------------------------------------------------------------------
+    # Contexto automatizado para NF-e
+    # ------------------------------------------------------------------
+    def get_nfe_context(
+        self,
+        process: ImportProcess,
+        payload: dict[str, Any],
+        *,
+        persist: bool = False,
+    ) -> dict[str, Any]:
+        snapshot = self._snapshot_for_process(
+            process,
+            payload.get("duimp_snapshot_id"),
+        )
+        normalized = deepcopy(
+            snapshot.normalized_payload
+            or self.normalize_duimp_payload(snapshot.raw_payload)
+        )
+
+        external: dict[str, Any] = {"errors": []}
+        connection_config: dict[str, Any] = {}
+        environment = payload.get("provider_environment")
+        if environment:
+            connection = self._find_provider_connection(
+                process=process,
+                provider=ExternalProvider.PORTAL_UNICO.value,
+                environment=environment,
+            )
+            connection_config = dict(connection.config_json or {})
+
+        if payload.get("refresh_external"):
+            if not environment:
+                raise ValueError(
+                    "provider_environment é obrigatório quando refresh_external=true."
+                )
+            gateway = self._duimp_gateway_for(process=process, payload=payload)
+            cargo_identifier = self._cargo_identifier(normalized)
+            if cargo_identifier:
+                external["cargo_knowledge"] = self._read_external_context(
+                    process=process,
+                    endpoint_name="cct.cargo_knowledge.get",
+                    request_payload={"numeroConhecimento": cargo_identifier},
+                    errors=external["errors"],
+                    callback=lambda: gateway.fetch_cargo_knowledge(
+                        knowledge_number=cargo_identifier
+                    ),
+                )
+
+            external["icms_declaration"] = self._read_external_context(
+                process=process,
+                endpoint_name="pcce.icms.get",
+                request_payload={"duimp_number": normalized.get("number")},
+                errors=external["errors"],
+                callback=lambda: gateway.fetch_icms_declaration(
+                    duimp_number=normalized.get("number")
+                ),
+            )
+
+            customs_unit_code = normalized.get("clearance_location_code")
+            customs_table = connection_config.get("tabx_customs_unit_table")
+            if customs_table and customs_unit_code:
+                code_field = connection_config.get(
+                    "tabx_customs_unit_code_field", "CODIGO"
+                )
+                external["customs_unit"] = self._read_external_context(
+                    process=process,
+                    endpoint_name="tabx.customs_unit.get",
+                    request_payload={
+                        "table": customs_table,
+                        "code": customs_unit_code,
+                    },
+                    errors=external["errors"],
+                    callback=lambda: gateway.fetch_comex_table(
+                        table_name=customs_table,
+                        filters=[
+                            {
+                                "nomeTabela": customs_table,
+                                "nome": code_field,
+                                "valores": [str(customs_unit_code)],
+                            }
+                        ],
+                    ),
+                )
+
+            country_iso = (
+                (normalized.get("foreign_supplier") or {}).get(
+                    "country_iso_alpha_2"
+                )
+                or (normalized.get("country_of_origin") or {}).get("iso_alpha_2")
+            )
+            country_table = connection_config.get("tabx_country_table")
+            if country_table and country_iso:
+                iso_field = connection_config.get(
+                    "tabx_country_iso_field", "SIGLA_ISO2"
+                )
+                external["country"] = self._read_external_context(
+                    process=process,
+                    endpoint_name="tabx.country.get",
+                    request_payload={"table": country_table, "iso": country_iso},
+                    errors=external["errors"],
+                    callback=lambda: gateway.fetch_comex_table(
+                        table_name=country_table,
+                        filters=[
+                            {
+                                "nomeTabela": country_table,
+                                "nome": iso_field,
+                                "valores": [str(country_iso)],
+                            }
+                        ],
+                    ),
+                )
+
+        context = self.nfe_context_resolver.resolve(
+            normalized=normalized,
+            external=external,
+            connection_config=connection_config,
+            overrides=payload.get("overrides"),
+        )
+        fiscal_profile = self.get_importer_fiscal_profile_or_none(process.importer_id)
+        rule = None
+        if fiscal_profile:
+            rule = self.match_import_tax_rule(
+                client_id=process.importer_id,
+                issuer_state=fiscal_profile.state,
+                tax_regime=fiscal_profile.tax_regime,
+                import_purpose=payload["import_purpose"],
+                import_modality=context["normalized"].get("import_modality"),
+                ncms=[
+                    self._digits(item.get("ncm"))
+                    for item in context["normalized"].get("items", [])
+                    if item.get("ncm")
+                ],
+                reference_date=self._date_value(
+                    context["normalized"].get("registration_date")
+                ),
+            )
+
+        missing = list(context["missing_fields"])
+        if fiscal_profile is None:
+            missing.append("client.fiscal_profile")
+        if rule is None:
+            missing.append("tax_configuration")
+        context.update(
+            {
+                "process_id": str(process.id),
+                "snapshot_id": str(snapshot.id),
+                "tax_rule": self._tax_rule_to_dict(rule) if rule else None,
+                "missing_fields": missing,
+                "ready_for_draft": not missing,
+            }
+        )
+
+        if persist:
+            snapshot.normalized_payload = context["normalized"]
+            db.session.flush()
+        return context
+
+    def _snapshot_for_process(
+        self,
+        process: ImportProcess,
+        snapshot_id=None,
+    ) -> DuimpSnapshot:
+        query = self.snapshot_query_for_current_user().filter(
+            DuimpSnapshot.import_process_id == process.id
+        )
+        if snapshot_id:
+            try:
+                snapshot_uuid = (
+                    snapshot_id
+                    if isinstance(snapshot_id, UUID)
+                    else UUID(str(snapshot_id))
+                )
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise ValueError("Identificador do snapshot da DUIMP inválido.") from exc
+            query = query.filter(DuimpSnapshot.id == snapshot_uuid)
+        snapshot = query.order_by(DuimpSnapshot.created_at.desc()).first()
+        if snapshot is None:
+            raise ValueError("Snapshot da DUIMP não encontrado para este processo.")
+        return snapshot
+
+    def _read_external_context(
+        self,
+        *,
+        process: ImportProcess,
+        endpoint_name: str,
+        request_payload: dict[str, Any],
+        errors: list[dict[str, Any]],
+        callback,
+    ) -> Any:
+        started_at = datetime.utcnow()
+        try:
+            response = callback()
+            self._log_external_request(
+                process=process,
+                provider=ExternalProvider.PORTAL_UNICO.value,
+                endpoint_name=endpoint_name,
+                method=HttpMethod.GET.value,
+                request_payload=request_payload,
+                response_payload=response,
+                success=True,
+                status_code=200,
+                started_at=started_at,
+                finished_at=datetime.utcnow(),
+            )
+            return response
+        except Exception as exc:
+            error = {
+                "source": endpoint_name,
+                "code": getattr(exc, "error_code", None)
+                or exc.__class__.__name__,
+                "message": str(exc),
+            }
+            errors.append(error)
+            self._log_external_request(
+                process=process,
+                provider=ExternalProvider.PORTAL_UNICO.value,
+                endpoint_name=endpoint_name,
+                method=HttpMethod.GET.value,
+                request_payload=request_payload,
+                response_payload=None,
+                success=False,
+                status_code=getattr(exc, "status_code", None),
+                error_code=error["code"],
+                error_message=error["message"],
+                started_at=started_at,
+                finished_at=datetime.utcnow(),
+            )
+            return None
+
+    @staticmethod
+    def _cargo_identifier(normalized: dict[str, Any]) -> str | None:
+        raw = normalized.get("raw") or {}
+        general = raw.get("dadosGerais") or {}
+        documents = (general.get("documentos") or {}).get(
+            "documentosInstrucao"
+        ) or []
+        # Documento 30 é o conhecimento aéreo informado na própria DUIMP.
+        # Ele deve ser preferido à RUC para a consulta numeroConhecimento do CCT.
+        for document in documents:
+            document_type = str((document.get("tipo") or {}).get("codigo") or "")
+            if document_type != "30":
+                continue
+            for keyword in document.get("palavrasChave") or []:
+                value = keyword.get("valor")
+                if value not in (None, ""):
+                    return str(value).strip()
+        cargo = general.get("carga") or {}
+        value = cargo.get("identificacao")
+        return str(value).strip() if value not in (None, "") else None
+
+    # ------------------------------------------------------------------
+    # Classificação fiscal por item
+    # ------------------------------------------------------------------
+    def get_item_classification_state(
+        self,
+        process: ImportProcess,
+        snapshot_id=None,
+    ) -> dict[str, Any]:
+        snapshot = self._snapshot_for_process(process, snapshot_id)
+        normalized = (
+            snapshot.normalized_payload
+            or self.normalize_duimp_payload(snapshot.raw_payload)
+        )
+        rows = (
+            self.item_classification_query_for_current_user()
+            .filter(
+                NfeItemClassification.import_process_id == process.id,
+                NfeItemClassification.duimp_snapshot_id == snapshot.id,
+            )
+            .all()
+        )
+        by_number = {
+            str(row.duimp_item_number): row
+            for row in rows
+        }
+        profile = self.get_importer_fiscal_profile_or_none(
+            process.importer_id
+        )
+        active_rules = (
+            self.import_tax_rule_query_for_current_user()
+            .filter(
+                ClientImportTaxRule.client_id == process.importer_id,
+                ClientImportTaxRule.active.is_(True),
+            )
+            .all()
+        )
+        registration_date = self._date_value(
+            normalized.get("registration_date")
+        )
+        items = []
+        purpose_counts: dict[str, int] = {}
+        latest_updated_at = None
+
+        for source in normalized.get("items") or []:
+            number = str(source.get("number") or "")
+            row = by_number.get(number)
+            purpose = row.import_purpose if row else None
+            rule = row.tax_rule if row else None
+            rule_active = bool(rule and rule.active)
+            if row and row.updated_at and (
+                latest_updated_at is None
+                or row.updated_at > latest_updated_at
+            ):
+                latest_updated_at = row.updated_at
+
+            if purpose:
+                purpose_counts[purpose] = purpose_counts.get(purpose, 0) + 1
+            if row is None:
+                status = "unclassified"
+            elif not rule:
+                status = "missing_tax_rule"
+            elif not rule_active:
+                status = "inactive_tax_rule"
+            elif not row.cfop:
+                status = "missing_cfop"
+            else:
+                status = "classified"
+
+            rule_cfop = (
+                str((rule.configuration_json or {}).get("cfop") or "")
+                if rule
+                else ""
+            )
+            rule_candidates = []
+            if (
+                purpose
+                and status != "classified"
+                and profile is not None
+            ):
+                item_ncms = [self._digits(source.get("ncm"))]
+                for candidate in active_rules:
+                    if candidate.import_purpose != purpose:
+                        continue
+                    reasons = self._tax_rule_mismatch_reasons(
+                        candidate,
+                        issuer_state=profile.state,
+                        tax_regime=profile.tax_regime,
+                        import_purpose=purpose,
+                        import_modality=normalized.get("import_modality"),
+                        ncms=item_ncms,
+                        reference_date=registration_date,
+                    )
+                    rule_candidates.append(
+                        {
+                            "id": str(candidate.id),
+                            "name": candidate.name,
+                            "mismatch_reasons": reasons,
+                            "issuer_state": candidate.issuer_state,
+                            "tax_regime": candidate.tax_regime,
+                            "import_modality": candidate.import_modality,
+                            "ncm_pattern": candidate.ncm_pattern,
+                            "effective_from": (
+                                candidate.effective_from.isoformat()
+                                if candidate.effective_from
+                                else None
+                            ),
+                            "effective_until": (
+                                candidate.effective_until.isoformat()
+                                if candidate.effective_until
+                                else None
+                            ),
+                            "cfop": str(
+                                (candidate.configuration_json or {}).get(
+                                    "cfop"
+                                )
+                                or self._resolve_cfop(purpose)
+                            ),
+                        }
+                    )
+                rule_candidates.sort(
+                    key=lambda candidate: (
+                        len(candidate["mismatch_reasons"]),
+                        candidate["name"],
+                    )
+                )
+            items.append(
+                {
+                    "duimp_item_number": number,
+                    "product_code": source.get("product_code"),
+                    "description": source.get("description"),
+                    "ncm": source.get("ncm"),
+                    "exporter_code": (
+                        source.get("exporter_code")
+                        or normalized.get("exporter_code")
+                    ),
+                    "import_purpose": purpose,
+                    "cfop": row.cfop if row else None,
+                    "cfop_source": (
+                        "tax_rule"
+                        if row and rule_cfop == row.cfop
+                        else "purpose_default"
+                        if row and row.cfop
+                        else None
+                    ),
+                    "tax_rule": (
+                        {
+                            "id": str(rule.id),
+                            "name": rule.name,
+                            "active": rule.active,
+                        }
+                        if rule
+                        else None
+                    ),
+                    "status": status,
+                    "rule_candidates": rule_candidates[:3],
+                    "classified_by": (
+                        {
+                            "id": str(row.classified_by.id),
+                            "name": row.classified_by.nome,
+                        }
+                        if row and row.classified_by
+                        else None
+                    ),
+                    "updated_at": self._iso(row.updated_at) if row else None,
+                }
+            )
+
+        classified_count = sum(
+            1 for item in items if item["status"] == "classified"
+        )
+        return {
+            "process_id": str(process.id),
+            "snapshot_id": str(snapshot.id),
+            "items": items,
+            "total_items": len(items),
+            "classified_count": classified_count,
+            "pending_count": len(items) - classified_count,
+            "purpose_counts": purpose_counts,
+            "registration_date": (
+                registration_date.isoformat()
+                if registration_date
+                else None
+            ),
+            "has_classifications": bool(rows),
+            "ready_for_draft": bool(items)
+            and classified_count == len(items),
+            "latest_updated_at": self._iso(latest_updated_at),
+        }
+
+    def save_item_classifications(
+        self,
+        process: ImportProcess,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        snapshot = self._snapshot_for_process(
+            process,
+            payload.get("duimp_snapshot_id"),
+        )
+        normalized = (
+            snapshot.normalized_payload
+            or self.normalize_duimp_payload(snapshot.raw_payload)
+        )
+        source_items = {
+            str(item.get("number") or ""): item
+            for item in normalized.get("items") or []
+        }
+        profile = self.get_importer_fiscal_profile(process.importer_id)
+        now = datetime.utcnow()
+
+        for requested in payload["items"]:
+            item_number = str(requested["duimp_item_number"])
+            source = source_items.get(item_number)
+            if source is None:
+                raise ValueError(
+                    f"Item {item_number} não pertence ao snapshot informado."
+                )
+            purpose = requested["import_purpose"]
+            rule = self.match_import_tax_rule(
+                client_id=process.importer_id,
+                issuer_state=profile.state,
+                tax_regime=profile.tax_regime,
+                import_purpose=purpose,
+                import_modality=normalized.get("import_modality"),
+                ncms=[self._digits(source.get("ncm"))],
+                reference_date=self._date_value(
+                    normalized.get("registration_date")
+                ),
+                rule_id=requested.get("tax_rule_id"),
+            )
+            configuration = dict(rule.configuration_json or {}) if rule else {}
+            configured_cfop = self._digits(configuration.get("cfop"))
+            cfop = (
+                configured_cfop
+                if len(configured_cfop) == 4
+                else self._resolve_cfop(purpose)
+                if rule
+                else None
+            )
+
+            row = (
+                self.item_classification_query_for_current_user()
+                .filter(
+                    NfeItemClassification.duimp_snapshot_id == snapshot.id,
+                    NfeItemClassification.duimp_item_number == item_number,
+                )
+                .first()
+            )
+            if row is None:
+                row = NfeItemClassification(
+                    organization_id=self._require_organization_id(),
+                    import_process_id=process.id,
+                    duimp_snapshot_id=snapshot.id,
+                    duimp_item_number=item_number,
+                    created_at=now,
+                )
+                db.session.add(row)
+            row.import_purpose = purpose
+            row.tax_rule_id = rule.id if rule else None
+            row.cfop = cfop
+            row.source = "manual"
+            row.classified_by_user_id = self.user_id
+            row.updated_at = now
+
+        process.updated_at = now
+        db.session.flush()
+        return self.get_item_classification_state(process, snapshot.id)
+
+    def _item_classification_map(
+        self,
+        process: ImportProcess,
+        snapshot: DuimpSnapshot,
+    ) -> dict[str, NfeItemClassification]:
+        rows = (
+            self.item_classification_query_for_current_user()
+            .filter(
+                NfeItemClassification.import_process_id == process.id,
+                NfeItemClassification.duimp_snapshot_id == snapshot.id,
+            )
+            .all()
+        )
+        return {
+            str(row.duimp_item_number): row
+            for row in rows
+        }
+
+    # ------------------------------------------------------------------
+    # Planejamento documental (Master gerencial e NF-e filhas)
+    # ------------------------------------------------------------------
+    def get_document_plan_state(
+        self,
+        process: ImportProcess,
+        snapshot_id=None,
+    ) -> dict[str, Any]:
+        snapshot = self._snapshot_for_process(process, snapshot_id)
+        plan = (
+            self.document_plan_query_for_current_user()
+            .filter(
+                NfeDocumentPlan.import_process_id == process.id,
+                NfeDocumentPlan.duimp_snapshot_id == snapshot.id,
+                NfeDocumentPlan.status == "planned",
+            )
+            .order_by(NfeDocumentPlan.version_number.desc())
+            .first()
+        )
+        return {
+            "process_id": str(process.id),
+            "snapshot_id": str(snapshot.id),
+            "plan": self._serialize_document_plan(plan) if plan else None,
+        }
+
+    def create_document_plan(
+        self,
+        process: ImportProcess,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = self._json_compatible(payload)
+        snapshot = self._snapshot_for_process(
+            process,
+            payload.get("duimp_snapshot_id"),
+        )
+        normalized = (
+            snapshot.normalized_payload
+            or self.normalize_duimp_payload(snapshot.raw_payload)
+        )
+        classification_state = self.get_item_classification_state(
+            process,
+            snapshot.id,
+        )
+        if not classification_state["ready_for_draft"]:
+            raise ValueError(
+                "Classifique a finalidade, a regra tributária e o CFOP de "
+                "todos os itens antes de gerar o planejamento documental."
+            )
+        classifications = self._item_classification_map(process, snapshot)
+        source_items = list(normalized.get("items") or [])
+        if not source_items:
+            raise ValueError("A DUIMP não possui itens para planejar.")
+
+        default_costs: dict[str, Any] = {}
+        for classification in classifications.values():
+            rule = classification.tax_rule
+            if rule and rule.additional_cost_defaults:
+                default_costs = self._merge_defaults(
+                    default_costs,
+                    rule.additional_cost_defaults,
+                )
+        default_costs = self._merge_defaults(
+            default_costs,
+            normalized.get("automation_additional_costs"),
+        )
+        default_costs.update(payload.get("additional_costs") or {})
+        shared_costs = self.resolve_additional_costs(
+            duimp=normalized,
+            additional_costs=default_costs,
+        )
+        shared_costs = {
+            name: self._money_text(self._decimal(shared_costs.get(name)))
+            for name in ("afrmm", "siscomex_fee", "thc", "other")
+        }
+
+        weights = [
+            self._decimal(item.get("customs_value") or item.get("product_value"))
+            for item in source_items
+        ]
+        if any(weight < 0 for weight in weights):
+            raise ValueError("O valor aduaneiro dos itens não pode ser negativo.")
+        if sum(weights, Decimal("0")) <= 0:
+            raise ValueError(
+                "O valor aduaneiro positivo é obrigatório para ratear os custos."
+            )
+        allocations = {
+            name: self._allocate_shared_cost_to_items(
+                self._decimal(value),
+                weights,
+            )
+            for name, value in shared_costs.items()
+        }
+
+        now = datetime.utcnow()
+        previous_plans = (
+            self.document_plan_query_for_current_user()
+            .filter(
+                NfeDocumentPlan.import_process_id == process.id,
+                NfeDocumentPlan.status == "planned",
+            )
+            .all()
+        )
+        for previous in previous_plans:
+            previous.status = "superseded"
+            previous.updated_at = now
+        latest_version = (
+            db.session.query(func.max(NfeDocumentPlan.version_number))
+            .filter(NfeDocumentPlan.duimp_snapshot_id == snapshot.id)
+            .scalar()
+            or 0
+        )
+        plan = NfeDocumentPlan(
+            organization_id=self._require_organization_id(),
+            import_process_id=process.id,
+            duimp_snapshot_id=snapshot.id,
+            version_number=latest_version + 1,
+            status="planned",
+            allocation_basis="customs_value",
+            shared_costs=shared_costs,
+            totals={},
+            reconciliation={},
+            created_by_user_id=self.user_id,
+            created_at=now,
+            updated_at=now,
+        )
+        db.session.add(plan)
+        db.session.flush()
+
+        groups: dict[str, dict[str, Any]] = {}
+        for index, source in enumerate(source_items):
+            item_number = str(source.get("number") or "")
+            classification = classifications[item_number]
+            exporter_key, exporter_code, supplier = self._document_exporter(
+                source,
+                normalized,
+            )
+            group = groups.setdefault(
+                exporter_key,
+                {
+                    "exporter_code": exporter_code,
+                    "foreign_supplier": supplier,
+                    "items": [],
+                },
+            )
+            group["items"].append(
+                {
+                    "source": source,
+                    "classification": classification,
+                    "customs_value": weights[index],
+                    "allocations": {
+                        name: values[index]
+                        for name, values in allocations.items()
+                    },
+                }
+            )
+
+        document_rows = []
+        for ordinal, (exporter_key, group) in enumerate(
+            sorted(groups.items(), key=lambda entry: entry[0]),
+            start=1,
+        ):
+            purposes = sorted(
+                {
+                    item["classification"].import_purpose
+                    for item in group["items"]
+                }
+            )
+            mixed = len(purposes) > 1
+            group_customs_value = sum(
+                (item["customs_value"] for item in group["items"]),
+                Decimal("0"),
+            )
+            group_costs = {
+                name: self._money_text(
+                    sum(
+                        (item["allocations"][name] for item in group["items"]),
+                        Decimal("0"),
+                    )
+                )
+                for name in shared_costs
+            }
+            group_cost_total = sum(
+                (self._decimal(value) for value in group_costs.values()),
+                Decimal("0"),
+            )
+            document = NfePlannedDocument(
+                organization_id=self._require_organization_id(),
+                document_plan_id=plan.id,
+                ordinal=ordinal,
+                exporter_key=exporter_key,
+                exporter_code=group["exporter_code"],
+                foreign_supplier=group["foreign_supplier"],
+                operation_nature=(
+                    "Importação de mercadorias"
+                    if mixed
+                    else self._default_operation_nature(purposes[0])
+                ),
+                item_purposes=purposes,
+                mixed_import_purposes=mixed,
+                items_count=len(group["items"]),
+                customs_value=group_customs_value.quantize(Decimal("0.01")),
+                allocated_shared_costs=group_costs,
+                totals={
+                    "customs_value": self._money_text(group_customs_value),
+                    "shared_costs": self._money_text(group_cost_total),
+                    "planned_value": self._money_text(
+                        group_customs_value + group_cost_total
+                    ),
+                },
+                status="planned",
+                created_at=now,
+                updated_at=now,
+            )
+            db.session.add(document)
+            db.session.flush()
+            document_rows.append(document)
+
+            for planned in group["items"]:
+                source = planned["source"]
+                classification = planned["classification"]
+                db.session.add(
+                    NfePlannedDocumentItem(
+                        organization_id=self._require_organization_id(),
+                        document_plan_id=plan.id,
+                        planned_document_id=document.id,
+                        duimp_snapshot_id=snapshot.id,
+                        item_classification_id=classification.id,
+                        duimp_item_number=str(source.get("number") or ""),
+                        exporter_key=exporter_key,
+                        exporter_code=group["exporter_code"],
+                        import_purpose=classification.import_purpose,
+                        cfop=classification.cfop,
+                        customs_value=planned["customs_value"].quantize(
+                            Decimal("0.01")
+                        ),
+                        allocated_shared_costs={
+                            name: self._money_text(value)
+                            for name, value in planned["allocations"].items()
+                        },
+                        raw_source_payload=source,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+
+        total_customs_value = sum(weights, Decimal("0"))
+        total_shared_costs = sum(
+            (self._decimal(value) for value in shared_costs.values()),
+            Decimal("0"),
+        )
+        checks = []
+        for name, expected_text in shared_costs.items():
+            allocated = sum(allocations[name], Decimal("0"))
+            expected = self._decimal(expected_text)
+            difference = expected - allocated
+            checks.append(
+                {
+                    "name": name,
+                    "expected": self._money_text(expected),
+                    "allocated": self._money_text(allocated),
+                    "difference": self._money_text(difference),
+                    "balanced": difference == Decimal("0"),
+                }
+            )
+        plan.totals = {
+            "documents_count": len(document_rows),
+            "items_count": len(source_items),
+            "customs_value": self._money_text(total_customs_value),
+            "shared_costs": self._money_text(total_shared_costs),
+            "planned_value": self._money_text(
+                total_customs_value + total_shared_costs
+            ),
+        }
+        plan.reconciliation = {
+            "balanced": all(check["balanced"] for check in checks),
+            "checks": checks,
+            "unassigned_items": 0,
+        }
+        process.updated_at = now
+        db.session.flush()
+        return self._serialize_document_plan(plan)
+
+    @staticmethod
+    def _allocate_shared_cost_to_items(
+        total: Decimal,
+        weights: list[Decimal],
+    ) -> list[Decimal]:
+        money = Decimal("0.01")
+        total = total.quantize(money)
+        if not weights:
+            return []
+        if total == 0:
+            return [Decimal("0.00") for _ in weights]
+        weight_total = sum(weights, Decimal("0"))
+        if weight_total <= 0:
+            raise ValueError(
+                "Não é possível ratear custos sem valor aduaneiro positivo."
+            )
+        total_cents = int(total / money)
+        allocations = [
+            int(
+                (Decimal(total_cents) * weight / weight_total).quantize(
+                    Decimal("1"),
+                    rounding=ROUND_DOWN,
+                )
+            )
+            for weight in weights
+        ]
+        remainder = total_cents - sum(allocations)
+        largest_item = max(
+            range(len(weights)),
+            key=lambda index: (weights[index], -index),
+        )
+        allocations[largest_item] += remainder
+        return [Decimal(cents) * money for cents in allocations]
+
+    def _document_exporter(
+        self,
+        item: dict[str, Any],
+        duimp: dict[str, Any],
+    ) -> tuple[str, str | None, dict[str, Any] | None]:
+        supplier = item.get("exporter")
+        supplier = supplier if isinstance(supplier, dict) else None
+        exporter_code = self._empty_to_none(
+            item.get("exporter_code")
+            or (supplier or {}).get("code")
+            or (supplier or {}).get("codigo")
+            or duimp.get("exporter_code")
+        )
+        suppliers = [
+            row
+            for row in (duimp.get("foreign_suppliers") or [])
+            if isinstance(row, dict)
+        ]
+        if supplier is None and exporter_code:
+            supplier = next(
+                (
+                    row
+                    for row in suppliers
+                    if self._empty_to_none(row.get("code") or row.get("codigo"))
+                    == exporter_code
+                ),
+                None,
+            )
+        if supplier is None and len(suppliers) == 1:
+            supplier = suppliers[0]
+        if supplier is None and isinstance(duimp.get("foreign_supplier"), dict):
+            supplier = duimp["foreign_supplier"]
+
+        foreign_id = self._empty_to_none(
+            (supplier or {}).get("foreign_tax_id")
+            or (supplier or {}).get("foreign_id")
+            or (supplier or {}).get("tin")
+        )
+        name = self._empty_to_none(
+            (supplier or {}).get("name")
+            or (supplier or {}).get("legal_name")
+            or (supplier or {}).get("razaoSocial")
+        )
+        if exporter_code:
+            key = f"code:{exporter_code}"
+        elif foreign_id:
+            key = f"foreign_id:{foreign_id}"
+        elif name:
+            key = f"name:{name.upper()}"
+        else:
+            key = "single:default"
+        return key, exporter_code, supplier
+
+    def _serialize_document_plan(
+        self,
+        plan: NfeDocumentPlan,
+    ) -> dict[str, Any]:
+        documents = [
+            self._serialize_planned_document(document)
+            for document in plan.documents
+        ]
+        progress = {
+            "documents_count": len(documents),
+            "drafts_count": sum(
+                1 for document in documents if document["draft"]
+            ),
+            "xmls_count": sum(
+                1
+                for document in documents
+                if (document["draft"] or {}).get("latest_xml")
+            ),
+            "xsd_valid_count": sum(
+                1
+                for document in documents
+                if ((document["draft"] or {}).get("latest_xml") or {}).get(
+                    "xsd_valid"
+                ) is True
+            ),
+        }
+        progress["all_drafts_created"] = bool(documents) and (
+            progress["drafts_count"] == progress["documents_count"]
+        )
+        progress["all_xmls_generated"] = bool(documents) and (
+            progress["xmls_count"] == progress["documents_count"]
+        )
+        progress["all_xmls_valid"] = bool(documents) and (
+            progress["xsd_valid_count"] == progress["documents_count"]
+        )
+        return {
+            "id": str(plan.id),
+            "process_id": str(plan.import_process_id),
+            "snapshot_id": str(plan.duimp_snapshot_id),
+            "version_number": plan.version_number,
+            "status": plan.status,
+            "allocation_basis": plan.allocation_basis,
+            "shared_costs": plan.shared_costs or {},
+            "totals": plan.totals or {},
+            "reconciliation": plan.reconciliation or {},
+            "master": {
+                "type": "managerial",
+                "is_fiscal_document": False,
+                "has_number": False,
+                "has_access_key": False,
+                "has_xml": False,
+            },
+            "progress": progress,
+            "documents": documents,
+            "created_by": (
+                {
+                    "id": str(plan.created_by.id),
+                    "name": plan.created_by.nome,
+                }
+                if plan.created_by
+                else None
+            ),
+            "created_at": self._iso(plan.created_at),
+            "updated_at": self._iso(plan.updated_at),
+        }
+
+    def _serialize_planned_document(
+        self,
+        document: NfePlannedDocument,
+    ) -> dict[str, Any]:
+        latest_draft = document.drafts[-1] if document.drafts else None
+        draft_summary = None
+        derived_status = document.status
+        if latest_draft:
+            latest_xml = (
+                NfeXmlVersion.query.filter(
+                    NfeXmlVersion.nfe_draft_id == latest_draft.id,
+                    NfeXmlVersion.xml_type == NfeXmlType.UNSIGNED.value,
+                )
+                .order_by(NfeXmlVersion.version_number.desc())
+                .first()
+            )
+            if latest_xml and latest_xml.xsd_valid is True:
+                derived_status = "xsd_validated"
+            elif latest_xml and latest_xml.xsd_valid is False:
+                derived_status = "xsd_invalid"
+            elif latest_xml:
+                derived_status = "xml_generated"
+            elif latest_draft.validation_errors:
+                derived_status = "correction_required"
+            else:
+                derived_status = "draft_ready"
+            draft_summary = {
+                "id": str(latest_draft.id),
+                "status": self._enum_value(latest_draft.status),
+                "number": latest_draft.number,
+                "series": latest_draft.series,
+                "access_key": latest_draft.access_key,
+                "validation_errors": latest_draft.validation_errors or [],
+                "validation_warnings": latest_draft.validation_warnings or [],
+                "latest_xml": (
+                    {
+                        "id": str(latest_xml.id),
+                        "version_number": latest_xml.version_number,
+                        "xml_type": self._enum_value(latest_xml.xml_type),
+                        "xsd_valid": latest_xml.xsd_valid,
+                        "xsd_errors": latest_xml.xsd_errors or [],
+                        "generated_at": self._iso(latest_xml.generated_at),
+                    }
+                    if latest_xml
+                    else None
+                ),
+                "created_at": self._iso(latest_draft.created_at),
+                "updated_at": self._iso(latest_draft.updated_at),
+            }
+        return {
+            "id": str(document.id),
+            "ordinal": document.ordinal,
+            "status": derived_status,
+            "exporter_key": document.exporter_key,
+            "exporter_code": document.exporter_code,
+            "foreign_supplier": document.foreign_supplier,
+            "operation_nature": document.operation_nature,
+            "item_purposes": document.item_purposes or [],
+            "mixed_import_purposes": document.mixed_import_purposes,
+            "items_count": document.items_count,
+            "customs_value": self._money_text(document.customs_value),
+            "allocated_shared_costs": document.allocated_shared_costs or {},
+            "totals": document.totals or {},
+            "draft": draft_summary,
+            "items": [
+                {
+                    "id": str(item.id),
+                    "duimp_item_number": item.duimp_item_number,
+                    "exporter_code": item.exporter_code,
+                    "import_purpose": item.import_purpose,
+                    "cfop": item.cfop,
+                    "customs_value": self._money_text(item.customs_value),
+                    "allocated_shared_costs": item.allocated_shared_costs or {},
+                }
+                for item in document.items
+            ],
+        }
+
+    def generate_child_drafts(
+        self,
+        process: ImportProcess,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        snapshot = self._snapshot_for_process(
+            process,
+            payload.get("duimp_snapshot_id"),
+        )
+        plan = (
+            self.document_plan_query_for_current_user()
+            .filter(
+                NfeDocumentPlan.import_process_id == process.id,
+                NfeDocumentPlan.duimp_snapshot_id == snapshot.id,
+                NfeDocumentPlan.status == "planned",
+            )
+            .order_by(NfeDocumentPlan.version_number.desc())
+            .first()
+        )
+        if plan is None:
+            raise ValueError("Gere e revise o plano de notas antes dos rascunhos.")
+
+        created = []
+        reused = []
+        for document in plan.documents:
+            existing = document.drafts[-1] if document.drafts else None
+            if existing:
+                reused.append(str(existing.id))
+                continue
+            child_payload = deepcopy(payload)
+            child_payload["duimp_snapshot_id"] = snapshot.id
+            child_payload.setdefault(
+                "import_purpose",
+                (document.item_purposes or [ImportPurpose.RESALE.value])[0],
+            )
+            result = self.create_nfe_draft_from_duimp(
+                process,
+                child_payload,
+                planned_document=document,
+            )
+            created.append(str(result["draft"].id))
+            document.status = "drafted"
+            document.updated_at = datetime.utcnow()
+
+        plan.updated_at = datetime.utcnow()
+        db.session.flush()
+        return {
+            "created_draft_ids": created,
+            "reused_draft_ids": reused,
+            "plan": self._serialize_document_plan(plan),
+        }
+
+    def generate_and_validate_child_xmls(
+        self,
+        process: ImportProcess,
+        snapshot_id=None,
+    ) -> dict[str, Any]:
+        snapshot = self._snapshot_for_process(process, snapshot_id)
+        plan = (
+            self.document_plan_query_for_current_user()
+            .filter(
+                NfeDocumentPlan.import_process_id == process.id,
+                NfeDocumentPlan.duimp_snapshot_id == snapshot.id,
+                NfeDocumentPlan.status == "planned",
+            )
+            .order_by(NfeDocumentPlan.version_number.desc())
+            .first()
+        )
+        if plan is None:
+            raise ValueError("Plano de notas ativo não encontrado.")
+
+        results = []
+        for document in plan.documents:
+            draft = document.drafts[-1] if document.drafts else None
+            if draft is None:
+                results.append({
+                    "planned_document_id": str(document.id),
+                    "success": False,
+                    "message": "Gere o rascunho desta NF-e filha primeiro.",
+                })
+                continue
+            try:
+                latest_xml = (
+                    NfeXmlVersion.query.filter(
+                        NfeXmlVersion.nfe_draft_id == draft.id,
+                        NfeXmlVersion.xml_type == NfeXmlType.UNSIGNED.value,
+                    )
+                    .order_by(NfeXmlVersion.version_number.desc())
+                    .first()
+                )
+                xml_is_current = bool(
+                    latest_xml
+                    and (
+                        not draft.updated_at
+                        or not latest_xml.generated_at
+                        or draft.updated_at <= latest_xml.generated_at
+                    )
+                )
+                if not xml_is_current:
+                    latest_xml = self.generate_unsigned_xml(draft)
+                validation = self.validate_xml_version(draft, latest_xml)
+                document.status = (
+                    "xsd_validated" if validation.is_valid else "xsd_invalid"
+                )
+                document.updated_at = datetime.utcnow()
+                results.append({
+                    "planned_document_id": str(document.id),
+                    "draft_id": str(draft.id),
+                    "xml_version_id": str(latest_xml.id),
+                    "success": validation.is_valid,
+                    "xsd_valid": validation.is_valid,
+                    "xsd_errors": validation.errors,
+                })
+            except ValueError as exc:
+                document.status = "correction_required"
+                document.updated_at = datetime.utcnow()
+                results.append({
+                    "planned_document_id": str(document.id),
+                    "draft_id": str(draft.id),
+                    "success": False,
+                    "message": str(exc),
+                })
+
+        all_valid = bool(results) and all(
+            result.get("xsd_valid") is True for result in results
+        )
+        process.status = (
+            ImportProcessStatus.XML_VALIDATED.value
+            if all_valid
+            else ImportProcessStatus.XML_VALIDATION_FAILED.value
+        )
+        process.updated_at = datetime.utcnow()
+        plan.updated_at = datetime.utcnow()
+        db.session.flush()
+        return {
+            "all_valid": all_valid,
+            "results": results,
+            "plan": self._serialize_document_plan(plan),
+        }
+
+    @staticmethod
+    def _money_text(value: Any) -> str:
+        return f"{Decimal(str(value or '0')).quantize(Decimal('0.01')):.2f}"
+
+    # ------------------------------------------------------------------
     # NFe draft
     # ------------------------------------------------------------------
-    def create_nfe_draft_from_duimp(self, process: ImportProcess, payload: dict[str, Any]) -> dict[str, Any]:
+    def create_nfe_draft_from_duimp(
+        self,
+        process: ImportProcess,
+        payload: dict[str, Any],
+        *,
+        planned_document: NfePlannedDocument | None = None,
+    ) -> dict[str, Any]:
+        payload = self._json_compatible(payload)
         fiscal_profile = self.get_importer_fiscal_profile(process.importer_id)
         snapshot_id = payload.get("duimp_snapshot_id")
         if snapshot_id:
@@ -658,6 +2644,153 @@ class ImportNfeService:
             normalized = fetch_result["normalized"]
             snapshot = fetch_result["snapshot"]
 
+        preallocated_costs = None
+        if planned_document is not None:
+            if (
+                planned_document.document_plan.import_process_id != process.id
+                or planned_document.document_plan.duimp_snapshot_id != snapshot.id
+                or planned_document.document_plan.status != "planned"
+            ):
+                raise ValueError(
+                    "A NF-e filha não pertence ao plano ativo deste processo."
+                )
+            normalized = deepcopy(normalized)
+            normalized["items"] = [
+                deepcopy(item.raw_source_payload or {})
+                for item in planned_document.items
+            ]
+            normalized["foreign_supplier"] = deepcopy(
+                planned_document.foreign_supplier
+            )
+            normalized["foreign_suppliers"] = [
+                deepcopy(planned_document.foreign_supplier)
+            ] if planned_document.foreign_supplier else []
+            normalized["exporter_code"] = planned_document.exporter_code
+            normalized["afrmm_value"] = (
+                planned_document.allocated_shared_costs or {}
+            ).get("afrmm", "0.00")
+            # Totais declarados na DUIMP pertencem ao processo inteiro. Cada
+            # filha é conciliada pelos próprios itens e pelo rateio persistido.
+            normalized["tax_totals"] = {}
+            fiscal_references = deepcopy(
+                normalized.get("automation_fiscal_references") or {}
+            )
+            fiscal_references.pop("icms", None)
+            normalized["automation_fiscal_references"] = fiscal_references
+            payload["import_purpose"] = (
+                (planned_document.item_purposes or [None])[0]
+                or payload.get("import_purpose")
+            )
+            payload["foreign_supplier"] = deepcopy(
+                planned_document.foreign_supplier
+            )
+            payload["additional_costs"] = deepcopy(
+                planned_document.allocated_shared_costs or {}
+            )
+            payload["document"] = self._merge_defaults(
+                payload.get("document"),
+                {"operation_nature": planned_document.operation_nature},
+            )
+            preallocated_costs = {
+                item.duimp_item_number: deepcopy(
+                    item.allocated_shared_costs or {}
+                )
+                for item in planned_document.items
+            }
+
+        exporter_keys = {
+            self._document_exporter(item, normalized)[0]
+            for item in (normalized.get("items") or [])
+        }
+        if planned_document is None and len(exporter_keys) > 1:
+            raise ValueError(
+                "A DUIMP possui múltiplos exportadores. Revise o plano de notas; "
+                "os rascunhos independentes de cada NF-e filha serão gerados na "
+                "próxima etapa do fluxo."
+            )
+
+        classification_map = self._item_classification_map(process, snapshot)
+        if planned_document is not None:
+            planned_item_numbers = {
+                item.duimp_item_number for item in planned_document.items
+            }
+            classification_map = {
+                number: classification
+                for number, classification in classification_map.items()
+                if number in planned_item_numbers
+            }
+        tax_rules: list[ClientImportTaxRule] = []
+        tax_rule = None
+        tax_configuration = payload.get("tax_configuration")
+
+        if classification_map:
+            classification_state = self.get_item_classification_state(
+                process,
+                snapshot.id,
+            )
+            if not classification_state["ready_for_draft"]:
+                raise ValueError(
+                    "Todos os itens da DUIMP precisam ter finalidade, regra "
+                    "tributária e CFOP antes da criação do rascunho."
+                )
+            tax_rules = list(
+                {
+                    row.tax_rule.id: row.tax_rule
+                    for row in classification_map.values()
+                    if row.tax_rule
+                }.values()
+            )
+            tax_rule = tax_rules[0]
+            tax_configuration = deepcopy(tax_rule.configuration_json or {})
+        elif tax_configuration is None:
+            tax_rule = self.match_import_tax_rule(
+                client_id=process.importer_id,
+                issuer_state=fiscal_profile.state,
+                tax_regime=fiscal_profile.tax_regime,
+                import_purpose=payload["import_purpose"],
+                import_modality=normalized.get("import_modality"),
+                ncms=[
+                    self._digits(item.get("ncm"))
+                    for item in normalized.get("items", [])
+                    if item.get("ncm")
+                ],
+                reference_date=self._date_value(normalized.get("registration_date")),
+                rule_id=payload.get("tax_rule_id"),
+            )
+            if tax_rule is None:
+                raise ValueError(
+                    "Nenhuma regra fiscal aplicável foi encontrada. Cadastre uma "
+                    "regra para o cliente ou informe tax_configuration explicitamente."
+                )
+            tax_rules = [tax_rule]
+            tax_configuration = deepcopy(tax_rule.configuration_json or {})
+
+        additional_costs = self._merge_defaults(
+            tax_rule.additional_cost_defaults if tax_rule else None,
+            normalized.get("automation_additional_costs"),
+        )
+        additional_costs.update(payload.get("additional_costs") or {})
+        transport = self._merge_defaults(
+            tax_rule.transport_defaults if tax_rule else None,
+            payload.get("transport"),
+        )
+        payment = self._merge_defaults(
+            tax_rule.payment_defaults if tax_rule else None,
+            payload.get("payment"),
+        )
+        document_options = self._merge_defaults(
+            tax_configuration.get("document_defaults"),
+            payload.get("document"),
+        )
+        item_defaults = self._merge_defaults(
+            tax_configuration.get("item_defaults"),
+            payload.get("item_defaults"),
+        )
+        additional_info = self._merge_defaults(
+            tax_configuration.get("additional_info_defaults"),
+            payload.get("additional_info"),
+        )
+
         fiscal_payload = self.map_duimp_to_nfe_payload(
             duimp=normalized,
             process=process,
@@ -666,14 +2799,27 @@ class ImportNfeService:
             series=payload["series"],
             number=payload.get("number"),
             import_purpose=payload["import_purpose"],
-            tax_configuration=payload["tax_configuration"],
-            additional_costs=payload.get("additional_costs"),
+            tax_configuration=tax_configuration,
+            additional_costs=additional_costs,
             foreign_supplier=payload.get("foreign_supplier"),
             duimp_overrides=payload.get("duimp_overrides"),
-            transport=payload.get("transport"),
-            payment=payload.get("payment"),
-            additional_info=payload.get("additional_info"),
+            document_options=document_options,
+            item_defaults=item_defaults,
+            transport=transport,
+            payment=payment,
+            additional_info=additional_info,
+            item_classifications=classification_map or None,
+            preallocated_costs=preallocated_costs,
         )
+        fiscal_payload["source"]["tax_configuration_source"] = (
+            "client_import_tax_rule" if tax_rule else "request"
+        )
+        fiscal_payload["source"]["tax_rule_id"] = (
+            str(tax_rule.id) if tax_rule else None
+        )
+        fiscal_payload["source"]["tax_rule_ids"] = [
+            str(rule.id) for rule in tax_rules
+        ]
 
         validation = self.validate_nfe_payload(fiscal_payload)
         now = datetime.utcnow()
@@ -684,6 +2830,10 @@ class ImportNfeService:
             import_process_id=process.id,
             importer_id=process.importer_id,
             duimp_snapshot_id=snapshot.id,
+            planned_document_id=(
+                planned_document.id if planned_document else None
+            ),
+            planned_document=planned_document,
             model=NfeModel.NFE.value,
             purpose=NfePurpose.NORMAL.value,
             operation_type=NfeOperationType.ENTRY.value,
@@ -714,7 +2864,16 @@ class ImportNfeService:
         process.updated_at = now
         db.session.flush()
 
-        return {"draft": draft, "snapshot": snapshot, "validation": validation.to_dict()}
+        return {
+            "draft": draft,
+            "snapshot": snapshot,
+            "validation": validation.to_dict(),
+            "tax_rule": self._tax_rule_to_dict(tax_rule) if tax_rule else None,
+            "tax_rules": [
+                self._tax_rule_to_dict(rule)
+                for rule in tax_rules
+            ],
+        }
 
     def get_nfe_draft_detail(self, draft: NfeDraft) -> dict[str, Any]:
         items = (
@@ -728,6 +2887,188 @@ class ImportNfeService:
             .all()
         )
         return {"draft": draft, "items": items, "xml_versions": xml_versions}
+
+    def update_draft_metadata(
+        self,
+        draft: NfeDraft,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        current_status = getattr(draft.status, "value", draft.status)
+        immutable_statuses = {
+            NfeDraftStatus.SIGNED.value,
+            NfeDraftStatus.TRANSMITTED.value,
+            NfeDraftStatus.AUTHORIZED.value,
+            NfeDraftStatus.CANCELLED.value,
+        }
+        if current_status in immutable_statuses:
+            raise ValueError(
+                "Rascunho assinado, transmitido, autorizado ou cancelado "
+                "não pode mais ser alterado."
+            )
+
+        # Marshmallow desserializa fields.Decimal como Decimal. As colunas JSON
+        # do PostgreSQL aceitam apenas tipos JSON nativos, então a normalização
+        # precisa acontecer antes de qualquer consulta que dispare autoflush.
+        payload = self._json_compatible(payload)
+        rows = (
+            NfeDraftItem.query
+            .filter(NfeDraftItem.nfe_draft_id == draft.id)
+            .order_by(NfeDraftItem.item_number.asc())
+            .all()
+        )
+        now = datetime.utcnow()
+        fiscal_payload = deepcopy(draft.fiscal_payload or {})
+
+        for section in ("document", "transport", "payment"):
+            if section in payload:
+                fiscal_payload[section] = self._merge_defaults(
+                    fiscal_payload.get(section),
+                    payload[section],
+                )
+
+        if "issuer" in payload:
+            issuer_update = deepcopy(payload["issuer"] or {})
+            if "state_registration" in issuer_update:
+                state_registration = str(
+                    issuer_update.get("state_registration") or ""
+                ).strip().upper()
+                normalized_ie = (
+                    "ISENTO"
+                    if state_registration == "ISENTO"
+                    else self._digits(state_registration)
+                )
+                if normalized_ie != "ISENTO" and not (
+                    2 <= len(normalized_ie) <= 14
+                ):
+                    raise ValueError(
+                        "A inscrição estadual deve ser ISENTO ou conter "
+                        "entre 2 e 14 dígitos."
+                    )
+                fiscal_payload.setdefault("issuer", {})[
+                    "state_registration"
+                ] = normalized_ie
+
+        if "foreign_supplier" in payload:
+            supplier_update = deepcopy(payload["foreign_supplier"] or {})
+            recipient_update: dict[str, Any] = {}
+            if supplier_update.get("legal_name") not in (None, ""):
+                recipient_update["legal_name"] = supplier_update["legal_name"]
+            if "foreign_id" in supplier_update:
+                recipient_update["foreign_id"] = self._empty_to_none(
+                    supplier_update.get("foreign_id")
+                )
+
+            address_update = deepcopy(supplier_update.get("address") or {})
+            for field in (
+                "country_code",
+                "country_name",
+                "country_iso_alpha_2",
+            ):
+                if supplier_update.get(field) not in (None, ""):
+                    address_update[field] = supplier_update[field]
+            if address_update:
+                recipient_update["address"] = address_update
+
+            if recipient_update:
+                fiscal_payload["recipient"] = self._merge_defaults(
+                    fiscal_payload.get("recipient"),
+                    recipient_update,
+                )
+
+        volume_update = (
+            (payload.get("transport") or {}).get("volume") or {}
+        )
+        if volume_update.get("net_weight") not in (None, ""):
+            fiscal_payload.setdefault("transport", {}).setdefault(
+                "volume", {}
+            )["net_weight_source"] = "operator_override"
+
+        if "additional_info" in payload:
+            additional_update = deepcopy(payload["additional_info"] or {})
+            legal_text = str(
+                additional_update.pop("legal_text", "") or ""
+            ).strip()
+            if additional_update.get("automatic_summary") is True:
+                current_additional_info = (
+                    fiscal_payload.get("additional_info") or {}
+                )
+                summary_options = {
+                    "fiscal": current_additional_info.get("fiscal"),
+                    **additional_update,
+                    "legal_text": legal_text,
+                }
+                additional_info = self._build_import_additional_info(
+                    duimp=fiscal_payload.get("duimp") or {},
+                    totals=fiscal_payload.get("totals") or {},
+                    additional_costs=(
+                        fiscal_payload.get("additional_costs") or {}
+                    ),
+                    options=summary_options,
+                )
+            else:
+                additional_info = self._merge_defaults(
+                    fiscal_payload.get("additional_info"),
+                    additional_update,
+                )
+            if (
+                legal_text
+                and additional_update.get("automatic_summary") is not True
+            ):
+                complementary = str(
+                    additional_info.get("complementary") or ""
+                ).strip()
+                if legal_text not in complementary:
+                    additional_info["complementary"] = " ".join(
+                        part for part in (complementary, legal_text) if part
+                    )
+                additional_info["legal_text_present"] = True
+            fiscal_payload["additional_info"] = additional_info
+
+        item_defaults = payload.get("item_defaults") or {}
+        for row in rows:
+            for field in ("commercial_unit", "taxable_unit"):
+                if item_defaults.get(field):
+                    setattr(row, field, item_defaults[field])
+                    row.updated_at = now
+
+        had_xml_versions = (
+            NfeXmlVersion.query.filter(
+                NfeXmlVersion.nfe_draft_id == draft.id
+            ).first()
+            is not None
+        )
+        draft.fiscal_payload = fiscal_payload
+        self._refresh_draft_payload_from_items(draft)
+        validation = self.validate_nfe_payload(draft.fiscal_payload)
+        draft.validation_errors = validation.errors or None
+        draft.validation_warnings = validation.warnings or None
+        draft.status = (
+            NfeDraftStatus.READY_FOR_XML.value
+            if validation.is_valid
+            else NfeDraftStatus.VALIDATION_FAILED.value
+        )
+        draft.updated_at = now
+
+        process = (
+            self.import_process_query_for_current_user()
+            .filter(ImportProcess.id == draft.import_process_id)
+            .first()
+        )
+        if process:
+            process.status = (
+                ImportProcessStatus.DRAFT_READY.value
+                if validation.is_valid
+                else ImportProcessStatus.DRAFT_VALIDATION_FAILED.value
+            )
+            process.updated_at = now
+
+        db.session.flush()
+        return {
+            "draft": draft,
+            "items": rows,
+            "validation": validation.to_dict(),
+            "requires_new_xml": had_xml_versions,
+        }
 
     def update_draft_item(self, draft: NfeDraft, item: NfeDraftItem, payload: dict[str, Any]) -> NfeDraftItem:
         allowed_fields = [
@@ -799,6 +3140,7 @@ class ImportNfeService:
             .first()
         )
         version_number = (latest_version.version_number if latest_version else 0) + 1
+        generated_at = datetime.utcnow()
         row = NfeXmlVersion(
             nfe_draft_id=draft.id,
             version_number=version_number,
@@ -808,12 +3150,12 @@ class ImportNfeService:
             xsd_errors=None,
             access_key=draft.access_key,
             generated_by_user_id=self.user_id,
-            generated_at=datetime.utcnow(),
+            generated_at=generated_at,
         )
         db.session.add(row)
 
         draft.status = NfeDraftStatus.XML_GENERATED.value
-        draft.updated_at = datetime.utcnow()
+        draft.updated_at = generated_at
 
         process = self.import_process_query_for_current_user().filter(ImportProcess.id == draft.import_process_id).first()
         if process:
@@ -822,6 +3164,344 @@ class ImportNfeService:
 
         db.session.flush()
         return row
+
+    def validate_xml_version(
+        self,
+        draft: NfeDraft,
+        xml_version: NfeXmlVersion,
+    ) -> NfeXsdValidationResult:
+        if xml_version.nfe_draft_id != draft.id:
+            raise ValueError("Versão XML não pertence ao rascunho informado.")
+
+        xml_type = getattr(xml_version.xml_type, "value", xml_version.xml_type)
+        xml_type = str(xml_type).lower()
+        if xml_type not in {
+            NfeXmlType.UNSIGNED.value,
+            NfeXmlType.SIGNED.value,
+        }:
+            raise ValueError(
+                "A validação XSD desta etapa suporta somente XML de NF-e "
+                "não assinado ou assinado."
+            )
+
+        result = self.xsd_validator.validate(
+            xml_version.xml_content,
+            allow_unsigned=xml_type == NfeXmlType.UNSIGNED.value,
+        )
+        xml_version.xsd_valid = result.is_valid
+        xml_version.xsd_errors = result.errors
+
+        latest_version = (
+            NfeXmlVersion.query.filter(
+                NfeXmlVersion.nfe_draft_id == draft.id,
+                NfeXmlVersion.xml_type == xml_type,
+            )
+            .order_by(NfeXmlVersion.version_number.desc())
+            .first()
+        )
+        if latest_version and latest_version.id == xml_version.id:
+            process = (
+                self.import_process_query_for_current_user()
+                .filter(ImportProcess.id == draft.import_process_id)
+                .first()
+            )
+            if process:
+                process.status = (
+                    ImportProcessStatus.XML_VALIDATED.value
+                    if result.is_valid
+                    else ImportProcessStatus.XML_VALIDATION_FAILED.value
+                )
+                process.updated_at = datetime.utcnow()
+
+        db.session.flush()
+        return result
+
+    def sign_xml_version(
+        self,
+        draft: NfeDraft,
+        xml_version: NfeXmlVersion,
+        *,
+        certificate_id=None,
+    ) -> dict[str, Any]:
+        if xml_version.nfe_draft_id != draft.id:
+            raise ValueError("Versão XML não pertence ao rascunho informado.")
+        xml_type = getattr(xml_version.xml_type, "value", xml_version.xml_type)
+        if str(xml_type).lower() != NfeXmlType.UNSIGNED.value:
+            raise ValueError(
+                "Somente uma versão XML não assinada pode ser assinada."
+            )
+        if xml_version.xsd_valid is not True:
+            raise ValueError(
+                "O XML não assinado deve ser aprovado no XSD antes da assinatura."
+            )
+        latest_unsigned = (
+            NfeXmlVersion.query.filter(
+                NfeXmlVersion.nfe_draft_id == draft.id,
+                NfeXmlVersion.xml_type == NfeXmlType.UNSIGNED.value,
+            )
+            .order_by(NfeXmlVersion.version_number.desc())
+            .first()
+        )
+        if not latest_unsigned or latest_unsigned.id != xml_version.id:
+            raise ValueError(
+                "Somente a versão XML não assinada mais recente pode ser assinada."
+            )
+
+        self.ensure_authorization_ready(draft)
+
+        existing_signed = NfeXmlVersion.query.filter(
+            NfeXmlVersion.nfe_draft_id == draft.id,
+            NfeXmlVersion.xml_type == NfeXmlType.SIGNED.value,
+            NfeXmlVersion.version_number == xml_version.version_number,
+        ).first()
+        existing_issuance = NfeIssuance.query.filter(
+            NfeIssuance.organization_id == draft.organization_id,
+            NfeIssuance.nfe_draft_id == draft.id,
+        ).first()
+        if existing_signed:
+            if not existing_issuance or existing_issuance.status != "signed":
+                raise ValueError(
+                    "Já existe XML assinado, mas o estado da emissão está inconsistente."
+                )
+            if (
+                certificate_id is not None
+                and existing_issuance.certificate_id != certificate_id
+            ):
+                raise ValueError(
+                    "O XML já foi assinado com outro certificado."
+                )
+            certificate = self.certificate_registry.get(
+                existing_issuance.certificate_id,
+                client_id=draft.importer_id,
+            )
+            return {
+                "xml_version": existing_signed,
+                "certificate": certificate,
+                "issuance": existing_issuance,
+                "replayed": True,
+            }
+
+        if (
+            draft.updated_at
+            and xml_version.generated_at
+            and draft.updated_at > xml_version.generated_at
+        ):
+            raise ValueError(
+                "O XML está desatualizado em relação ao rascunho. "
+                "Gere e valide uma nova versão antes de assinar."
+            )
+
+        environment = getattr(draft.environment, "value", draft.environment)
+        certificate = self.certificate_registry.active_for(
+            client_id=draft.importer_id,
+            environment=str(environment),
+            certificate_id=certificate_id,
+        )
+        issuance = self._issuance_for_signature(
+            draft=draft,
+            xml_version=xml_version,
+            certificate=certificate,
+        )
+
+        attempt = self._start_signature_attempt(
+            issuance=issuance,
+            xml_version=xml_version,
+        )
+        try:
+            provider = getattr(certificate.provider, "value", certificate.provider)
+            material = self.certificate_vault.resolve(
+                provider=str(provider),
+                certificate_ref=certificate.certificate_ref,
+                password_ref=certificate.password_ref,
+            )
+            signature_result = self.xml_signer.sign(
+                xml_version.xml_content,
+                material=material,
+                expected_cnpj=certificate.issuer_cnpj,
+            )
+            xsd_result = self.xsd_validator.validate(
+                signature_result.signed_xml,
+                allow_unsigned=False,
+            )
+            if not xsd_result.is_valid:
+                raise NfeXmlSignatureError(
+                    "O XML assinado não foi aprovado no XSD oficial."
+                )
+        except (
+            FiscalCertificateError,
+            NfeXmlSignatureError,
+            NfeXsdConfigurationError,
+        ) as exc:
+            now = datetime.utcnow()
+            attempt.status = NfeAttemptStatus.FAILED.value
+            attempt.error_code = type(exc).__name__
+            attempt.error_message = str(exc)
+            attempt.finished_at = now
+            issuance.last_error_code = type(exc).__name__
+            issuance.last_error_message = str(exc)
+            issuance.updated_at = now
+            db.session.flush()
+            raise
+
+        self.certificate_registry.apply_loaded_metadata(
+            certificate,
+            signature_result.certificate,
+        )
+        now = datetime.utcnow()
+        signed_version = NfeXmlVersion(
+            nfe_draft_id=draft.id,
+            version_number=xml_version.version_number,
+            xml_type=NfeXmlType.SIGNED.value,
+            xml_content=signature_result.signed_xml,
+            xsd_valid=True,
+            xsd_errors=[],
+            access_key=draft.access_key,
+            generated_by_user_id=self.user_id,
+            generated_at=now,
+        )
+        db.session.add(signed_version)
+        db.session.flush()
+
+        previous_status = issuance.status
+        issuance.certificate_id = certificate.id
+        issuance.status = "signed"
+        issuance.last_error_code = None
+        issuance.last_error_message = None
+        issuance.updated_at = now
+
+        attempt.status = NfeAttemptStatus.SUCCEEDED.value
+        attempt.response_checksum = signature_result.signed_checksum_sha256
+        attempt.response_code = "signed"
+        attempt.response_message = "XML assinado e validado no XSD oficial."
+        attempt.finished_at = now
+
+        event = NfeIssuanceEvent(
+            nfe_issuance_id=issuance.id,
+            previous_status=str(
+                getattr(previous_status, "value", previous_status)
+            ),
+            current_status="signed",
+            reason="Assinatura XMLDSig concluída.",
+            event_metadata={
+                "unsigned_xml_version_id": str(xml_version.id),
+                "signed_xml_version_id": str(signed_version.id),
+                "certificate_fingerprint_sha256": (
+                    certificate.certificate_fingerprint_sha256
+                ),
+                "unsigned_checksum_sha256": (
+                    signature_result.unsigned_checksum_sha256
+                ),
+                "signed_checksum_sha256": (
+                    signature_result.signed_checksum_sha256
+                ),
+            },
+            actor_user_id=self.user_id,
+            created_at=now,
+        )
+        db.session.add(event)
+
+        draft.status = NfeDraftStatus.SIGNED.value
+        draft.updated_at = now
+        process = (
+            self.import_process_query_for_current_user()
+            .filter(ImportProcess.id == draft.import_process_id)
+            .first()
+        )
+        if process:
+            process.status = ImportProcessStatus.XML_SIGNED.value
+            process.updated_at = now
+
+        db.session.flush()
+        return {
+            "xml_version": signed_version,
+            "certificate": certificate,
+            "issuance": issuance,
+            "replayed": False,
+        }
+
+    def _issuance_for_signature(
+        self,
+        *,
+        draft: NfeDraft,
+        xml_version: NfeXmlVersion,
+        certificate,
+    ) -> NfeIssuance:
+        payload = {
+            "draft_id": str(draft.id),
+            "unsigned_xml_version_id": str(xml_version.id),
+            "unsigned_checksum_sha256": hashlib.sha256(
+                xml_version.xml_content.encode("utf-8")
+            ).hexdigest(),
+            "certificate_id": str(certificate.id),
+        }
+        idempotency_key = (
+            f"sign:{draft.id}:{xml_version.id}:{certificate.id}"
+        )
+        request_hash = NfeIdempotency.request_hash(payload)
+        issuance = NfeIssuance.query.filter(
+            NfeIssuance.organization_id == draft.organization_id,
+            NfeIssuance.nfe_draft_id == draft.id,
+        ).first()
+        if issuance:
+            if issuance.request_hash != request_hash:
+                raise ValueError(
+                    "A emissão existente está vinculada a outro XML ou certificado."
+                )
+            return issuance
+
+        now = datetime.utcnow()
+        issuance = NfeIssuance(
+            organization_id=draft.organization_id,
+            import_process_id=draft.import_process_id,
+            nfe_draft_id=draft.id,
+            importer_id=draft.importer_id,
+            certificate_id=certificate.id,
+            environment=draft.environment,
+            status="xsd_validated",
+            model=getattr(draft.model, "value", draft.model),
+            series=str(draft.series).zfill(3),
+            number=draft.number,
+            access_key=draft.access_key,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            created_by_user_id=self.user_id,
+            created_at=now,
+            updated_at=now,
+        )
+        db.session.add(issuance)
+        db.session.flush()
+        return issuance
+
+    def _start_signature_attempt(
+        self,
+        *,
+        issuance: NfeIssuance,
+        xml_version: NfeXmlVersion,
+    ) -> NfeIssuanceAttempt:
+        latest_attempt = (
+            NfeIssuanceAttempt.query.filter(
+                NfeIssuanceAttempt.nfe_issuance_id == issuance.id,
+                NfeIssuanceAttempt.operation
+                == NfeAttemptOperation.SIGNATURE.value,
+            )
+            .order_by(NfeIssuanceAttempt.attempt_number.desc())
+            .first()
+        )
+        attempt = NfeIssuanceAttempt(
+            nfe_issuance_id=issuance.id,
+            attempt_number=(
+                latest_attempt.attempt_number + 1 if latest_attempt else 1
+            ),
+            operation=NfeAttemptOperation.SIGNATURE.value,
+            status=NfeAttemptStatus.STARTED.value,
+            request_checksum=hashlib.sha256(
+                xml_version.xml_content.encode("utf-8")
+            ).hexdigest(),
+            started_at=datetime.utcnow(),
+        )
+        db.session.add(attempt)
+        db.session.flush()
+        return attempt
 
     # ------------------------------------------------------------------
     # Normalization / mapping / validation
@@ -843,18 +3523,67 @@ class ImportNfeService:
         additional_costs: dict[str, Any] | None = None,
         foreign_supplier: dict[str, Any] | None = None,
         duimp_overrides: dict[str, Any] | None = None,
+        document_options: dict[str, Any] | None = None,
+        item_defaults: dict[str, Any] | None = None,
         transport: dict[str, Any] | None = None,
         payment: dict[str, Any] | None = None,
         additional_info: dict[str, Any] | None = None,
+        item_classifications: dict[str, NfeItemClassification] | None = None,
+        preallocated_costs: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        resolved_additional_costs = self.resolve_additional_costs(
+            duimp=duimp,
+            additional_costs=additional_costs,
+        )
         items = self.map_duimp_items_to_nfe_items(
             duimp=duimp,
             import_purpose=import_purpose,
+            item_classifications=item_classifications,
         )
-        items, totals = self.tax_calculator.calculate(
+        item_defaults = item_defaults or {}
+        for item in items:
+            if item_defaults.get("commercial_unit"):
+                item["commercial_unit"] = item_defaults["commercial_unit"]
+            if item_defaults.get("taxable_unit"):
+                item["taxable_unit"] = item_defaults["taxable_unit"]
+        if item_classifications:
+            item_costs = (
+                [
+                    preallocated_costs.get(
+                        str(item.get("duimp_item_number")),
+                        {},
+                    )
+                    for item in items
+                ]
+                if preallocated_costs is not None
+                else None
+            )
+            items, totals = self._calculate_items_with_tax_rules(
+                items,
+                item_classifications=item_classifications,
+                fallback_configuration=tax_configuration,
+                additional_costs=resolved_additional_costs,
+                preallocated_costs=item_costs,
+            )
+        else:
+            items, totals = self.tax_calculator.calculate(
+                items,
+                configuration=tax_configuration,
+                additional_costs=resolved_additional_costs,
+            )
+        expected_tax_totals = deepcopy(duimp.get("tax_totals") or {})
+        icms_reference = (
+            (duimp.get("automation_fiscal_references") or {}).get("icms") or {}
+        )
+        if icms_reference.get("declared_value") not in (None, ""):
+            expected_tax_totals["icms"] = {
+                "value": icms_reference["declared_value"]
+            }
+        reconciliation = self.tax_calculator.reconcile(
             items,
-            configuration=tax_configuration,
-            additional_costs=additional_costs,
+            totals,
+            expected_tax_totals=expected_tax_totals,
+            expected_additional_costs=resolved_additional_costs,
         )
         issuer = self.build_fiscal_party_from_profile(fiscal_profile)
         recipient = self.build_foreign_party_from_duimp(
@@ -878,6 +3607,26 @@ class ImportNfeService:
         }
         duimp_data.update(duimp_overrides or {})
 
+        authorization = self._authorization_metadata(items)
+        document_options = document_options or {}
+        item_purposes = sorted(
+            {
+                str(item.get("import_purpose") or import_purpose)
+                for item in items
+            }
+        )
+        mixed_import_purposes = len(item_purposes) > 1
+        resolved_transport = self._transport_with_automatic_weight(
+            transport,
+            items,
+        )
+        resolved_additional_info = self._build_import_additional_info(
+            duimp=duimp,
+            totals=totals,
+            additional_costs=resolved_additional_costs,
+            options=additional_info,
+        )
+
         return {
             "document": {
                 "model": NfeModel.NFE.value,
@@ -886,8 +3635,23 @@ class ImportNfeService:
                 "environment": environment,
                 "series": series,
                 "number": number,
-                "operation_nature": "Importação de mercadoria",
+                "operation_nature": (
+                    "Importação de mercadorias"
+                    if mixed_import_purposes
+                    else document_options.get("operation_nature")
+                    or self._default_operation_nature(item_purposes[0])
+                ),
+                "presence_indicator": document_options.get(
+                    "presence_indicator"
+                )
+                or "9",
+                "intermediary_indicator": document_options.get(
+                    "intermediary_indicator"
+                )
+                or "0",
                 "import_purpose": import_purpose,
+                "item_purposes": item_purposes,
+                "mixed_import_purposes": mixed_import_purposes,
                 "import_modality": duimp.get("import_modality"),
                 "currency": "BRL",
             },
@@ -900,12 +3664,12 @@ class ImportNfeService:
             "recipient": recipient,
             "items": items,
             "totals": totals,
-            "transport": transport or {"freight_mode": "9"},
+            "additional_costs": resolved_additional_costs,
+            "reconciliation": reconciliation,
+            "authorization": authorization,
+            "transport": resolved_transport,
             "payment": payment or {"method": "90", "value": "0.00"},
-            "additional_info": {
-                "complementary": f"NF-e de entrada de importação gerada com base na DUIMP {duimp['number']}.",
-                **(additional_info or {}),
-            },
+            "additional_info": resolved_additional_info,
             "source": {
                 "import_process_id": str(process.id),
                 "duimp_source": "DUIMP",
@@ -913,11 +3677,139 @@ class ImportNfeService:
             },
         }
 
+    def resolve_additional_costs(
+        self,
+        *,
+        duimp: dict[str, Any],
+        additional_costs: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        resolved = dict(additional_costs or {})
+        defaults = {
+            "afrmm": duimp.get("afrmm_value") or "0",
+            "siscomex_fee": self._duimp_siscomex_fee(duimp),
+            "thc": "0",
+            "other": "0",
+        }
+        for name, default in defaults.items():
+            if resolved.get(name) in (None, ""):
+                resolved[name] = default
+        return resolved
+
+    @staticmethod
+    def _default_operation_nature(import_purpose: str) -> str:
+        return {
+            ImportPurpose.RESALE.value: "Compra para comercialização",
+            ImportPurpose.INDUSTRIALIZATION.value: (
+                "Compra para industrialização"
+            ),
+            ImportPurpose.FIXED_ASSET.value: (
+                "Importação de ativo imobilizado"
+            ),
+            ImportPurpose.USE_CONSUMPTION.value: (
+                "Importação para uso ou consumo"
+            ),
+            "service_use": "Importação para prestação de serviço",
+        }.get(import_purpose, "Importação de mercadoria")
+
+    def _transport_with_automatic_weight(
+        self,
+        transport: dict[str, Any] | None,
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        resolved = deepcopy(transport or {})
+        resolved.setdefault("freight_mode", "9")
+        net_weight = sum(
+            (self._decimal(item.get("net_weight")) for item in items),
+            Decimal("0"),
+        )
+        volume = deepcopy(resolved.get("volume") or {})
+        if net_weight > 0 and volume.get("net_weight") in (None, ""):
+            volume["net_weight"] = str(net_weight)
+            volume["net_weight_source"] = "duimp_items"
+        if volume:
+            resolved["volume"] = volume
+        return resolved
+
+    def _build_import_additional_info(
+        self,
+        *,
+        duimp: dict[str, Any],
+        totals: dict[str, Any],
+        additional_costs: dict[str, Any],
+        options: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        options = deepcopy(options or {})
+        parts = []
+        if options.get("automatic_summary", True):
+            registration_date = self._date_value(duimp.get("registration_date"))
+            formatted_date = (
+                registration_date.strftime("%d.%m.%Y")
+                if registration_date
+                else "não informada"
+            )
+            parts.append(
+                "Conforme DUIMP: "
+                f"{duimp.get('api_number') or duimp.get('number')}. "
+                f"Registrada em: {formatted_date}."
+            )
+            values = (
+                ("II", totals.get("ii_value")),
+                ("TAXA SISCOMEX", additional_costs.get("siscomex_fee")),
+                ("FRETE INTERNACIONAL", totals.get("freight_value")),
+                ("THC", additional_costs.get("thc")),
+                ("AFRMM", additional_costs.get("afrmm")),
+                ("SEGURO INTERNACIONAL", totals.get("insurance_value")),
+                ("COFINS", totals.get("cofins_value")),
+                ("PIS", totals.get("pis_value")),
+            )
+            parts.append(
+                "; ".join(
+                    f"{label}: R$ {self._format_brl(value)}"
+                    for label, value in values
+                )
+                + "."
+            )
+        for key in ("complementary", "legal_text"):
+            text = str(options.get(key) or "").strip()
+            if text:
+                parts.append(text)
+        return {
+            "fiscal": options.get("fiscal"),
+            "complementary": " ".join(parts) or None,
+            "automatic_summary": options.get("automatic_summary", True),
+            "legal_text_present": bool(
+                str(options.get("legal_text") or "").strip()
+            ),
+        }
+
+    def _format_brl(self, value: Any) -> str:
+        formatted = f"{self._decimal(value):,.2f}"
+        return formatted.replace(",", "_").replace(".", ",").replace(
+            "_", "."
+        )
+
+    @staticmethod
+    def _duimp_siscomex_fee(duimp: dict[str, Any]) -> Any:
+        tax_totals = duimp.get("tax_totals") or {}
+        for name in (
+            "taxa_utilizacao",
+            "taxa_utilizacao_siscomex",
+            "taxa_siscomex",
+        ):
+            tax = tax_totals.get(name)
+            if isinstance(tax, dict):
+                value = tax.get("value")
+            else:
+                value = tax
+            if value not in (None, ""):
+                return value
+        return "0"
+
     def build_fiscal_party_from_profile(self, profile: ClientFiscalProfile) -> dict[str, Any]:
         return {
             "client_id": str(profile.client_id),
             "fiscal_profile_id": str(profile.id),
-            "cnpj": self._digits(profile.cnpj),
+            "cnpj": normalize_cnpj(profile.cnpj),
             "legal_name": profile.legal_name,
             "trade_name": profile.trade_name,
             "state_registration": self._digits(profile.state_registration),
@@ -986,25 +3878,62 @@ class ImportNfeService:
             },
         }
 
-    def map_duimp_items_to_nfe_items(self, *, duimp: dict[str, Any], import_purpose: str) -> list[dict[str, Any]]:
+    def map_duimp_items_to_nfe_items(
+        self,
+        *,
+        duimp: dict[str, Any],
+        import_purpose: str,
+        item_classifications: dict[str, NfeItemClassification] | None = None,
+    ) -> list[dict[str, Any]]:
         mapped_items = []
-        cfop = self._resolve_cfop(import_purpose)
+        item_classifications = item_classifications or {}
 
         for index, item in enumerate(duimp.get("items", []), start=1):
+            classification = item_classifications.get(str(item["number"]))
+            item_purpose = (
+                classification.import_purpose
+                if classification
+                else import_purpose
+            )
+            cfop = (
+                classification.cfop
+                if classification and classification.cfop
+                else self._resolve_cfop(item_purpose)
+            )
             product_value = self._decimal(item.get("product_value"))
             quantity = self._decimal(item.get("quantity"))
             unit_value = self._decimal(item.get("unit_value"))
             if unit_value == 0 and quantity > 0:
                 unit_value = product_value / quantity
 
+            manufacturer_fallback = bool(
+                item.get("manufacturer_code_missing_from_portal")
+                and not item.get("manufacturer_code")
+            )
+            manufacturer_code = (
+                "0000" if manufacturer_fallback else item.get("manufacturer_code")
+            )
+            item_additional_info = item.get("additional_info")
             mapped_items.append(
                 {
                     "item_number": index,
                     "duimp_item_number": item["number"],
                     "product_code": item["product_code"],
                     "description": item["description"],
+                    "additional_info": item_additional_info,
                     "ncm": item["ncm"],
                     "cfop": cfop,
+                    "import_purpose": item_purpose,
+                    "tax_rule_id": (
+                        str(classification.tax_rule_id)
+                        if classification and classification.tax_rule_id
+                        else None
+                    ),
+                    "item_classification_id": (
+                        str(classification.id)
+                        if classification
+                        else None
+                    ),
                     "cest": item.get("cest"),
                     "commercial_unit": item["commercial_unit"],
                     "commercial_quantity": str(quantity),
@@ -1013,6 +3942,9 @@ class ImportNfeService:
                     "taxable_quantity": item["taxable_quantity"],
                     "taxable_unit_value": item["taxable_unit_value"],
                     "product_value": str(product_value),
+                    "customs_value": item.get("customs_value")
+                    or str(product_value),
+                    "net_weight": item.get("net_weight", "0"),
                     "freight_value": item.get("freight_value", "0"),
                     "insurance_value": item.get("insurance_value", "0"),
                     "discount_value": item.get("discount_value", "0"),
@@ -1024,7 +3956,19 @@ class ImportNfeService:
                         "duimp_item_number": item["number"],
                         "addition_number": item.get("addition_number"),
                         "sequence_number": item.get("sequence_number"),
-                        "manufacturer_code": item.get("manufacturer_code"),
+                        "manufacturer_code": manufacturer_code,
+                        "manufacturer_code_source": (
+                            "fallback_missing_portal_code"
+                            if manufacturer_fallback
+                            else "portal_unico"
+                        ),
+                        "manufacturer_code_warning": (
+                            "Portal Único retornou fabricante sem código; aplicado "
+                            "fallback controlado 0000."
+                            if manufacturer_fallback
+                            else None
+                        ),
+                        "additional_info": item_additional_info,
                         "exporter_code": item.get("exporter_code") or duimp.get("exporter_code"),
                         "drawback_number": item.get("drawback_number"),
                     },
@@ -1035,8 +3979,126 @@ class ImportNfeService:
             )
         return mapped_items
 
+    def _calculate_items_with_tax_rules(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        item_classifications: dict[str, NfeItemClassification],
+        fallback_configuration: dict[str, Any],
+        additional_costs: dict[str, Any],
+        preallocated_costs: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        rule_ids = {
+            str(row.tax_rule_id)
+            for row in item_classifications.values()
+            if row.tax_rule_id
+        }
+        if len(rule_ids) == 1:
+            only_rule = next(iter(item_classifications.values())).tax_rule
+            return self.tax_calculator.calculate(
+                items,
+                configuration=(
+                    deepcopy(only_rule.configuration_json or {})
+                    if only_rule
+                    else fallback_configuration
+                ),
+                additional_costs=additional_costs,
+                preallocated_costs=preallocated_costs,
+            )
+
+        # O primeiro cálculo realiza um único rateio global das despesas.
+        # Em seguida cada item é recalculado com sua própria regra, sem repetir
+        # AFRMM, Siscomex, THC ou outras despesas.
+        allocated_items, _ = self.tax_calculator.calculate(
+            items,
+            configuration=fallback_configuration,
+            additional_costs=additional_costs,
+            preallocated_costs=preallocated_costs,
+        )
+        calculated_items = []
+        for item in allocated_items:
+            item_number = str(item.get("duimp_item_number"))
+            classification = item_classifications.get(
+                item_number
+            )
+            configuration = (
+                deepcopy(classification.tax_rule.configuration_json or {})
+                if classification and classification.tax_rule
+                else fallback_configuration
+            )
+            source_item = next(
+                source
+                for source in items
+                if str(source.get("duimp_item_number")) == item_number
+            )
+            item_costs = deepcopy(item.get("cost_allocation") or {})
+            calculated, _ = self.tax_calculator.calculate(
+                [source_item],
+                configuration=configuration,
+                additional_costs=item_costs,
+                preallocated_costs=[item_costs],
+            )
+            calculated_items.append(calculated[0])
+        return (
+            calculated_items,
+            self.tax_calculator.calculate_totals(calculated_items),
+        )
+
     def calculate_nfe_totals(self, items: list[dict[str, Any]]) -> dict[str, Any]:
         return self.tax_calculator.calculate_totals(items)
+
+    @staticmethod
+    def _authorization_metadata(items: list[dict[str, Any]]) -> dict[str, Any]:
+        blockers = []
+        diagnostic_treatments = {
+            str(icms.get("cst") or "").zfill(2)
+            for item in items
+            if (
+                icms := ((item.get("tax_payload") or {}).get("icms") or {})
+            ).get("diagnostic_only")
+        }
+        if "51" in diagnostic_treatments:
+            blockers.append(
+                {
+                    "code": "missing_nominal_icms_rate",
+                    "field": "tax_configuration.icms_rate",
+                    "message": (
+                        "A transmissão está bloqueada até a equipe fiscal confirmar "
+                        "a alíquota nominal do ICMS e o enquadramento do TTD."
+                    ),
+                }
+            )
+        if diagnostic_treatments & {"40", "41", "50"}:
+            blockers.append(
+                {
+                    "code": "unconfirmed_icms_tax_treatment",
+                    "field": "tax_configuration.icms_cst",
+                    "message": (
+                        "A assinatura e a transmissão estão bloqueadas até a "
+                        "equipe fiscal confirmar se a exoneração integral deve "
+                        "usar ICMS CST 40, 41 ou 50."
+                    ),
+                }
+            )
+        return {
+            "ready": not blockers,
+            "blockers": blockers,
+            "mode": "diagnostic" if diagnostic_treatments else "fiscal",
+        }
+
+    def ensure_authorization_ready(self, draft: NfeDraft) -> None:
+        """Guarda obrigatória do futuro envio à SEFAZ."""
+        self._refresh_draft_payload_from_items(draft)
+        authorization = (draft.fiscal_payload or {}).get("authorization") or {}
+        if not authorization.get("ready"):
+            codes = ", ".join(
+                str(blocker.get("code"))
+                for blocker in authorization.get("blockers") or []
+            )
+            raise ValueError(
+                "Assinatura/transmissão da NF-e bloqueada por pendências fiscais"
+                + (f": {codes}." if codes else ".")
+            )
 
     def validate_nfe_payload(self, payload: dict[str, Any]) -> ValidationResult:
         errors: list[dict[str, Any]] = []
@@ -1089,8 +4151,18 @@ class ImportNfeService:
 
         for index, item in enumerate(items, start=1):
             prefix = f"items[{index}]"
-            if not item.get("description"):
+            description = str(item.get("description") or "").strip()
+            if not description:
                 errors.append({"field": f"{prefix}.description", "message": "Descrição do item é obrigatória."})
+            elif description.casefold() == "mercadoria importada":
+                errors.append(
+                    {
+                        "field": f"{prefix}.description",
+                        "message": (
+                            "Produto não enriquecido pelo Catálogo de Produtos."
+                        ),
+                    }
+                )
             if len(self._digits(item.get("ncm"))) != 8:
                 errors.append({"field": f"{prefix}.ncm", "message": "NCM deve conter 8 dígitos."})
             if not str(item.get("cfop", "")).startswith("3"):
@@ -1111,6 +4183,137 @@ class ImportNfeService:
                     {
                         "field": f"{prefix}.tax_payload",
                         "message": "Tributos obrigatórios ausentes: " + ", ".join(missing_taxes) + ".",
+                    }
+                )
+            import_payload = item.get("import_payload") or {}
+            if import_payload.get("manufacturer_code_source") == (
+                "fallback_missing_portal_code"
+            ):
+                warnings.append(
+                    {
+                        "field": f"{prefix}.import_payload.manufacturer_code",
+                        "message": import_payload.get("manufacturer_code_warning"),
+                    }
+                )
+
+        authorization = payload.get("authorization") or {}
+        for blocker in authorization.get("blockers") or []:
+            warnings.append(
+                {
+                    "field": blocker.get("field") or "authorization",
+                    "code": blocker.get("code"),
+                    "message": blocker.get("message"),
+                }
+            )
+
+        transport = payload.get("transport") or {}
+        freight_mode = str(transport.get("freight_mode") or "9")
+        if freight_mode != "9" and not transport.get("carrier"):
+            warnings.append(
+                {
+                    "field": "transport.carrier",
+                    "code": "missing_transport_carrier",
+                    "message": (
+                        "A modalidade de frete indica transporte contratado, "
+                        "mas a transportadora ainda não foi informada."
+                    ),
+                }
+            )
+        volume = transport.get("volume") or {}
+        missing_volume_fields = [
+            field
+            for field in ("quantity", "species", "gross_weight")
+            if volume.get(field) in (None, "")
+        ]
+        if missing_volume_fields:
+            warnings.append(
+                {
+                    "field": "transport.volume",
+                    "code": "incomplete_transport_volume",
+                    "missing_fields": missing_volume_fields,
+                    "message": (
+                        "Complete os volumes da carga antes da emissão final: "
+                        + ", ".join(missing_volume_fields)
+                        + ". O peso líquido, quando disponível, é calculado "
+                        "automaticamente pelos itens da DUIMP."
+                    ),
+                }
+            )
+
+        has_icms_benefit = any(
+            bool(
+                item.get("benefit_code")
+                or (((item.get("tax_payload") or {}).get("icms") or {}).get(
+                    "benefit_code"
+                ))
+            )
+            for item in items
+        )
+        additional_info = payload.get("additional_info") or {}
+        if has_icms_benefit and not additional_info.get("legal_text_present"):
+            warnings.append(
+                {
+                    "field": "additional_info.legal_text",
+                    "code": "missing_fiscal_legal_text",
+                    "message": (
+                        "Há benefício fiscal de ICMS nos itens, mas o texto "
+                        "legal/TTD ainda não foi configurado para as "
+                        "informações complementares."
+                    ),
+                }
+            )
+
+        reconciliation = payload.get("reconciliation") or {}
+        if reconciliation.get("status") == "requires_review":
+            failed_checks = [
+                check
+                for check in reconciliation.get("checks") or []
+                if not check.get("matches")
+            ]
+            diagnostic_icms = (
+                self.tax_calculator.is_diagnostic_full_icms_reduction(items)
+            )
+            blocking_checks = []
+            warning_checks = []
+            for check in failed_checks:
+                is_controlled_diagnostic_icms = (
+                    check.get("name") == "duimp_icms" and diagnostic_icms
+                )
+                if (
+                    check.get("blocking", True) is False
+                    or is_controlled_diagnostic_icms
+                ):
+                    warning_checks.append(check)
+                else:
+                    blocking_checks.append(check)
+
+            if blocking_checks:
+                failed_names = ", ".join(
+                    str(check.get("name")) for check in blocking_checks
+                )
+                errors.append(
+                    {
+                        "field": "reconciliation",
+                        "message": (
+                            "A reconciliação fiscal encontrou divergências"
+                            + (f": {failed_names}." if failed_names else ".")
+                        ),
+                    }
+                )
+
+            for check in warning_checks:
+                warnings.append(
+                    {
+                        "field": f"reconciliation.{check.get('name')}",
+                        "code": check.get("code")
+                        or "diagnostic_icms_reconciliation_difference",
+                        "message": check.get("message")
+                        or (
+                            "O ICMS declarado na DUIMP diverge do vICMS da "
+                            "NF-e diagnóstica com CST 51 e redução integral da "
+                            "base. A divergência exige revisão fiscal, mas não "
+                            "impede a geração do XML não assinado."
+                        ),
                     }
                 )
 
@@ -1245,6 +4448,17 @@ class ImportNfeService:
             other_value=self._decimal(item_payload.get("other_value", 0)),
             import_payload=item_payload.get("import_payload"),
             tax_payload=item_payload.get("tax_payload"),
+            import_purpose=item_payload.get("import_purpose"),
+            tax_rule_id=(
+                UUID(str(item_payload["tax_rule_id"]))
+                if item_payload.get("tax_rule_id")
+                else None
+            ),
+            item_classification_id=(
+                UUID(str(item_payload["item_classification_id"]))
+                if item_payload.get("item_classification_id")
+                else None
+            ),
             raw_source_payload=item_payload.get("raw_source_payload"),
             created_at=now,
             updated_at=now,
@@ -1260,6 +4474,7 @@ class ImportNfeService:
         payload = dict(draft.fiscal_payload or {})
         payload["items"] = [self._item_to_payload(row) for row in rows]
         payload["totals"] = self.calculate_nfe_totals(payload["items"])
+        payload["authorization"] = self._authorization_metadata(payload["items"])
         draft.fiscal_payload = payload
 
     def _item_to_payload(self, item: NfeDraftItem) -> dict[str, Any]:
@@ -1270,7 +4485,19 @@ class ImportNfeService:
             "description": item.description,
             "ncm": item.ncm,
             "cfop": item.cfop,
+            "import_purpose": item.import_purpose,
+            "tax_rule_id": str(item.tax_rule_id) if item.tax_rule_id else None,
+            "item_classification_id": (
+                str(item.item_classification_id)
+                if item.item_classification_id
+                else None
+            ),
             "cest": item.cest,
+            "benefit_code": (
+                ((item.tax_payload or {}).get("icms") or {}).get(
+                    "benefit_code"
+                )
+            ),
             "commercial_unit": item.commercial_unit,
             "commercial_quantity": str(item.commercial_quantity),
             "commercial_unit_value": str(item.commercial_unit_value),
@@ -1282,6 +4509,7 @@ class ImportNfeService:
             "insurance_value": str(item.insurance_value),
             "discount_value": str(item.discount_value),
             "other_value": str(item.other_value),
+            "additional_info": (item.import_payload or {}).get("additional_info"),
             "import_payload": item.import_payload,
             "tax_payload": item.tax_payload,
             "raw_source_payload": item.raw_source_payload,
@@ -1295,7 +4523,7 @@ class ImportNfeService:
         endpoint_name: str,
         method: str,
         request_payload: dict[str, Any] | None,
-        response_payload: dict[str, Any] | None,
+        response_payload: Any,
         success: bool,
         status_code: int | None,
         started_at: datetime,
@@ -1335,6 +4563,77 @@ class ImportNfeService:
             raise ValueError("Finalidade de importação inválida para definição do CFOP.")
         return mapping[import_purpose]
 
+    @staticmethod
+    def _merge_defaults(
+        defaults: dict[str, Any] | None,
+        explicit: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        result = deepcopy(defaults or {})
+        for key, value in (explicit or {}).items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = ImportNfeService._merge_defaults(
+                    result[key], value
+                )
+            else:
+                result[key] = deepcopy(value)
+        return result
+
+    @staticmethod
+    def _json_compatible(value: Any) -> Any:
+        if isinstance(value, Decimal):
+            return str(value)
+        if isinstance(value, (datetime, date)):
+            return value.isoformat()
+        if isinstance(value, dict):
+            return {
+                key: ImportNfeService._json_compatible(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [
+                ImportNfeService._json_compatible(item) for item in value
+            ]
+        return value
+
+    @staticmethod
+    def _date_value(value: Any) -> date | None:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _tax_rule_to_dict(rule: ClientImportTaxRule) -> dict[str, Any]:
+        return {
+            "id": str(rule.id),
+            "client_id": str(rule.client_id),
+            "name": rule.name,
+            "issuer_state": rule.issuer_state,
+            "import_purpose": rule.import_purpose,
+            "import_modality": rule.import_modality,
+            "tax_regime": rule.tax_regime,
+            "ncm_pattern": rule.ncm_pattern,
+            "priority": rule.priority,
+            "configuration_json": rule.configuration_json,
+            "additional_cost_defaults": rule.additional_cost_defaults,
+            "transport_defaults": rule.transport_defaults,
+            "payment_defaults": rule.payment_defaults,
+            "active": rule.active,
+            "effective_from": (
+                rule.effective_from.isoformat() if rule.effective_from else None
+            ),
+            "effective_until": (
+                rule.effective_until.isoformat() if rule.effective_until else None
+            ),
+        }
+
     def _require_organization_id(self):
         if not self.organization_id:
             raise ValueError("Usuário atual não possui organization_id.")
@@ -1362,6 +4661,10 @@ class ImportNfeService:
             return None
         value = str(value).strip()
         return value or None
+
+    @staticmethod
+    def _enum_value(value: Any) -> Any:
+        return getattr(value, "value", value)
 
     @staticmethod
     def _iso(value: datetime | None) -> str | None:

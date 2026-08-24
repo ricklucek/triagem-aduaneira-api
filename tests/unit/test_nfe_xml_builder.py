@@ -1,6 +1,7 @@
 from xml.etree import ElementTree as ET
 
 from app.services.nfe_xml_builder import NfeXmlBuilder
+from app.services.nfe_xsd_validator import NfeXsdValidator
 
 
 NS = {"nfe": "http://www.portalfiscal.inf.br/nfe"}
@@ -132,3 +133,226 @@ def test_builds_unsigned_import_nfe_with_foreign_recipient_and_duimp():
     assert root.findtext(".//nfe:IBSCBS/nfe:cClassTrib", namespaces=NS) == "000001"
     assert root.findtext(".//nfe:total/nfe:vNFTot", namespaces=NS) == "7465.19"
     assert root.find(".//{http://www.w3.org/2000/09/xmldsig#}Signature") is None
+
+
+
+def test_builds_xsd_valid_icms00_group():
+    data = payload()
+    data["items"][0]["tax_payload"]["icms"] = {
+        "origin": "1",
+        "cst": "00",
+        "base_method": "3",
+        "base": "9686.49",
+        "rate": "12",
+        "value": "1162.38",
+    }
+
+    xml = NfeXmlBuilder().build(
+        data,
+        access_key="41260700000000000191550010000144221763362375",
+    )
+    root = ET.fromstring(xml)
+    icms00 = root.find(".//nfe:ICMS00", NS)
+
+    assert icms00 is not None
+    assert icms00.findtext("nfe:orig", namespaces=NS) == "1"
+    assert icms00.findtext("nfe:CST", namespaces=NS) == "00"
+    assert icms00.findtext("nfe:modBC", namespaces=NS) == "3"
+    assert icms00.findtext("nfe:vBC", namespaces=NS) == "9686.49"
+    assert icms00.findtext("nfe:pICMS", namespaces=NS) == "12.0000"
+    assert icms00.findtext("nfe:vICMS", namespaces=NS) == "1162.38"
+    assert root.find(".//nfe:ICMS90", NS) is None
+    assert NfeXsdValidator().validate(xml, allow_unsigned=True).is_valid is True
+
+def test_normalizes_nfe_datetime_to_seconds():
+    data = payload()
+    data["document"]["issue_datetime"] = "2026-07-16T11:18:38.123456-03:00"
+
+    xml = NfeXmlBuilder().build(
+        data,
+        access_key="41260700000000000191550010000144221763362375",
+    )
+    root = ET.fromstring(xml)
+
+    assert (
+        root.findtext(".//nfe:ide/nfe:dhEmi", namespaces=NS)
+        == "2026-07-16T11:18:38-03:00"
+    )
+
+
+def test_builds_operation_indicators_carrier_and_volume():
+    data = payload()
+    data["document"].update(
+        {
+            "presence_indicator": "9",
+            "intermediary_indicator": "0",
+        }
+    )
+    data["transport"] = {
+        "freight_mode": "1",
+        "carrier": {
+            "tax_id": "06.255.344/0001-28",
+            "name": "S2 LOG",
+            "state_registration": "9086113225",
+            "address": "RUA VEREADOR ANGELO BURBELLO 800",
+            "city_name": "CURITIBA",
+            "state": "PR",
+        },
+        "volume": {
+            "quantity": 8,
+            "species": "DIVERSOS",
+            "net_weight": "46.88800",
+            "gross_weight": "51.50000",
+        },
+    }
+
+    xml = NfeXmlBuilder().build(
+        data,
+        access_key="41260700000000000191550010000144221763362375",
+    )
+    root = ET.fromstring(xml)
+
+    assert root.findtext(".//nfe:ide/nfe:indPres", namespaces=NS) == "9"
+    assert root.findtext(".//nfe:ide/nfe:indIntermed", namespaces=NS) == "0"
+    assert root.findtext(".//nfe:transporta/nfe:CNPJ", namespaces=NS) == (
+        "06255344000128"
+    )
+    assert root.findtext(".//nfe:transporta/nfe:xNome", namespaces=NS) == (
+        "S2 LOG"
+    )
+    assert root.findtext(".//nfe:vol/nfe:pesoL", namespaces=NS) == "46.888"
+    assert root.findtext(".//nfe:vol/nfe:pesoB", namespaces=NS) == "51.500"
+    assert NfeXsdValidator().validate(xml, allow_unsigned=True).is_valid is True
+
+
+def test_unsigned_xml_passes_official_xsd_with_validation_signature():
+    xml = NfeXmlBuilder().build(
+        payload(),
+        access_key="41260700000000000191550010000144221763362375",
+    )
+
+    result = NfeXsdValidator().validate(xml, allow_unsigned=True)
+
+    assert result.is_valid is True
+    assert result.errors == []
+    assert result.schema_package == "PL_010e_v1.02"
+    assert "<Signature" not in xml
+
+
+def test_xsd_validator_reports_invalid_issue_datetime():
+    xml = NfeXmlBuilder().build(
+        payload(),
+        access_key="41260700000000000191550010000144221763362375",
+    )
+    xml = xml.replace(
+        "2026-07-16T11:18:38-03:00",
+        "2026-07-16T11:18:38.123456-03:00",
+    )
+
+    result = NfeXsdValidator().validate(xml, allow_unsigned=True)
+
+    assert result.is_valid is False
+    assert any("dhEmi" in error["message"] for error in result.errors)
+
+
+def test_builds_xsd_valid_diagnostic_icms51_without_nominal_values():
+    data = payload()
+    data["items"][0]["import_payload"]["addition_number"] = "2"
+    data["items"][0]["tax_payload"]["icms"] = {
+        "origin": "1",
+        "cst": "51",
+        "base_method": "3",
+        "base": "9686.49",
+        "rate": None,
+        "operation_value": None,
+        "deferment_rate": "100",
+        "deferred_value": None,
+        "value": "0",
+        "diagnostic_only": True,
+    }
+    data["totals"]["icms_value"] = "0"
+
+    xml = NfeXmlBuilder().build(
+        data,
+        access_key="41260700000000000191550010000144221763362375",
+    )
+    root = ET.fromstring(xml)
+    icms51 = root.find(".//nfe:ICMS51", NS)
+
+    assert icms51 is not None
+    assert icms51.findtext("nfe:vBC", namespaces=NS) == "9686.49"
+    assert icms51.findtext("nfe:pDif", namespaces=NS) == "100.0000"
+    assert icms51.findtext("nfe:vICMS", namespaces=NS) == "0.00"
+    assert icms51.find("nfe:pICMS", NS) is None
+    assert icms51.find("nfe:vICMSOp", NS) is None
+    assert icms51.find("nfe:vICMSDif", NS) is None
+    assert root.findtext(".//nfe:adi/nfe:nAdicao", namespaces=NS) == "2"
+    assert NfeXsdValidator().validate(xml, allow_unsigned=True).is_valid is True
+
+
+def test_builds_xsd_valid_icms51_base_reduction_benefit_and_ipint():
+    data = payload()
+    data["items"][0]["benefit_code"] = "PR839999"
+    data["items"][0]["tax_payload"]["icms"] = {
+        "origin": "1",
+        "cst": "51",
+        "base_method": "3",
+        "base_reduction_rate": "100",
+        "base": "9686.49",
+        "rate": None,
+        "value": None,
+        "diagnostic_only": True,
+    }
+    data["items"][0]["tax_payload"]["ipi"] = {
+        "cst": "01",
+        "enquiry_code": "999",
+        "base": "7144.18",
+        "rate": "0",
+        "value": "0",
+    }
+    data["totals"]["icms_value"] = "0"
+    data["totals"]["ipi_value"] = "0"
+
+    xml = NfeXmlBuilder().build(
+        data,
+        access_key="41260700000000000191550010000144221763362375",
+    )
+    root = ET.fromstring(xml)
+    icms51 = root.find(".//nfe:ICMS51", NS)
+
+    assert root.findtext(".//nfe:prod/nfe:cBenef", namespaces=NS) == "PR839999"
+    assert icms51.findtext("nfe:pRedBC", namespaces=NS) == "100.0000"
+    assert icms51.find("nfe:pICMS", NS) is None
+    assert icms51.find("nfe:vICMS", NS) is None
+    assert root.findtext(".//nfe:IPI/nfe:IPINT/nfe:CST", namespaces=NS) == "01"
+    assert root.find(".//nfe:IPI/nfe:IPITrib", NS) is None
+    assert NfeXsdValidator().validate(xml, allow_unsigned=True).is_valid is True
+
+
+def test_builds_xsd_valid_diagnostic_icms40_without_nominal_values():
+    data = payload()
+    data["items"][0]["tax_payload"]["icms"] = {
+        "origin": "1",
+        "cst": "40",
+        "base": "0",
+        "rate": None,
+        "value": "0",
+        "tax_treatment_confirmed": False,
+        "diagnostic_only": True,
+    }
+    data["totals"]["icms_base"] = "0"
+    data["totals"]["icms_value"] = "0"
+
+    xml = NfeXmlBuilder().build(
+        data,
+        access_key="41260700000000000191550010000144221763362375",
+    )
+    root = ET.fromstring(xml)
+    icms40 = root.find(".//nfe:ICMS40", NS)
+
+    assert icms40 is not None
+    assert icms40.findtext("nfe:orig", namespaces=NS) == "1"
+    assert icms40.findtext("nfe:CST", namespaces=NS) == "40"
+    assert icms40.find("nfe:vICMSDeson", NS) is None
+    assert icms40.find("nfe:motDesICMS", NS) is None
+    assert NfeXsdValidator().validate(xml, allow_unsigned=True).is_valid is True

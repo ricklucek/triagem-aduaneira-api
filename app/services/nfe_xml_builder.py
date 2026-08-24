@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -67,9 +69,13 @@ class NfeXmlBuilder:
         self._text(ide, "mod", "55")
         self._text(ide, "serie", str(document["series"]).lstrip("0") or "0")
         self._text(ide, "nNF", document["number"])
-        self._text(ide, "dhEmi", document["issue_datetime"])
+        self._text(ide, "dhEmi", self._datetime(document["issue_datetime"]))
         if document.get("exit_entry_datetime"):
-            self._text(ide, "dhSaiEnt", document["exit_entry_datetime"])
+            self._text(
+                ide,
+                "dhSaiEnt",
+                self._datetime(document["exit_entry_datetime"]),
+            )
         self._text(ide, "tpNF", "0")
         self._text(ide, "idDest", "3")
         self._text(ide, "cMunFG", issuer_address["city_code"])
@@ -79,7 +85,12 @@ class NfeXmlBuilder:
         self._text(ide, "tpAmb", "1" if document.get("environment") == "production" else "2")
         self._text(ide, "finNFe", "1")
         self._text(ide, "indFinal", document.get("final_consumer") or "0")
-        self._text(ide, "indPres", document.get("presence_indicator") or "0")
+        self._text(ide, "indPres", document.get("presence_indicator") or "9")
+        self._optional(
+            ide,
+            "indIntermed",
+            document.get("intermediary_indicator") or "0",
+        )
         self._text(ide, "procEmi", "0")
         self._text(ide, "verProc", document.get("application_version") or "Triagem Aduaneira")
 
@@ -129,6 +140,7 @@ class NfeXmlBuilder:
         self._text(prod, "xProd", item.get("description"))
         self._text(prod, "NCM", item.get("ncm"))
         self._optional(prod, "CEST", item.get("cest"))
+        self._optional(prod, "cBenef", item.get("benefit_code"))
         self._text(prod, "CFOP", item.get("cfop"))
         self._text(prod, "uCom", item.get("commercial_unit"))
         self._text(prod, "qCom", self._quantity(item.get("commercial_quantity")))
@@ -166,7 +178,8 @@ class NfeXmlBuilder:
             self._text(di, "UFTerceiro", duimp.get("third_party_state"))
         self._text(di, "cExportador", data.get("exporter_code") or duimp.get("exporter_code"))
         addition = ET.SubElement(di, self._tag("adi"))
-        self._text(addition, "nSeqAdic", data.get("sequence_number") or data.get("addition_number") or "1")
+        self._optional(addition, "nAdicao", data.get("addition_number"))
+        self._text(addition, "nSeqAdic", data.get("sequence_number") or "1")
         self._text(addition, "cFabricante", data.get("manufacturer_code") or "0000")
         self._optional(addition, "nDraw", data.get("drawback_number"))
 
@@ -177,30 +190,95 @@ class NfeXmlBuilder:
         imposto = ET.SubElement(parent, self._tag("imposto"))
 
         icms_data = taxes["icms"]
-        if str(icms_data.get("cst") or "").zfill(2) != "90":
-            raise NfeXmlBuildError("Nesta etapa, o gerador suporta ICMS CST 90 para importação.")
+        icms_cst = str(icms_data.get("cst") or "").zfill(2)
+        if icms_cst not in {"00", "40", "41", "50", "51", "90"}:
+            raise NfeXmlBuildError(
+                "Nesta etapa, o gerador suporta ICMS CST 00, 40, 41, 50, 51 ou 90 "
+                "para importação."
+            )
         icms = ET.SubElement(imposto, self._tag("ICMS"))
-        icms90 = ET.SubElement(icms, self._tag("ICMS90"))
-        for tag, key, default in (
-            ("orig", "origin", "1"), ("CST", "cst", "90"), ("modBC", "base_method", "3"),
-        ):
-            self._text(icms90, tag, icms_data.get(key) or default)
-        self._text(icms90, "vBC", self._money(icms_data.get("base")))
-        self._text(icms90, "pICMS", self._rate(icms_data.get("rate")))
-        self._text(icms90, "vICMS", self._money(icms_data.get("value")))
-        self._text(icms90, "modBCST", icms_data.get("st_base_method") or "6")
-        self._text(icms90, "vBCST", self._money(icms_data.get("st_base")))
-        self._text(icms90, "pICMSST", self._rate(icms_data.get("st_rate")))
-        self._text(icms90, "vICMSST", self._money(icms_data.get("st_value")))
+        if icms_cst == "00":
+            icms00 = ET.SubElement(icms, self._tag("ICMS00"))
+            self._text(icms00, "orig", icms_data.get("origin") or "1")
+            self._text(icms00, "CST", "00")
+            self._text(icms00, "modBC", icms_data.get("base_method") or "3")
+            self._text(icms00, "vBC", self._money(icms_data.get("base")))
+            self._text(icms00, "pICMS", self._rate(icms_data.get("rate")))
+            self._text(icms00, "vICMS", self._money(icms_data.get("value")))
+        elif icms_cst in {"40", "41", "50"}:
+            icms40 = ET.SubElement(icms, self._tag("ICMS40"))
+            self._text(icms40, "orig", icms_data.get("origin") or "1")
+            self._text(icms40, "CST", icms_cst)
+        elif icms_cst == "51":
+            icms51 = ET.SubElement(icms, self._tag("ICMS51"))
+            self._text(icms51, "orig", icms_data.get("origin") or "1")
+            self._text(icms51, "CST", "51")
+            self._optional(icms51, "modBC", icms_data.get("base_method"))
+            if icms_data.get("base_reduction_rate") not in (None, ""):
+                self._text(
+                    icms51,
+                    "pRedBC",
+                    self._rate(icms_data["base_reduction_rate"]),
+                )
+            self._optional(icms51, "cBenefRBC", icms_data.get("base_benefit_code"))
+            self._text(icms51, "vBC", self._money(icms_data.get("base")))
+            if icms_data.get("rate") not in (None, ""):
+                self._text(icms51, "pICMS", self._rate(icms_data["rate"]))
+            if icms_data.get("operation_value") not in (None, ""):
+                self._text(
+                    icms51,
+                    "vICMSOp",
+                    self._money(icms_data["operation_value"]),
+                )
+            if icms_data.get("deferment_rate") not in (None, ""):
+                self._text(
+                    icms51,
+                    "pDif",
+                    self._rate(icms_data["deferment_rate"]),
+                )
+            if icms_data.get("deferred_value") not in (None, ""):
+                self._text(
+                    icms51,
+                    "vICMSDif",
+                    self._money(icms_data["deferred_value"]),
+                )
+            if icms_data.get("value") not in (None, ""):
+                self._text(
+                    icms51,
+                    "vICMS",
+                    self._money(icms_data["value"]),
+                )
+        else:
+            icms90 = ET.SubElement(icms, self._tag("ICMS90"))
+            for tag, key, default in (
+                ("orig", "origin", "1"),
+                ("CST", "cst", "90"),
+                ("modBC", "base_method", "3"),
+            ):
+                self._text(icms90, tag, icms_data.get(key) or default)
+            self._text(icms90, "vBC", self._money(icms_data.get("base")))
+            self._text(icms90, "pICMS", self._rate(icms_data.get("rate")))
+            self._text(icms90, "vICMS", self._money(icms_data.get("value")))
+            self._text(icms90, "modBCST", icms_data.get("st_base_method") or "6")
+            self._text(icms90, "vBCST", self._money(icms_data.get("st_base")))
+            self._text(icms90, "pICMSST", self._rate(icms_data.get("st_rate")))
+            self._text(icms90, "vICMSST", self._money(icms_data.get("st_value")))
 
         ipi_data = taxes["ipi"]
         ipi = ET.SubElement(imposto, self._tag("IPI"))
         self._text(ipi, "cEnq", ipi_data.get("enquiry_code") or "999")
-        ipi_trib = ET.SubElement(ipi, self._tag("IPITrib"))
-        self._text(ipi_trib, "CST", ipi_data.get("cst") or "49")
-        self._text(ipi_trib, "vBC", self._money(ipi_data.get("base")))
-        self._text(ipi_trib, "pIPI", self._rate(ipi_data.get("rate")))
-        self._text(ipi_trib, "vIPI", self._money(ipi_data.get("value")))
+        ipi_cst = str(ipi_data.get("cst") or "49").zfill(2)
+        if ipi_cst in {"01", "02", "03", "04", "05", "51", "52", "53", "54", "55"}:
+            ipi_nt = ET.SubElement(ipi, self._tag("IPINT"))
+            self._text(ipi_nt, "CST", ipi_cst)
+        elif ipi_cst in {"00", "49", "50", "99"}:
+            ipi_trib = ET.SubElement(ipi, self._tag("IPITrib"))
+            self._text(ipi_trib, "CST", ipi_cst)
+            self._text(ipi_trib, "vBC", self._money(ipi_data.get("base")))
+            self._text(ipi_trib, "pIPI", self._rate(ipi_data.get("rate")))
+            self._text(ipi_trib, "vIPI", self._money(ipi_data.get("value")))
+        else:
+            raise NfeXmlBuildError(f"CST de IPI não suportado: {ipi_cst}.")
 
         ii_data = taxes["ii"]
         ii = ET.SubElement(imposto, self._tag("II"))
@@ -274,6 +352,23 @@ class NfeXmlBuilder:
     def _build_transport(self, parent: ET.Element, data: dict[str, Any]) -> None:
         transport = ET.SubElement(parent, self._tag("transp"))
         self._text(transport, "modFrete", data.get("freight_mode") or "9")
+        carrier = data.get("carrier") or {}
+        if carrier:
+            carrier_node = ET.SubElement(transport, self._tag("transporta"))
+            tax_id = re.sub(r"\D", "", str(carrier.get("tax_id") or ""))
+            if len(tax_id) == 14:
+                self._text(carrier_node, "CNPJ", tax_id)
+            elif len(tax_id) == 11:
+                self._text(carrier_node, "CPF", tax_id)
+            self._optional(carrier_node, "xNome", carrier.get("name"))
+            self._optional(
+                carrier_node,
+                "IE",
+                carrier.get("state_registration"),
+            )
+            self._optional(carrier_node, "xEnder", carrier.get("address"))
+            self._optional(carrier_node, "xMun", carrier.get("city_name"))
+            self._optional(carrier_node, "UF", carrier.get("state"))
         volume = data.get("volume") or {}
         if volume:
             vol = ET.SubElement(transport, self._tag("vol"))
@@ -281,8 +376,18 @@ class NfeXmlBuilder:
             self._optional(vol, "esp", volume.get("species"))
             self._optional(vol, "marca", volume.get("brand"))
             self._optional(vol, "nVol", volume.get("numbering"))
-            self._optional(vol, "pesoL", volume.get("net_weight"))
-            self._optional(vol, "pesoB", volume.get("gross_weight"))
+            if volume.get("net_weight") not in (None, ""):
+                self._text(
+                    vol,
+                    "pesoL",
+                    self._weight(volume.get("net_weight")),
+                )
+            if volume.get("gross_weight") not in (None, ""):
+                self._text(
+                    vol,
+                    "pesoB",
+                    self._weight(volume.get("gross_weight")),
+                )
 
     def _build_payment(self, parent: ET.Element, data: dict[str, Any], totals: dict[str, Any]) -> None:
         payment = ET.SubElement(parent, self._tag("pag"))
@@ -348,5 +453,20 @@ class NfeXmlBuilder:
     def _quantity(self, value: Any) -> str:
         return f"{self._decimal(value):.4f}"
 
+    def _weight(self, value: Any) -> str:
+        return f"{self._decimal(value):.3f}"
+
     def _unit_value(self, value: Any) -> str:
         return f"{self._decimal(value):.10f}"
+
+    @staticmethod
+    def _datetime(value: Any) -> str:
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            text = str(value or "")
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return text
+        return parsed.isoformat(timespec="seconds")

@@ -1,6 +1,14 @@
-from marshmallow import Schema, ValidationError, fields, validate, validates_schema
+from marshmallow import (
+    Schema,
+    ValidationError,
+    fields,
+    pre_load,
+    validate,
+    validates_schema,
+)
 from marshmallow_sqlalchemy import SQLAlchemyAutoSchema
 
+from app.cnpj import is_valid_cnpj, normalize_cnpj
 from app.models import (
     Client,
     ClientContact,
@@ -23,12 +31,84 @@ class ClientSchema(SQLAlchemyAutoSchema):
         load_instance = True
         include_fk = True
 
+
+class ClientCreateSchema(Schema):
+    cnpj = fields.String(required=True)
+    razao_social = fields.String(
+        required=True,
+        validate=validate.Length(min=1, max=255),
+    )
+    nome_resumido = fields.String(
+        allow_none=True,
+        load_default=None,
+        validate=validate.Length(max=255),
+    )
+    inscricao_estadual = fields.String(allow_none=True, load_default=None)
+    inscricao_municipal = fields.String(allow_none=True, load_default=None)
+    endereco_completo_escritorio = fields.String(
+        allow_none=True,
+        load_default=None,
+    )
+    endereco_completo_armazem = fields.String(
+        allow_none=True,
+        load_default=None,
+    )
+    cnae_principal = fields.String(allow_none=True, load_default=None)
+    cnae_secundario = fields.String(allow_none=True, load_default=None)
+    regime_tributacao = fields.String(allow_none=True, load_default=None)
+    ativo = fields.Boolean(load_default=True)
+
+    @pre_load
+    def normalize_payload(self, data, **kwargs):
+        if not isinstance(data, dict):
+            return data
+
+        normalized = dict(data)
+        if "cnpj" in normalized:
+            normalized["cnpj"] = normalize_cnpj(normalized["cnpj"])
+
+        for field_name in (
+            "razao_social",
+            "nome_resumido",
+            "inscricao_estadual",
+            "inscricao_municipal",
+            "endereco_completo_escritorio",
+            "endereco_completo_armazem",
+            "cnae_principal",
+            "cnae_secundario",
+            "regime_tributacao",
+        ):
+            value = normalized.get(field_name)
+            if isinstance(value, str):
+                normalized[field_name] = value.strip() or None
+        return normalized
+
+    @validates_schema
+    def validate_client(self, data, **kwargs):
+        errors = {}
+        if not data.get("razao_social"):
+            errors["razao_social"] = ["Razão social é obrigatória."]
+        if not is_valid_cnpj(data.get("cnpj")):
+            errors["cnpj"] = [
+                "CNPJ inválido. Informe 14 caracteres com dígitos verificadores válidos."
+            ]
+        if errors:
+            raise ValidationError(errors)
+
+
 class ClientListQuerySchema(Schema):
     q = fields.String(required=False)
     cnpj = fields.String(required=False)
     ativo = fields.Boolean(required=False)
     limit = fields.Integer(load_default=20, validate=validate.Range(min=1, max=200))
     offset = fields.Integer(load_default=0, validate=validate.Range(min=0))
+
+    @pre_load
+    def normalize_query(self, data, **kwargs):
+        normalized = dict(data)
+        if normalized.get("cnpj"):
+            normalized["cnpj"] = normalize_cnpj(normalized["cnpj"])
+        return normalized
 
 
 class ClientUpdateSchema(Schema):
@@ -81,16 +161,25 @@ class ClientFiscalProfileSchema(SQLAlchemyAutoSchema):
     email = fields.Email(allow_none=True)
     is_default = fields.Boolean(load_default=True)
 
+    @pre_load
+    def normalize_payload(self, data, **kwargs):
+        normalized = dict(data)
+        if "cnpj" in normalized:
+            normalized["cnpj"] = normalize_cnpj(normalized["cnpj"])
+        return normalized
+
     @validates_schema
     def validate_fiscal_profile(self, data, **kwargs):
-        cnpj = "".join(filter(str.isdigit, str(data.get("cnpj", ""))))
+        cnpj = normalize_cnpj(data.get("cnpj"))
         zip_code = "".join(filter(str.isdigit, str(data.get("zip_code", ""))))
         city_code = "".join(filter(str.isdigit, str(data.get("city_code", ""))))
 
         errors = {}
 
-        if len(cnpj) != 14:
-            errors["cnpj"] = ["CNPJ deve conter 14 dígitos."]
+        if not is_valid_cnpj(cnpj):
+            errors["cnpj"] = [
+                "CNPJ inválido. Informe 14 caracteres com dígitos verificadores válidos."
+            ]
 
         if len(zip_code) != 8:
             errors["zip_code"] = ["CEP deve conter 8 dígitos."]
