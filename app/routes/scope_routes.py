@@ -144,9 +144,6 @@ def list_scopes():
 @scope_bp.get("/bulk/assignment-summary")
 @auth_required
 def get_bulk_assignment_summary():
-    forbidden = _admin_forbidden_response()
-    if forbidden:
-        return forbidden
 
     processor = _processor()
     group_by = request.args.get("groupBy")
@@ -160,9 +157,6 @@ def get_bulk_assignment_summary():
 @scope_bp.get("/bulk/assignment-scopes")
 @auth_required
 def get_bulk_assignment_scopes():
-    forbidden = _admin_forbidden_response()
-    if forbidden:
-        return forbidden
 
     processor = _processor()
     group_by = request.args.get("groupBy")
@@ -180,9 +174,6 @@ def get_bulk_assignment_scopes():
 @scope_bp.post("/bulk/assignment-update")
 @auth_required
 def bulk_update_assignment():
-    forbidden = _admin_forbidden_response()
-    if forbidden:
-        return forbidden
 
     processor = _processor()
     payload = _load_optional_json_payload()
