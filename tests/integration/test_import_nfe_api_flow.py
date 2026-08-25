@@ -278,17 +278,15 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
         f"/import-processes/{process_id}/nfe-workflow-state",
         headers=headers,
         query_string={
-            "import_purpose": "resale",
             "environment": "homologation",
             "series": "1",
         },
     )
     assert workflow_after_edit.status_code == 200
-    # Este cenário usa tax_configuration ad hoc, sem regra persistida. O
-    # workflow preserva corretamente a precedência desse pré-requisito.
-    assert workflow_after_edit.get_json()["next_action"] == (
-        "configure_tax_rule"
-    )
+    # A ausência de regra persistida não volta a bloquear o processo. Este
+    # cenário legado ainda possui dados de contexto não normalizados e, por
+    # isso, a próxima ação válida passa a ser a complementação do contexto.
+    assert workflow_after_edit.get_json()["next_action"] == "resolve_context"
 
     replacement_xml_response = client.post(
         f"/nfe-drafts/{draft_id}/generate-xml",
@@ -446,6 +444,102 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
         assert events[0].current_status == "signed"
         assert "certificate_ref" not in events[0].event_metadata
         assert "password_ref" not in events[0].event_metadata
+
+
+def test_tax_rule_conflict_is_rejected_and_diagnosed(api):
+    client, headers, importer_id = api
+    payload = {
+        "name": "PR revenda padrão A",
+        "issuer_state": "PR",
+        "import_purpose": "resale",
+        "import_modality": "direct",
+        "tax_regime": "3",
+        "priority": 100,
+        "configuration_json": {
+            "cfop": "3102",
+            "icms_rate": "12",
+            "icms_cst": "90",
+        },
+    }
+
+    first = client.post(
+        f"/clients/{importer_id}/import-tax-rules",
+        headers=headers,
+        json=payload,
+    )
+    assert first.status_code == 201, first.get_json()
+
+    conflicting = client.post(
+        f"/clients/{importer_id}/import-tax-rules",
+        headers=headers,
+        json={**payload, "name": "PR revenda padrão B"},
+    )
+    assert conflicting.status_code == 409
+    conflict_body = conflicting.get_json()
+    assert conflict_body["error"] == "tax_rule_conflict"
+    assert conflict_body["conflicts"] == [
+        {
+            "id": first.get_json()["id"],
+            "name": "PR revenda padrão A",
+            "issuer_state": "PR",
+            "import_purpose": "resale",
+            "import_modality": "direct",
+            "tax_regime": "3",
+            "ncm_pattern": None,
+            "priority": 100,
+            "effective_from": None,
+            "effective_until": None,
+        }
+    ]
+
+    diagnostics = client.get(
+        f"/clients/{importer_id}/import-tax-rules/diagnostics",
+        headers=headers,
+    )
+    assert diagnostics.status_code == 200
+    assert diagnostics.get_json()["summary"] == {
+        "total": 1,
+        "active": 1,
+        "inactive": 0,
+        "conflict_count": 0,
+    }
+
+
+def test_missing_tax_rule_does_not_block_duimp_preparation(api):
+    client, headers, importer_id = api
+    profile = client.put(
+        f"/clients/{importer_id}/fiscal-profile",
+        headers=headers,
+        json={
+            "legal_name": "Importadora Teste Ltda",
+            "cnpj": "00000000000191",
+            "state_registration": "1234567890",
+            "tax_regime": "3",
+            "street": "Rua de Teste",
+            "number": "100",
+            "district": "Centro",
+            "city_code": "4106902",
+            "city_name": "Curitiba",
+            "state": "PR",
+            "zip_code": "80000000",
+        },
+    )
+    assert profile.status_code == 200
+    process = client.post(
+        "/import-processes",
+        headers=headers,
+        json={"importer_id": importer_id, "source": "portal_unico"},
+    )
+    assert process.status_code == 201
+
+    workflow = client.get(
+        f"/import-processes/{process.get_json()['id']}/nfe-workflow-state",
+        headers=headers,
+    )
+    assert workflow.status_code == 200
+    body = workflow.get_json()
+    assert body["prerequisites"]["has_active_tax_rule"] is False
+    assert body["next_action"] == "configure_number_sequence"
 
 
 def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
@@ -721,6 +815,8 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert workflow_body["prerequisites"] == {
         "has_fiscal_profile": True,
         "has_active_tax_rule": True,
+        "active_tax_rule_count": 2,
+        "tax_rule_conflict_count": 0,
         "has_number_sequence": False,
         "has_provider_connection": False,
         "has_item_classification": False,

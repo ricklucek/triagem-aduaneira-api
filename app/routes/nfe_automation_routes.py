@@ -11,7 +11,10 @@ from ..schemas.nfe_automation import (
     ResolveNfeContextSchema,
     UpdateClientImportTaxRuleSchema,
 )
-from ..services.import_process import ImportNfeService
+from ..services.import_process import (
+    ImportNfeService,
+    ImportTaxRuleConflictError,
+)
 from .route_helpers import (
     bad_request_response,
     json_payload,
@@ -49,6 +52,28 @@ def list_import_tax_rules(client_id: str):
         return bad_request_response(exc)
 
 
+@client_import_tax_rule_bp.get("/<client_id>/import-tax-rules/diagnostics")
+@auth_required
+def import_tax_rule_diagnostics(client_id: str):
+    client_uuid = uuid_or_404(client_id)
+    try:
+        result = _service().import_tax_rule_diagnostics(client_uuid)
+        conflicts_by_rule = result["conflicts_by_rule"]
+        items = tax_rule_schema.dump(result["rules"], many=True)
+        for item in items:
+            item["conflicts"] = conflicts_by_rule.get(str(item["id"]), [])
+            item["has_conflicts"] = bool(item["conflicts"])
+        return jsonify(
+            {
+                "items": items,
+                "conflicts": result["conflicts"],
+                "summary": result["summary"],
+            }
+        )
+    except ValueError as exc:
+        return bad_request_response(exc)
+
+
 @client_import_tax_rule_bp.post("/<client_id>/import-tax-rules")
 @auth_required
 def create_import_tax_rule(client_id: str):
@@ -61,6 +86,15 @@ def create_import_tax_rule(client_id: str):
     except ValidationError as exc:
         db.session.rollback()
         return validation_error_response(exc)
+    except ImportTaxRuleConflictError as exc:
+        db.session.rollback()
+        return jsonify(
+            {
+                "error": "tax_rule_conflict",
+                "message": str(exc),
+                "conflicts": exc.conflicts,
+            }
+        ), 409
     except ValueError as exc:
         db.session.rollback()
         return bad_request_response(exc)
@@ -84,6 +118,15 @@ def update_import_tax_rule(client_id: str, rule_id: str):
     except ValidationError as exc:
         db.session.rollback()
         return validation_error_response(exc)
+    except ImportTaxRuleConflictError as exc:
+        db.session.rollback()
+        return jsonify(
+            {
+                "error": "tax_rule_conflict",
+                "message": str(exc),
+                "conflicts": exc.conflicts,
+            }
+        ), 409
     except ValueError as exc:
         db.session.rollback()
         return bad_request_response(exc)
@@ -187,4 +230,3 @@ def resolve_nfe_context(process_id: str):
         return jsonify(
             {"error": "external_integration_error", "message": str(exc)}
         ), 502
-

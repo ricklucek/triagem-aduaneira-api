@@ -92,6 +92,24 @@ class ValidationResult:
         return {"valid": self.is_valid, "errors": self.errors, "warnings": self.warnings}
 
 
+class ImportTaxRuleConflictError(ValueError):
+    """Raised when active tax rules can win with the same specificity."""
+
+    def __init__(self, conflicts: list[dict[str, Any]]):
+        self.conflicts = conflicts
+        names = ", ".join(
+            f'"{conflict["name"]}"'
+            for conflict in conflicts
+            if conflict.get("name")
+        )
+        detail = f" Regras conflitantes: {names}." if names else ""
+        super().__init__(
+            "Há regras tributárias ativas com a mesma prioridade e "
+            "especificidade em escopos sobrepostos. Ajuste a prioridade, "
+            f"vigência, NCM ou demais filtros antes de continuar.{detail}"
+        )
+
+
 class MockDuimpGateway:
     """Gateway temporário para desenvolvimento sem dependência do Portal Único."""
 
@@ -841,14 +859,11 @@ class ImportNfeService:
             if draft_detail and draft_detail["xml_versions"]
             else None
         )
-        active_tax_rule = bool(
-            self.import_tax_rule_query_for_current_user()
-            .filter(
-                ClientImportTaxRule.client_id == process.importer_id,
-                ClientImportTaxRule.active.is_(True),
-            )
-            .first()
+        tax_rule_diagnostics = self.import_tax_rule_diagnostics(
+            process.importer_id
         )
+        active_tax_rule_count = tax_rule_diagnostics["summary"]["active"]
+        active_tax_rule = active_tax_rule_count > 0
         try:
             provider_connection = self._find_provider_connection(
                 process=process,
@@ -916,8 +931,6 @@ class ImportNfeService:
 
         if fiscal_profile is None:
             next_action = "configure_fiscal_profile"
-        elif not active_tax_rule:
-            next_action = "configure_tax_rule"
         elif sequence is None and latest_snapshot is None:
             next_action = "configure_number_sequence"
         elif not has_provider_connection and latest_snapshot is None:
@@ -1003,6 +1016,10 @@ class ImportNfeService:
             "prerequisites": {
                 "has_fiscal_profile": fiscal_profile is not None,
                 "has_active_tax_rule": active_tax_rule,
+                "active_tax_rule_count": active_tax_rule_count,
+                "tax_rule_conflict_count": tax_rule_diagnostics["summary"][
+                    "conflict_count"
+                ],
                 "has_number_sequence": sequence is not None,
                 "has_provider_connection": has_provider_connection,
                 "has_item_classification": bool(
@@ -1129,6 +1146,9 @@ class ImportNfeService:
             **payload,
         )
         self._validate_import_tax_rule(rule)
+        conflicts = self._find_import_tax_rule_conflicts(rule)
+        if conflicts:
+            raise ImportTaxRuleConflictError(conflicts)
         db.session.add(rule)
         db.session.flush()
         return rule
@@ -1158,6 +1178,9 @@ class ImportNfeService:
                 setattr(rule, field, payload[field])
         rule.updated_at = datetime.utcnow()
         self._validate_import_tax_rule(rule)
+        conflicts = self._find_import_tax_rule_conflicts(rule)
+        if conflicts:
+            raise ImportTaxRuleConflictError(conflicts)
         db.session.flush()
         return rule
 
@@ -1179,6 +1202,41 @@ class ImportNfeService:
         rule.active = False
         rule.updated_at = datetime.utcnow()
         db.session.flush()
+
+    def import_tax_rule_diagnostics(self, client_id) -> dict[str, Any]:
+        """Return all rules and any ambiguous active-rule pairs.
+
+        New ambiguous pairs are rejected during create/update. This diagnosis
+        also exposes duplicates created before this validation existed so the
+        operator can correct the exact records without losing the workflow.
+        """
+        rules = self.list_import_tax_rules(client_id)
+        conflicts_by_rule: dict[str, list[dict[str, Any]]] = {
+            str(rule.id): [] for rule in rules
+        }
+        pairs: list[dict[str, Any]] = []
+        for index, rule in enumerate(rules):
+            if not rule.active:
+                continue
+            for other in rules[index + 1:]:
+                if not other.active or not self._tax_rules_are_ambiguous(rule, other):
+                    continue
+                rule_summary = self._tax_rule_conflict_summary(rule)
+                other_summary = self._tax_rule_conflict_summary(other)
+                conflicts_by_rule[str(rule.id)].append(other_summary)
+                conflicts_by_rule[str(other.id)].append(rule_summary)
+                pairs.append({"rules": [rule_summary, other_summary]})
+        return {
+            "rules": rules,
+            "conflicts_by_rule": conflicts_by_rule,
+            "conflicts": pairs,
+            "summary": {
+                "total": len(rules),
+                "active": sum(1 for rule in rules if rule.active),
+                "inactive": sum(1 for rule in rules if not rule.active),
+                "conflict_count": len(pairs),
+            },
+        }
 
     def match_import_tax_rule(
         self,
@@ -1213,26 +1271,119 @@ class ImportNfeService:
             if not reasons:
                 matches.append(rule)
 
-        def score(rule: ClientImportTaxRule):
-            return (
-                rule.priority,
-                len(self._digits(rule.ncm_pattern)),
-                bool(rule.import_modality),
-                bool(rule.tax_regime),
-            )
-
-        matches.sort(key=score, reverse=True)
+        matches.sort(key=self._tax_rule_score, reverse=True)
         if rule_id and not matches:
             raise ValueError(
                 "A regra fiscal informada não é aplicável ao cliente, UF, "
                 "finalidade, modalidade, NCMs ou período da DUIMP."
             )
-        if len(matches) > 1 and score(matches[0]) == score(matches[1]):
-            raise ValueError(
-                "Mais de uma regra fiscal com a mesma especificidade é aplicável. "
-                "Ajuste a prioridade ou o escopo das regras."
+        if (
+            len(matches) > 1
+            and self._tax_rule_score(matches[0])
+            == self._tax_rule_score(matches[1])
+        ):
+            top_score = self._tax_rule_score(matches[0])
+            raise ImportTaxRuleConflictError(
+                [
+                    self._tax_rule_conflict_summary(rule)
+                    for rule in matches
+                    if self._tax_rule_score(rule) == top_score
+                ]
             )
         return matches[0] if matches else None
+
+    def _find_import_tax_rule_conflicts(
+        self,
+        rule: ClientImportTaxRule,
+    ) -> list[dict[str, Any]]:
+        if not rule.active:
+            return []
+        query = self.import_tax_rule_query_for_current_user().filter(
+            ClientImportTaxRule.client_id == rule.client_id,
+            ClientImportTaxRule.active.is_(True),
+        )
+        if rule.id:
+            query = query.filter(ClientImportTaxRule.id != rule.id)
+        return [
+            self._tax_rule_conflict_summary(candidate)
+            for candidate in query.all()
+            if self._tax_rules_are_ambiguous(rule, candidate)
+        ]
+
+    @classmethod
+    def _tax_rules_are_ambiguous(
+        cls,
+        first: ClientImportTaxRule,
+        second: ClientImportTaxRule,
+    ) -> bool:
+        if cls._tax_rule_score(first) != cls._tax_rule_score(second):
+            return False
+        if first.issuer_state != second.issuer_state:
+            return False
+        if first.import_purpose != second.import_purpose:
+            return False
+        if not cls._optional_scope_overlaps(
+            first.import_modality,
+            second.import_modality,
+        ):
+            return False
+        if not cls._optional_scope_overlaps(first.tax_regime, second.tax_regime):
+            return False
+        first_ncm = cls._digits(first.ncm_pattern)
+        second_ncm = cls._digits(second.ncm_pattern)
+        if first_ncm and second_ncm and not (
+            first_ncm.startswith(second_ncm)
+            or second_ncm.startswith(first_ncm)
+        ):
+            return False
+        if (
+            first.effective_until
+            and second.effective_from
+            and first.effective_until < second.effective_from
+        ):
+            return False
+        if (
+            second.effective_until
+            and first.effective_from
+            and second.effective_until < first.effective_from
+        ):
+            return False
+        return True
+
+    @staticmethod
+    def _optional_scope_overlaps(first: str | None, second: str | None) -> bool:
+        return not first or not second or first == second
+
+    @classmethod
+    def _tax_rule_score(
+        cls,
+        rule: ClientImportTaxRule,
+    ) -> tuple[int, int, bool, bool]:
+        return (
+            rule.priority,
+            len(cls._digits(rule.ncm_pattern)),
+            bool(rule.import_modality),
+            bool(rule.tax_regime),
+        )
+
+    @staticmethod
+    def _tax_rule_conflict_summary(rule: ClientImportTaxRule) -> dict[str, Any]:
+        return {
+            "id": str(rule.id) if rule.id else None,
+            "name": rule.name,
+            "issuer_state": rule.issuer_state,
+            "import_purpose": rule.import_purpose,
+            "import_modality": rule.import_modality,
+            "tax_regime": rule.tax_regime,
+            "ncm_pattern": rule.ncm_pattern,
+            "priority": rule.priority,
+            "effective_from": (
+                rule.effective_from.isoformat() if rule.effective_from else None
+            ),
+            "effective_until": (
+                rule.effective_until.isoformat() if rule.effective_until else None
+            ),
+        }
 
     def _tax_rule_mismatch_reasons(
         self,
