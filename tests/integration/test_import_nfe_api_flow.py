@@ -722,6 +722,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         "has_fiscal_profile": True,
         "has_active_tax_rule": True,
         "has_number_sequence": False,
+        "has_provider_connection": False,
         "has_item_classification": False,
         "item_classification_ready": False,
         "has_document_plan": False,
@@ -965,8 +966,9 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert [
         (step["key"], step["status"], step["can_view"])
         for step in classified_workflow_body["steps"]
-    ] == [
-        ("duimp", "completed", True),
+        ] == [
+            ("client", "completed", True),
+            ("duimp", "completed", True),
         ("context", "completed", True),
         ("purposes", "completed", True),
         ("planning", "current", True),
@@ -1014,6 +1016,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         (step["key"], step["status"], step["can_view"])
         for step in planned_workflow_body["steps"]
     ] == [
+        ("client", "completed", True),
         ("duimp", "completed", True),
         ("context", "completed", True),
         ("purposes", "completed", True),
@@ -1413,9 +1416,7 @@ def test_process_dashboard_groups_by_client_and_exposes_next_action(
         headers=headers,
         json={
             "importer_id": str(second_client.id),
-            "reference_code": "PAINEL-CLIENTE-001",
-            "duimp_number": "26BR0000999999-1",
-            "source": "manual",
+            "source": "portal_unico",
         },
     )
     assert created.status_code == 201
@@ -1457,7 +1458,9 @@ def test_process_dashboard_groups_by_client_and_exposes_next_action(
     assert processes.status_code == 200
     process = processes.get_json()["items"][0]
     assert process["importer"]["name"] == "Cliente Painel"
-    assert process["next_action"] == "fetch_duimp"
+    assert process["reference_code"].startswith("NFE-")
+    assert process["duimp_number"] is None
+    assert process["next_action"] == "configure_fiscal_profile"
     assert process["pending"] is True
     assert process["planned_documents_count"] == 0
     assert process["last_responsible"]["name"] == "Operador Teste"

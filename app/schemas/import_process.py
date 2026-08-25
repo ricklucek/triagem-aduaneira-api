@@ -116,7 +116,7 @@ class NfeWorkflowStateQuerySchema(Schema):
         validate=validate.OneOf(ImportPurpose.values()),
     )
     environment = fields.String(
-        load_default=FiscalEnvironment.HOMOLOGATION.value,
+        load_default=FiscalEnvironment.PRODUCTION.value,
         validate=validate.OneOf(FiscalEnvironment.values()),
     )
     series = fields.String(load_default="1", validate=validate.Length(min=1, max=10))
@@ -124,7 +124,7 @@ class NfeWorkflowStateQuerySchema(Schema):
 
 class CreateImportProcessSchema(Schema):
     importer_id = fields.UUID(required=True)
-    reference_code = fields.String(required=True, validate=validate.Length(min=1, max=80))
+    reference_code = fields.String(load_default=None, allow_none=True, validate=validate.Length(min=1, max=80))
     duimp_number = fields.String(load_default=None, allow_none=True, validate=validate.Length(max=50))
     duimp_version = fields.String(load_default=None, allow_none=True, validate=validate.Length(max=20))
     source = fields.String(
@@ -176,7 +176,7 @@ class CreateManualDuimpSnapshotSchema(Schema):
 
 class FetchDuimpSchema(Schema):
     provider_environment = fields.String(
-        required=True,
+        load_default=FiscalEnvironment.PRODUCTION.value,
         validate=validate.OneOf(FiscalEnvironment.values()),
     )
     source_provider = fields.String(
@@ -279,10 +279,10 @@ class NfeAdditionalInfoSchema(Schema):
 
 
 class CreateNfeDraftFromDuimpSchema(Schema):
-    environment = fields.String(required=True, validate=validate.OneOf(FiscalEnvironment.values()))
-    series = fields.String(required=True, validate=validate.Length(min=1, max=10))
+    environment = fields.String(load_default=FiscalEnvironment.PRODUCTION.value, validate=validate.OneOf(FiscalEnvironment.values()))
+    series = fields.String(load_default="1", validate=validate.Length(min=1, max=10))
     number = fields.Integer(load_default=None, allow_none=True)
-    import_purpose = fields.String(required=True, validate=validate.OneOf(ImportPurpose.values()))
+    import_purpose = fields.String(load_default=None, allow_none=True, validate=validate.OneOf(ImportPurpose.values()))
     source_provider = fields.String(
         load_default=ExternalProvider.PORTAL_UNICO.value,
         validate=validate.OneOf(ExternalProvider.values()),

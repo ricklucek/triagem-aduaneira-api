@@ -159,7 +159,8 @@ class UpdateClientImportTaxRuleSchema(ClientImportTaxRuleSchema):
 class NfeContextQuerySchema(Schema):
     duimp_snapshot_id = fields.UUID(load_default=None, allow_none=True)
     import_purpose = fields.String(
-        required=True,
+        load_default=None,
+        allow_none=True,
         validate=validate.OneOf(ImportPurpose.values()),
     )
     provider_environment = fields.String(
@@ -209,4 +210,3 @@ class BulkNfeItemClassificationSchema(Schema):
                 "Cada item da DUIMP deve aparecer apenas uma vez.",
                 field_name="items",
             )
-

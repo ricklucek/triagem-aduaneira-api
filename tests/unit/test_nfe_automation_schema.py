@@ -2,6 +2,12 @@ import pytest
 from marshmallow import ValidationError
 
 from app.schemas.nfe_automation import ClientImportTaxRuleSchema
+from app.schemas.import_process import (
+    CreateImportProcessSchema,
+    CreateNfeDraftFromDuimpSchema,
+    FetchDuimpSchema,
+    NfeWorkflowStateQuerySchema,
+)
 
 
 def diagnostic_icms51_rule():
@@ -97,3 +103,20 @@ def test_rejects_nominal_rate_for_non_taxed_icms_rule():
 
     with pytest.raises(ValidationError, match="não aceita alíquota nominal"):
         ClientImportTaxRuleSchema().load(payload)
+
+
+def test_checkpoint_4a_defaults_new_operations_to_production():
+    assert FetchDuimpSchema().load({})["provider_environment"] == "production"
+    assert NfeWorkflowStateQuerySchema().load({})["environment"] == "production"
+    draft = CreateNfeDraftFromDuimpSchema().load({})
+    assert draft["environment"] == "production"
+    assert draft["series"] == "1"
+    assert draft["import_purpose"] is None
+
+
+def test_checkpoint_4a_allows_client_first_process():
+    process = CreateImportProcessSchema().load(
+        {"importer_id": "11111111-1111-1111-1111-111111111111"}
+    )
+    assert process["reference_code"] is None
+    assert process["duimp_number"] is None

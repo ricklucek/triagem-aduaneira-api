@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import case, func, or_
@@ -134,6 +134,10 @@ class MockDuimpGateway:
 
 
 class ImportNfeService:
+    DEFAULT_NFE_ENVIRONMENT = FiscalEnvironment.PRODUCTION.value
+    DEFAULT_PROVIDER_ENVIRONMENT = FiscalEnvironment.PRODUCTION.value
+    DEFAULT_NFE_SERIES = "1"
+
     def __init__(
         self,
         current_user,
@@ -437,7 +441,10 @@ class ImportNfeService:
         process = ImportProcess(
             organization_id=self._require_organization_id(),
             importer_id=payload["importer_id"],
-            reference_code=payload["reference_code"],
+            reference_code=(
+                payload.get("reference_code")
+                or f"NFE-{uuid4().hex[:12].upper()}"
+            ),
             duimp_number=payload.get("duimp_number"),
             duimp_version=payload.get("duimp_version"),
             source=payload.get("source") or ImportProcessSource.MANUAL.value,
@@ -688,6 +695,7 @@ class ImportNfeService:
     @staticmethod
     def _workflow_navigation(next_action: str) -> dict[str, Any]:
         steps = [
+            ("client", "Cliente"),
             ("duimp", "DUIMP"),
             ("context", "Contexto fiscal"),
             ("purposes", "Finalidades"),
@@ -697,17 +705,17 @@ class ImportNfeService:
             ("review", "Conferência"),
         ]
         action_step = {
+            "configure_fiscal_profile": "client",
+            "configure_tax_rule": "client",
+            "configure_number_sequence": "client",
+            "configure_provider_connection": "client",
             "fetch_duimp": "duimp",
-            "configure_fiscal_profile": "context",
-            "select_import_purpose": "context",
-            "configure_tax_rule": "context",
             "resolve_context": "context",
             "classify_items": "purposes",
             "create_document_plan": "planning",
             "review_document_plan": "planning",
             "create_child_drafts": "drafts",
             "create_draft": "drafts",
-            "configure_number_sequence": "drafts",
             "correct_child_drafts": "drafts",
             "correct_draft": "drafts",
             "generate_child_xmls": "xml",
@@ -777,8 +785,8 @@ class ImportNfeService:
             )
 
         import_purpose = params.get("import_purpose")
-        environment = params["environment"]
-        series = params["series"]
+        environment = self.DEFAULT_NFE_ENVIRONMENT
+        series = params.get("series") or self.DEFAULT_NFE_SERIES
         if latest_draft:
             document = (latest_draft.fiscal_payload or {}).get("document") or {}
             import_purpose = import_purpose or document.get("import_purpose")
@@ -789,12 +797,11 @@ class ImportNfeService:
             process.importer_id
         )
         context = None
-        if latest_snapshot and import_purpose:
+        if latest_snapshot:
             context = self.get_nfe_context(
                 process,
                 {
                     "duimp_snapshot_id": latest_snapshot.id,
-                    "import_purpose": import_purpose,
                 },
             )
 
@@ -834,7 +841,23 @@ class ImportNfeService:
             if draft_detail and draft_detail["xml_versions"]
             else None
         )
-        active_tax_rule = bool(context and context.get("tax_rule"))
+        active_tax_rule = bool(
+            self.import_tax_rule_query_for_current_user()
+            .filter(
+                ClientImportTaxRule.client_id == process.importer_id,
+                ClientImportTaxRule.active.is_(True),
+            )
+            .first()
+        )
+        try:
+            provider_connection = self._find_provider_connection(
+                process=process,
+                provider=ExternalProvider.PORTAL_UNICO.value,
+                environment=self.DEFAULT_PROVIDER_ENVIRONMENT,
+            )
+            has_provider_connection = bool(provider_connection.credentials_ref)
+        except PortalUnicoIntegrationError:
+            has_provider_connection = False
         classification_newer_than_draft = bool(
             latest_draft
             and latest_classification
@@ -891,14 +914,16 @@ class ImportNfeService:
             for xml in child_xmls
         )
 
-        if latest_snapshot is None:
-            next_action = "fetch_duimp"
-        elif fiscal_profile is None:
+        if fiscal_profile is None:
             next_action = "configure_fiscal_profile"
-        elif not import_purpose:
-            next_action = "select_import_purpose"
         elif not active_tax_rule:
             next_action = "configure_tax_rule"
+        elif sequence is None and latest_snapshot is None:
+            next_action = "configure_number_sequence"
+        elif not has_provider_connection and latest_snapshot is None:
+            next_action = "configure_provider_connection"
+        elif latest_snapshot is None:
+            next_action = "fetch_duimp"
         elif context and not context.get("ready_for_draft"):
             next_action = "resolve_context"
         elif classification_required:
@@ -979,6 +1004,7 @@ class ImportNfeService:
                 "has_fiscal_profile": fiscal_profile is not None,
                 "has_active_tax_rule": active_tax_rule,
                 "has_number_sequence": sequence is not None,
+                "has_provider_connection": has_provider_connection,
                 "has_item_classification": bool(
                     classifications
                     and classifications.get("has_classifications")
@@ -1442,6 +1468,10 @@ class ImportNfeService:
         external: dict[str, Any] = {"errors": []}
         connection_config: dict[str, Any] = {}
         environment = payload.get("provider_environment")
+        if payload.get("refresh_external"):
+            environment = self.DEFAULT_PROVIDER_ENVIRONMENT
+            payload = dict(payload)
+            payload["provider_environment"] = environment
         if environment:
             connection = self._find_provider_connection(
                 process=process,
@@ -1540,12 +1570,13 @@ class ImportNfeService:
         )
         fiscal_profile = self.get_importer_fiscal_profile_or_none(process.importer_id)
         rule = None
-        if fiscal_profile:
+        import_purpose = payload.get("import_purpose")
+        if fiscal_profile and import_purpose:
             rule = self.match_import_tax_rule(
                 client_id=process.importer_id,
                 issuer_state=fiscal_profile.state,
                 tax_regime=fiscal_profile.tax_regime,
-                import_purpose=payload["import_purpose"],
+                import_purpose=import_purpose,
                 import_modality=context["normalized"].get("import_modality"),
                 ncms=[
                     self._digits(item.get("ncm"))
@@ -1560,7 +1591,7 @@ class ImportNfeService:
         missing = list(context["missing_fields"])
         if fiscal_profile is None:
             missing.append("client.fiscal_profile")
-        if rule is None:
+        if import_purpose and rule is None:
             missing.append("tax_configuration")
         context.update(
             {
@@ -2623,6 +2654,7 @@ class ImportNfeService:
         planned_document: NfePlannedDocument | None = None,
     ) -> dict[str, Any]:
         payload = self._json_compatible(payload)
+        payload["series"] = payload.get("series") or self.DEFAULT_NFE_SERIES
         fiscal_profile = self.get_importer_fiscal_profile(process.importer_id)
         snapshot_id = payload.get("duimp_snapshot_id")
         if snapshot_id:
@@ -2742,7 +2774,21 @@ class ImportNfeService:
             )
             tax_rule = tax_rules[0]
             tax_configuration = deepcopy(tax_rule.configuration_json or {})
+            payload["import_purpose"] = (
+                payload.get("import_purpose")
+                or next(
+                    (
+                        row.import_purpose
+                        for row in classification_map.values()
+                        if row.import_purpose
+                    ),
+                    ImportPurpose.RESALE.value,
+                )
+            )
         elif tax_configuration is None:
+            payload["import_purpose"] = (
+                payload.get("import_purpose") or ImportPurpose.RESALE.value
+            )
             tax_rule = self.match_import_tax_rule(
                 client_id=process.importer_id,
                 issuer_state=fiscal_profile.state,
