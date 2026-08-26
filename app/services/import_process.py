@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 53231)
-Total output lines: 5371
-
 from __future__ import annotations
 
 import hashlib
@@ -2607,7 +2604,317 @@ class ImportNfeService:
         if latest_draft:
             latest_xml = (
                 NfeXmlVersion.query.filter(
-                    NfeXmlVersion.nfe_draft_id == lat…3231 tokens truncated…napshot)
+                    NfeXmlVersion.nfe_draft_id == latest_draft.id,
+                    NfeXmlVersion.xml_type == NfeXmlType.UNSIGNED.value,
+                )
+                .order_by(NfeXmlVersion.version_number.desc())
+                .first()
+            )
+            if latest_xml and latest_xml.xsd_valid is True:
+                derived_status = "xsd_validated"
+            elif latest_xml and latest_xml.xsd_valid is False:
+                derived_status = "xsd_invalid"
+            elif latest_xml:
+                derived_status = "xml_generated"
+            elif latest_draft.validation_errors:
+                derived_status = "correction_required"
+            else:
+                derived_status = "draft_ready"
+            draft_summary = {
+                "id": str(latest_draft.id),
+                "status": self._enum_value(latest_draft.status),
+                "number": latest_draft.number,
+                "series": latest_draft.series,
+                "access_key": latest_draft.access_key,
+                "validation_errors": latest_draft.validation_errors or [],
+                "validation_warnings": latest_draft.validation_warnings or [],
+                "latest_xml": (
+                    {
+                        "id": str(latest_xml.id),
+                        "version_number": latest_xml.version_number,
+                        "xml_type": self._enum_value(latest_xml.xml_type),
+                        "xsd_valid": latest_xml.xsd_valid,
+                        "xsd_errors": latest_xml.xsd_errors or [],
+                        "generated_at": self._iso(latest_xml.generated_at),
+                    }
+                    if latest_xml
+                    else None
+                ),
+                "created_at": self._iso(latest_draft.created_at),
+                "updated_at": self._iso(latest_draft.updated_at),
+            }
+        return {
+            "id": str(document.id),
+            "ordinal": document.ordinal,
+            "status": derived_status,
+            "exporter_key": document.exporter_key,
+            "exporter_code": document.exporter_code,
+            "foreign_supplier": document.foreign_supplier,
+            "operation_nature": document.operation_nature,
+            "item_purposes": document.item_purposes or [],
+            "mixed_import_purposes": document.mixed_import_purposes,
+            "items_count": document.items_count,
+            "customs_value": self._money_text(document.customs_value),
+            "allocated_shared_costs": document.allocated_shared_costs or {},
+            "totals": document.totals or {},
+            "draft": draft_summary,
+            "items": [
+                {
+                    "id": str(item.id),
+                    "duimp_item_number": item.duimp_item_number,
+                    "exporter_code": item.exporter_code,
+                    "import_purpose": item.import_purpose,
+                    "cfop": item.cfop,
+                    "customs_value": self._money_text(item.customs_value),
+                    "allocated_shared_costs": item.allocated_shared_costs or {},
+                }
+                for item in document.items
+            ],
+        }
+
+    def generate_child_drafts(
+        self,
+        process: ImportProcess,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        snapshot = self._snapshot_for_process(
+            process,
+            payload.get("duimp_snapshot_id"),
+        )
+        plan = (
+            self.document_plan_query_for_current_user()
+            .filter(
+                NfeDocumentPlan.import_process_id == process.id,
+                NfeDocumentPlan.duimp_snapshot_id == snapshot.id,
+                NfeDocumentPlan.status == "planned",
+            )
+            .order_by(NfeDocumentPlan.version_number.desc())
+            .first()
+        )
+        if plan is None:
+            raise ValueError("Gere e revise o plano de notas antes dos rascunhos.")
+
+        created = []
+        reused = []
+        for document in plan.documents:
+            existing = self._latest_active_document_draft(document)
+            if existing:
+                reused.append(str(existing.id))
+                continue
+            child_payload = deepcopy(payload)
+            child_payload["duimp_snapshot_id"] = snapshot.id
+            child_payload.setdefault(
+                "import_purpose",
+                (document.item_purposes or [ImportPurpose.RESALE.value])[0],
+            )
+            result = self.create_nfe_draft_from_duimp(
+                process,
+                child_payload,
+                planned_document=document,
+            )
+            created.append(str(result["draft"].id))
+            document.status = "drafted"
+            document.updated_at = datetime.utcnow()
+
+        plan.updated_at = datetime.utcnow()
+        db.session.flush()
+        return {
+            "created_draft_ids": created,
+            "reused_draft_ids": reused,
+            "plan": self._serialize_document_plan(plan),
+        }
+
+    def generate_and_validate_child_xmls(
+        self,
+        process: ImportProcess,
+        snapshot_id=None,
+    ) -> dict[str, Any]:
+        snapshot = self._snapshot_for_process(process, snapshot_id)
+        plan = (
+            self.document_plan_query_for_current_user()
+            .filter(
+                NfeDocumentPlan.import_process_id == process.id,
+                NfeDocumentPlan.duimp_snapshot_id == snapshot.id,
+                NfeDocumentPlan.status == "planned",
+            )
+            .order_by(NfeDocumentPlan.version_number.desc())
+            .first()
+        )
+        if plan is None:
+            raise ValueError("Plano de notas ativo não encontrado.")
+
+        results = []
+        for document in plan.documents:
+            draft = self._latest_active_document_draft(document)
+            if draft is None:
+                results.append({
+                    "planned_document_id": str(document.id),
+                    "success": False,
+                    "message": "Gere o rascunho desta NF-e filha primeiro.",
+                })
+                continue
+            try:
+                latest_xml = (
+                    NfeXmlVersion.query.filter(
+                        NfeXmlVersion.nfe_draft_id == draft.id,
+                        NfeXmlVersion.xml_type == NfeXmlType.UNSIGNED.value,
+                    )
+                    .order_by(NfeXmlVersion.version_number.desc())
+                    .first()
+                )
+                xml_is_current = bool(
+                    latest_xml
+                    and (
+                        not draft.updated_at
+                        or not latest_xml.generated_at
+                        or draft.updated_at <= latest_xml.generated_at
+                    )
+                )
+                if not xml_is_current:
+                    latest_xml = self.generate_unsigned_xml(draft)
+                validation = self.validate_xml_version(draft, latest_xml)
+                document.status = (
+                    "xsd_validated" if validation.is_valid else "xsd_invalid"
+                )
+                document.updated_at = datetime.utcnow()
+                results.append({
+                    "planned_document_id": str(document.id),
+                    "draft_id": str(draft.id),
+                    "xml_version_id": str(latest_xml.id),
+                    "success": validation.is_valid,
+                    "xsd_valid": validation.is_valid,
+                    "xsd_errors": validation.errors,
+                })
+            except ValueError as exc:
+                document.status = "correction_required"
+                document.updated_at = datetime.utcnow()
+                results.append({
+                    "planned_document_id": str(document.id),
+                    "draft_id": str(draft.id),
+                    "success": False,
+                    "message": str(exc),
+                })
+
+        all_valid = bool(results) and all(
+            result.get("xsd_valid") is True for result in results
+        )
+        process.status = (
+            ImportProcessStatus.XML_VALIDATED.value
+            if all_valid
+            else ImportProcessStatus.XML_VALIDATION_FAILED.value
+        )
+        process.updated_at = datetime.utcnow()
+        plan.updated_at = datetime.utcnow()
+        db.session.flush()
+        return {
+            "all_valid": all_valid,
+            "results": results,
+            "plan": self._serialize_document_plan(plan),
+        }
+
+    @staticmethod
+    def _money_text(value: Any) -> str:
+        return f"{Decimal(str(value or '0')).quantize(Decimal('0.01')):.2f}"
+
+    # ------------------------------------------------------------------
+    # NFe draft
+    # ------------------------------------------------------------------
+    def create_nfe_draft_from_duimp(
+        self,
+        process: ImportProcess,
+        payload: dict[str, Any],
+        *,
+        planned_document: NfePlannedDocument | None = None,
+    ) -> dict[str, Any]:
+        payload = self._json_compatible(payload)
+        payload["series"] = payload.get("series") or self.DEFAULT_NFE_SERIES
+        fiscal_profile = self.get_importer_fiscal_profile(process.importer_id)
+        snapshot_id = payload.get("duimp_snapshot_id")
+        if snapshot_id:
+            snapshot = (
+                self.snapshot_query_for_current_user()
+                .filter(
+                    DuimpSnapshot.id == snapshot_id,
+                    DuimpSnapshot.import_process_id == process.id,
+                )
+                .first()
+            )
+            if snapshot is None:
+                raise ValueError("Snapshot da DUIMP não encontrado para este processo.")
+            normalized = snapshot.normalized_payload or self.normalize_duimp_payload(
+                snapshot.raw_payload
+            )
+        else:
+            fetch_result = self.fetch_duimp_for_process(process, payload)
+            normalized = fetch_result["normalized"]
+            snapshot = fetch_result["snapshot"]
+
+        preallocated_costs = None
+        if planned_document is not None:
+            if (
+                planned_document.document_plan.import_process_id != process.id
+                or planned_document.document_plan.duimp_snapshot_id != snapshot.id
+                or planned_document.document_plan.status != "planned"
+            ):
+                raise ValueError(
+                    "A NF-e filha não pertence ao plano ativo deste processo."
+                )
+            normalized = deepcopy(normalized)
+            normalized["items"] = [
+                deepcopy(item.raw_source_payload or {})
+                for item in planned_document.items
+            ]
+            normalized["foreign_supplier"] = deepcopy(
+                planned_document.foreign_supplier
+            )
+            normalized["foreign_suppliers"] = [
+                deepcopy(planned_document.foreign_supplier)
+            ] if planned_document.foreign_supplier else []
+            normalized["exporter_code"] = planned_document.exporter_code
+            normalized["afrmm_value"] = (
+                planned_document.allocated_shared_costs or {}
+            ).get("afrmm", "0.00")
+            # Totais declarados na DUIMP pertencem ao processo inteiro. Cada
+            # filha é conciliada pelos próprios itens e pelo rateio persistido.
+            normalized["tax_totals"] = {}
+            fiscal_references = deepcopy(
+                normalized.get("automation_fiscal_references") or {}
+            )
+            fiscal_references.pop("icms", None)
+            normalized["automation_fiscal_references"] = fiscal_references
+            payload["import_purpose"] = (
+                (planned_document.item_purposes or [None])[0]
+                or payload.get("import_purpose")
+            )
+            payload["foreign_supplier"] = deepcopy(
+                planned_document.foreign_supplier
+            )
+            payload["additional_costs"] = deepcopy(
+                planned_document.allocated_shared_costs or {}
+            )
+            payload["document"] = self._merge_defaults(
+                payload.get("document"),
+                {"operation_nature": planned_document.operation_nature},
+            )
+            preallocated_costs = {
+                item.duimp_item_number: deepcopy(
+                    item.allocated_shared_costs or {}
+                )
+                for item in planned_document.items
+            }
+
+        exporter_keys = {
+            self._document_exporter(item, normalized)[0]
+            for item in (normalized.get("items") or [])
+        }
+        if planned_document is None and len(exporter_keys) > 1:
+            raise ValueError(
+                "A DUIMP possui múltiplos exportadores. Revise o plano de notas; "
+                "os rascunhos independentes de cada NF-e filha serão gerados na "
+                "próxima etapa do fluxo."
+            )
+
+        classification_map = self._item_classification_map(process, snapshot)
         if planned_document is not None:
             planned_item_numbers = {
                 item.duimp_item_number for item in planned_document.items
