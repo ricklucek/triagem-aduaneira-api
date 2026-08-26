@@ -41,6 +41,7 @@ from ..models import (
     NfePlannedDocumentItem,
     NfeDraftStatus,
     NfeModel,
+    NfeCarrier,
     NfeOperationType,
     NfePurpose,
     NfeXmlType,
@@ -3103,6 +3104,26 @@ class ImportNfeService:
                 "não pode mais ser alterado."
             )
 
+        transport_update = payload.get("transport") or {}
+        replace_transport_carrier = "carrier" in transport_update
+        carrier_id = transport_update.pop("carrier_id", None)
+        if carrier_id:
+            replace_transport_carrier = True
+            carrier = NfeCarrier.query.filter(
+                NfeCarrier.id == carrier_id,
+                NfeCarrier.organization_id == self.organization_id,
+                NfeCarrier.active.is_(True),
+            ).first()
+            if not carrier:
+                raise ValueError(
+                    "Transportadora cadastrada não encontrada ou inativa."
+                )
+            from app.services.nfe_carrier import NfeCarrierService
+
+            transport_update["carrier"] = NfeCarrierService(
+                self.current_user
+            ).snapshot(carrier)
+
         # Marshmallow desserializa fields.Decimal como Decimal. As colunas JSON
         # do PostgreSQL aceitam apenas tipos JSON nativos, então a normalização
         # precisa acontecer antes de qualquer consulta que dispare autoflush.
@@ -3122,6 +3143,10 @@ class ImportNfeService:
                     fiscal_payload.get(section),
                     payload[section],
                 )
+        if replace_transport_carrier:
+            fiscal_payload.setdefault("transport", {})["carrier"] = deepcopy(
+                payload["transport"].get("carrier")
+            )
 
         if "issuer" in payload:
             issuer_update = deepcopy(payload["issuer"] or {})

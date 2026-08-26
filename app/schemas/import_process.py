@@ -274,6 +274,18 @@ class NfeTransportSchema(Schema):
     )
 
 
+class NfeDraftTransportUpdateSchema(NfeTransportSchema):
+    carrier_id = fields.UUID(allow_none=True)
+
+    @validates_schema
+    def validate_carrier_source(self, data, **kwargs):
+        if data.get("carrier_id") and data.get("carrier"):
+            raise ValidationError(
+                "Selecione uma transportadora cadastrada ou informe os dados manualmente.",
+                field_name="carrier",
+            )
+
+
 class NfePaymentSchema(Schema):
     payment_indicator = fields.String(
         validate=validate.OneOf(["0", "1"]),
@@ -435,7 +447,7 @@ class UpdateNfeDraftSchema(Schema):
     issuer = fields.Nested(NfeIssuerUpdateSchema)
     foreign_supplier = fields.Nested(NfeForeignSupplierUpdateSchema)
     item_defaults = fields.Nested(NfeItemDefaultsSchema)
-    transport = fields.Nested(NfeTransportSchema)
+    transport = fields.Nested(NfeDraftTransportUpdateSchema)
     payment = fields.Nested(NfePaymentSchema)
     additional_info = fields.Nested(NfeAdditionalInfoSchema)
 

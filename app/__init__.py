@@ -33,6 +33,7 @@ def create_app(config_object=Config):
     from .routes.import_process_routes import import_process_bp
     from .routes.nfe_draft_routes import nfe_draft_bp
     from .routes.nfe_number_sequence_routes import nfe_number_sequence_bp
+    from .routes.nfe_carrier_routes import nfe_carrier_bp
     from .routes.provider_connection_routes import provider_connection_bp
     from .fiscal_reference_cli import fiscal_reference_cli
     from .routes.nfe_automation_routes import (
@@ -55,6 +56,7 @@ def create_app(config_object=Config):
     app.register_blueprint(fiscal_certificate_bp)
     app.register_blueprint(fiscal_reference_bp)
     app.register_blueprint(nfe_number_sequence_bp)
+    app.register_blueprint(nfe_carrier_bp)
     app.register_blueprint(client_import_tax_rule_bp)
     app.register_blueprint(nfe_context_bp)
     app.cli.add_command(fiscal_reference_cli)
