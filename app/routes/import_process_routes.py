@@ -261,7 +261,7 @@ def list_process_nfe_drafts(process_id: str):
         .first_or_404()
     )
     rows = (
-        service.nfe_draft_query_for_current_user()
+        service.nfe_draft_query_for_current_user(include_removed=True)
         .filter(NfeDraft.import_process_id == process.id)
         .order_by(
             NfeDraft.created_at.desc(),
@@ -291,6 +291,16 @@ def list_process_nfe_drafts(process_id: str):
                 "series": draft.series,
                 "number": draft.number,
                 "access_key": draft.access_key,
+                "deleted_at": (
+                    draft.deleted_at.isoformat() + "Z"
+                    if draft.deleted_at
+                    else None
+                ),
+                "deletion_reason": draft.deletion_reason,
+                "deletion_mode": draft.deletion_mode,
+                "requires_inutilization_review": (
+                    draft.deletion_mode == "archived"
+                ),
                 "duimp_snapshot_id": (
                     str(draft.duimp_snapshot_id)
                     if draft.duimp_snapshot_id

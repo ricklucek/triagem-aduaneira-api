@@ -400,7 +400,52 @@ class UpdateNfeDraftItemSchema(Schema):
     discount_value = fields.Decimal(as_string=True)
     other_value = fields.Decimal(as_string=True)
     import_payload = fields.Dict(allow_none=True)
-    tax_payload = fields.Dict(allow_none=True)
+
+
+class NfeDraftAdditionalCostsSchema(Schema):
+    afrmm = fields.Decimal(as_string=True, validate=validate.Range(min=0))
+    siscomex_fee = fields.Decimal(as_string=True, validate=validate.Range(min=0))
+    thc = fields.Decimal(as_string=True, validate=validate.Range(min=0))
+    other = fields.Decimal(as_string=True, validate=validate.Range(min=0))
+
+
+class NfeDraftIcmsAdjustmentSchema(Schema):
+    cst = fields.String(
+        required=True,
+        validate=validate.OneOf(["00", "40", "41", "50", "51", "90"]),
+    )
+    base = fields.Decimal(required=True, as_string=True, validate=validate.Range(min=0))
+    rate = fields.Decimal(allow_none=True, as_string=True, validate=validate.Range(min=0, max=100))
+    reduction_rate = fields.Decimal(allow_none=True, as_string=True, validate=validate.Range(min=0, max=100))
+    deferment_rate = fields.Decimal(allow_none=True, as_string=True, validate=validate.Range(min=0, max=100))
+
+
+class NfeDraftTaxAdjustmentSchema(Schema):
+    source = fields.String(
+        load_default="manual_adjustment",
+        validate=validate.OneOf(["manual_adjustment", "tax_rule"]),
+    )
+    reason = fields.String(
+        required=True,
+        validate=validate.Length(min=10, max=500),
+    )
+    cfop = fields.String(validate=validate.Regexp(r"^3\d{3}$"))
+    icms = fields.Nested(NfeDraftIcmsAdjustmentSchema)
+
+    @validates_schema
+    def validate_adjustment(self, data, **kwargs):
+        if data.get("source") == "manual_adjustment" and not data.get("icms"):
+            raise ValidationError(
+                "Informe os dados do ICMS para o ajuste manual.",
+                field_name="icms",
+            )
+
+
+class DeleteNfeDraftSchema(Schema):
+    reason = fields.String(
+        required=True,
+        validate=validate.Length(min=10, max=500),
+    )
 
 
 class NfeIssuerUpdateSchema(Schema):
@@ -450,6 +495,7 @@ class UpdateNfeDraftSchema(Schema):
     transport = fields.Nested(NfeDraftTransportUpdateSchema)
     payment = fields.Nested(NfePaymentSchema)
     additional_info = fields.Nested(NfeAdditionalInfoSchema)
+    additional_costs = fields.Nested(NfeDraftAdditionalCostsSchema)
 
     @validates_schema
     def validate_has_changes(self, data, **kwargs):

@@ -6,6 +6,8 @@ from ..extensions import db
 from ..models.import_process import NfeDraftItem, NfeXmlVersion
 from ..schemas.import_process import (
     GenerateXmlSchema,
+    DeleteNfeDraftSchema,
+    NfeDraftTaxAdjustmentSchema,
     NfeDraftItemSchema,
     NfeDraftSchema,
     NfeXmlVersionSchema,
@@ -89,6 +91,7 @@ def get_nfe_draft(draft_id: str):
             "xmlVersions": nfe_xml_version_schema.dump(
                 detail["xml_versions"], many=True
             ),
+            "auditTrail": detail["audit_trail"],
         }
     )
 
@@ -166,6 +169,66 @@ def update_nfe_draft_item(draft_id: str, item_id: str):
         item = service.update_draft_item(draft, item, payload)
         db.session.commit()
         return jsonify(nfe_draft_item_schema.dump(item))
+    except ValidationError as exc:
+        db.session.rollback()
+        return validation_error_response(exc)
+    except ValueError as exc:
+        db.session.rollback()
+        return bad_request_response(exc)
+
+
+@nfe_draft_bp.patch("/<draft_id>/items/<item_id>/tax-adjustment")
+@auth_required
+def adjust_nfe_draft_item_tax(draft_id: str, item_id: str):
+    draft_uuid = uuid_or_404(draft_id)
+    item_uuid = uuid_or_404(item_id)
+    service = _service()
+    draft = (
+        service.nfe_draft_query_for_current_user()
+        .filter_by(id=draft_uuid)
+        .first_or_404()
+    )
+    item = NfeDraftItem.query.filter_by(
+        id=item_uuid, nfe_draft_id=draft.id
+    ).first_or_404()
+
+    try:
+        payload = NfeDraftTaxAdjustmentSchema().load(json_payload())
+        detail = service.adjust_draft_item_tax(draft, item, payload)
+        db.session.commit()
+        return jsonify(
+            {
+                "draft": nfe_draft_schema.dump(detail["draft"]),
+                "item": nfe_draft_item_schema.dump(detail["item"]),
+                "validation": detail["validation"],
+                "audit": detail["audit"],
+                "requires_new_xml": detail["requires_new_xml"],
+            }
+        )
+    except ValidationError as exc:
+        db.session.rollback()
+        return validation_error_response(exc)
+    except ValueError as exc:
+        db.session.rollback()
+        return bad_request_response(exc)
+
+
+@nfe_draft_bp.delete("/<draft_id>")
+@nfe_draft_bp.post("/<draft_id>/remove")
+@auth_required
+def delete_nfe_draft(draft_id: str):
+    draft_uuid = uuid_or_404(draft_id)
+    service = _service()
+    draft = (
+        service.nfe_draft_query_for_current_user()
+        .filter_by(id=draft_uuid)
+        .first_or_404()
+    )
+    try:
+        payload = DeleteNfeDraftSchema().load(json_payload())
+        result = service.soft_delete_draft(draft, reason=payload["reason"])
+        db.session.commit()
+        return jsonify(result)
     except ValidationError as exc:
         db.session.rollback()
         return validation_error_response(exc)

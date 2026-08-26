@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 53231)
+Total output lines: 5371
+
 from __future__ import annotations
 
 import hashlib
@@ -5,7 +8,7 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 from typing import Any
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -202,10 +205,12 @@ class ImportNfeService:
             query = query.filter(ExternalProviderConnection.organization_id == self.organization_id)
         return query
 
-    def nfe_draft_query_for_current_user(self):
+    def nfe_draft_query_for_current_user(self, *, include_removed: bool = False):
         query = NfeDraft.query
         if self.organization_id:
             query = query.filter(NfeDraft.organization_id == self.organization_id)
+        if not include_removed:
+            query = query.filter(NfeDraft.deleted_at.is_(None))
         return query
 
     def snapshot_query_for_current_user(self):
@@ -631,7 +636,10 @@ class ImportNfeService:
         }
         drafts_count = (
             NfeDraft.query
-            .filter(NfeDraft.import_process_id == process.id)
+            .filter(
+                NfeDraft.import_process_id == process.id,
+                NfeDraft.deleted_at.is_(None),
+            )
             .count()
         )
         active_plan = (
@@ -676,7 +684,10 @@ class ImportNfeService:
 
     def build_import_process_summary(self, process: ImportProcess) -> dict[str, Any]:
         latest_draft = (
-            NfeDraft.query.filter(NfeDraft.import_process_id == process.id)
+            NfeDraft.query.filter(
+                NfeDraft.import_process_id == process.id,
+                NfeDraft.deleted_at.is_(None),
+            )
             .order_by(NfeDraft.updated_at.desc().nullslast(), NfeDraft.created_at.desc())
             .first()
         )
@@ -899,7 +910,7 @@ class ImportNfeService:
         child_documents = list(latest_plan.documents) if latest_plan else []
         is_multi_document_plan = len(child_documents) > 1
         child_drafts = [
-            document.drafts[-1] if document.drafts else None
+            self._latest_active_document_draft(document)
             for document in child_documents
         ]
         missing_child_drafts = bool(is_multi_document_plan) and any(
@@ -2573,327 +2584,30 @@ class ImportNfeService:
             "updated_at": self._iso(plan.updated_at),
         }
 
+    @staticmethod
+    def _latest_active_document_draft(
+        document: NfePlannedDocument,
+    ) -> NfeDraft | None:
+        return next(
+            (
+                draft
+                for draft in reversed(document.drafts)
+                if draft.deleted_at is None
+            ),
+            None,
+        )
+
     def _serialize_planned_document(
         self,
         document: NfePlannedDocument,
     ) -> dict[str, Any]:
-        latest_draft = document.drafts[-1] if document.drafts else None
+        latest_draft = self._latest_active_document_draft(document)
         draft_summary = None
         derived_status = document.status
         if latest_draft:
             latest_xml = (
                 NfeXmlVersion.query.filter(
-                    NfeXmlVersion.nfe_draft_id == latest_draft.id,
-                    NfeXmlVersion.xml_type == NfeXmlType.UNSIGNED.value,
-                )
-                .order_by(NfeXmlVersion.version_number.desc())
-                .first()
-            )
-            if latest_xml and latest_xml.xsd_valid is True:
-                derived_status = "xsd_validated"
-            elif latest_xml and latest_xml.xsd_valid is False:
-                derived_status = "xsd_invalid"
-            elif latest_xml:
-                derived_status = "xml_generated"
-            elif latest_draft.validation_errors:
-                derived_status = "correction_required"
-            else:
-                derived_status = "draft_ready"
-            draft_summary = {
-                "id": str(latest_draft.id),
-                "status": self._enum_value(latest_draft.status),
-                "number": latest_draft.number,
-                "series": latest_draft.series,
-                "access_key": latest_draft.access_key,
-                "validation_errors": latest_draft.validation_errors or [],
-                "validation_warnings": latest_draft.validation_warnings or [],
-                "latest_xml": (
-                    {
-                        "id": str(latest_xml.id),
-                        "version_number": latest_xml.version_number,
-                        "xml_type": self._enum_value(latest_xml.xml_type),
-                        "xsd_valid": latest_xml.xsd_valid,
-                        "xsd_errors": latest_xml.xsd_errors or [],
-                        "generated_at": self._iso(latest_xml.generated_at),
-                    }
-                    if latest_xml
-                    else None
-                ),
-                "created_at": self._iso(latest_draft.created_at),
-                "updated_at": self._iso(latest_draft.updated_at),
-            }
-        return {
-            "id": str(document.id),
-            "ordinal": document.ordinal,
-            "status": derived_status,
-            "exporter_key": document.exporter_key,
-            "exporter_code": document.exporter_code,
-            "foreign_supplier": document.foreign_supplier,
-            "operation_nature": document.operation_nature,
-            "item_purposes": document.item_purposes or [],
-            "mixed_import_purposes": document.mixed_import_purposes,
-            "items_count": document.items_count,
-            "customs_value": self._money_text(document.customs_value),
-            "allocated_shared_costs": document.allocated_shared_costs or {},
-            "totals": document.totals or {},
-            "draft": draft_summary,
-            "items": [
-                {
-                    "id": str(item.id),
-                    "duimp_item_number": item.duimp_item_number,
-                    "exporter_code": item.exporter_code,
-                    "import_purpose": item.import_purpose,
-                    "cfop": item.cfop,
-                    "customs_value": self._money_text(item.customs_value),
-                    "allocated_shared_costs": item.allocated_shared_costs or {},
-                }
-                for item in document.items
-            ],
-        }
-
-    def generate_child_drafts(
-        self,
-        process: ImportProcess,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        snapshot = self._snapshot_for_process(
-            process,
-            payload.get("duimp_snapshot_id"),
-        )
-        plan = (
-            self.document_plan_query_for_current_user()
-            .filter(
-                NfeDocumentPlan.import_process_id == process.id,
-                NfeDocumentPlan.duimp_snapshot_id == snapshot.id,
-                NfeDocumentPlan.status == "planned",
-            )
-            .order_by(NfeDocumentPlan.version_number.desc())
-            .first()
-        )
-        if plan is None:
-            raise ValueError("Gere e revise o plano de notas antes dos rascunhos.")
-
-        created = []
-        reused = []
-        for document in plan.documents:
-            existing = document.drafts[-1] if document.drafts else None
-            if existing:
-                reused.append(str(existing.id))
-                continue
-            child_payload = deepcopy(payload)
-            child_payload["duimp_snapshot_id"] = snapshot.id
-            child_payload.setdefault(
-                "import_purpose",
-                (document.item_purposes or [ImportPurpose.RESALE.value])[0],
-            )
-            result = self.create_nfe_draft_from_duimp(
-                process,
-                child_payload,
-                planned_document=document,
-            )
-            created.append(str(result["draft"].id))
-            document.status = "drafted"
-            document.updated_at = datetime.utcnow()
-
-        plan.updated_at = datetime.utcnow()
-        db.session.flush()
-        return {
-            "created_draft_ids": created,
-            "reused_draft_ids": reused,
-            "plan": self._serialize_document_plan(plan),
-        }
-
-    def generate_and_validate_child_xmls(
-        self,
-        process: ImportProcess,
-        snapshot_id=None,
-    ) -> dict[str, Any]:
-        snapshot = self._snapshot_for_process(process, snapshot_id)
-        plan = (
-            self.document_plan_query_for_current_user()
-            .filter(
-                NfeDocumentPlan.import_process_id == process.id,
-                NfeDocumentPlan.duimp_snapshot_id == snapshot.id,
-                NfeDocumentPlan.status == "planned",
-            )
-            .order_by(NfeDocumentPlan.version_number.desc())
-            .first()
-        )
-        if plan is None:
-            raise ValueError("Plano de notas ativo não encontrado.")
-
-        results = []
-        for document in plan.documents:
-            draft = document.drafts[-1] if document.drafts else None
-            if draft is None:
-                results.append({
-                    "planned_document_id": str(document.id),
-                    "success": False,
-                    "message": "Gere o rascunho desta NF-e filha primeiro.",
-                })
-                continue
-            try:
-                latest_xml = (
-                    NfeXmlVersion.query.filter(
-                        NfeXmlVersion.nfe_draft_id == draft.id,
-                        NfeXmlVersion.xml_type == NfeXmlType.UNSIGNED.value,
-                    )
-                    .order_by(NfeXmlVersion.version_number.desc())
-                    .first()
-                )
-                xml_is_current = bool(
-                    latest_xml
-                    and (
-                        not draft.updated_at
-                        or not latest_xml.generated_at
-                        or draft.updated_at <= latest_xml.generated_at
-                    )
-                )
-                if not xml_is_current:
-                    latest_xml = self.generate_unsigned_xml(draft)
-                validation = self.validate_xml_version(draft, latest_xml)
-                document.status = (
-                    "xsd_validated" if validation.is_valid else "xsd_invalid"
-                )
-                document.updated_at = datetime.utcnow()
-                results.append({
-                    "planned_document_id": str(document.id),
-                    "draft_id": str(draft.id),
-                    "xml_version_id": str(latest_xml.id),
-                    "success": validation.is_valid,
-                    "xsd_valid": validation.is_valid,
-                    "xsd_errors": validation.errors,
-                })
-            except ValueError as exc:
-                document.status = "correction_required"
-                document.updated_at = datetime.utcnow()
-                results.append({
-                    "planned_document_id": str(document.id),
-                    "draft_id": str(draft.id),
-                    "success": False,
-                    "message": str(exc),
-                })
-
-        all_valid = bool(results) and all(
-            result.get("xsd_valid") is True for result in results
-        )
-        process.status = (
-            ImportProcessStatus.XML_VALIDATED.value
-            if all_valid
-            else ImportProcessStatus.XML_VALIDATION_FAILED.value
-        )
-        process.updated_at = datetime.utcnow()
-        plan.updated_at = datetime.utcnow()
-        db.session.flush()
-        return {
-            "all_valid": all_valid,
-            "results": results,
-            "plan": self._serialize_document_plan(plan),
-        }
-
-    @staticmethod
-    def _money_text(value: Any) -> str:
-        return f"{Decimal(str(value or '0')).quantize(Decimal('0.01')):.2f}"
-
-    # ------------------------------------------------------------------
-    # NFe draft
-    # ------------------------------------------------------------------
-    def create_nfe_draft_from_duimp(
-        self,
-        process: ImportProcess,
-        payload: dict[str, Any],
-        *,
-        planned_document: NfePlannedDocument | None = None,
-    ) -> dict[str, Any]:
-        payload = self._json_compatible(payload)
-        payload["series"] = payload.get("series") or self.DEFAULT_NFE_SERIES
-        fiscal_profile = self.get_importer_fiscal_profile(process.importer_id)
-        snapshot_id = payload.get("duimp_snapshot_id")
-        if snapshot_id:
-            snapshot = (
-                self.snapshot_query_for_current_user()
-                .filter(
-                    DuimpSnapshot.id == snapshot_id,
-                    DuimpSnapshot.import_process_id == process.id,
-                )
-                .first()
-            )
-            if snapshot is None:
-                raise ValueError("Snapshot da DUIMP não encontrado para este processo.")
-            normalized = snapshot.normalized_payload or self.normalize_duimp_payload(
-                snapshot.raw_payload
-            )
-        else:
-            fetch_result = self.fetch_duimp_for_process(process, payload)
-            normalized = fetch_result["normalized"]
-            snapshot = fetch_result["snapshot"]
-
-        preallocated_costs = None
-        if planned_document is not None:
-            if (
-                planned_document.document_plan.import_process_id != process.id
-                or planned_document.document_plan.duimp_snapshot_id != snapshot.id
-                or planned_document.document_plan.status != "planned"
-            ):
-                raise ValueError(
-                    "A NF-e filha não pertence ao plano ativo deste processo."
-                )
-            normalized = deepcopy(normalized)
-            normalized["items"] = [
-                deepcopy(item.raw_source_payload or {})
-                for item in planned_document.items
-            ]
-            normalized["foreign_supplier"] = deepcopy(
-                planned_document.foreign_supplier
-            )
-            normalized["foreign_suppliers"] = [
-                deepcopy(planned_document.foreign_supplier)
-            ] if planned_document.foreign_supplier else []
-            normalized["exporter_code"] = planned_document.exporter_code
-            normalized["afrmm_value"] = (
-                planned_document.allocated_shared_costs or {}
-            ).get("afrmm", "0.00")
-            # Totais declarados na DUIMP pertencem ao processo inteiro. Cada
-            # filha é conciliada pelos próprios itens e pelo rateio persistido.
-            normalized["tax_totals"] = {}
-            fiscal_references = deepcopy(
-                normalized.get("automation_fiscal_references") or {}
-            )
-            fiscal_references.pop("icms", None)
-            normalized["automation_fiscal_references"] = fiscal_references
-            payload["import_purpose"] = (
-                (planned_document.item_purposes or [None])[0]
-                or payload.get("import_purpose")
-            )
-            payload["foreign_supplier"] = deepcopy(
-                planned_document.foreign_supplier
-            )
-            payload["additional_costs"] = deepcopy(
-                planned_document.allocated_shared_costs or {}
-            )
-            payload["document"] = self._merge_defaults(
-                payload.get("document"),
-                {"operation_nature": planned_document.operation_nature},
-            )
-            preallocated_costs = {
-                item.duimp_item_number: deepcopy(
-                    item.allocated_shared_costs or {}
-                )
-                for item in planned_document.items
-            }
-
-        exporter_keys = {
-            self._document_exporter(item, normalized)[0]
-            for item in (normalized.get("items") or [])
-        }
-        if planned_document is None and len(exporter_keys) > 1:
-            raise ValueError(
-                "A DUIMP possui múltiplos exportadores. Revise o plano de notas; "
-                "os rascunhos independentes de cada NF-e filha serão gerados na "
-                "próxima etapa do fluxo."
-            )
-
-        classification_map = self._item_classification_map(process, snapshot)
+                    NfeXmlVersion.nfe_draft_id == lat…3231 tokens truncated…napshot)
         if planned_document is not None:
             planned_item_numbers = {
                 item.duimp_item_number for item in planned_document.items
@@ -3084,25 +2798,35 @@ class ImportNfeService:
             .order_by(NfeXmlVersion.version_number.desc())
             .all()
         )
-        return {"draft": draft, "items": items, "xml_versions": xml_versions}
+        audit_trail = list((draft.fiscal_payload or {}).get("audit_trail") or [])
+        for item in items:
+            icms = ((item.tax_payload or {}).get("icms") or {})
+            for event in icms.get("adjustment_history") or []:
+                audit_trail.append(
+                    {
+                        **event,
+                        "section": "taxes",
+                        "item_id": str(item.id),
+                        "item_number": item.item_number,
+                    }
+                )
+        audit_trail.sort(
+            key=lambda event: str(event.get("changed_at") or ""),
+            reverse=True,
+        )
+        return {
+            "draft": draft,
+            "items": items,
+            "xml_versions": xml_versions,
+            "audit_trail": audit_trail,
+        }
 
     def update_draft_metadata(
         self,
         draft: NfeDraft,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        current_status = getattr(draft.status, "value", draft.status)
-        immutable_statuses = {
-            NfeDraftStatus.SIGNED.value,
-            NfeDraftStatus.TRANSMITTED.value,
-            NfeDraftStatus.AUTHORIZED.value,
-            NfeDraftStatus.CANCELLED.value,
-        }
-        if current_status in immutable_statuses:
-            raise ValueError(
-                "Rascunho assinado, transmitido, autorizado ou cancelado "
-                "não pode mais ser alterado."
-            )
+        self._assert_draft_editable(draft)
 
         transport_update = payload.get("transport") or {}
         replace_transport_carrier = "carrier" in transport_update
@@ -3136,6 +2860,9 @@ class ImportNfeService:
         )
         now = datetime.utcnow()
         fiscal_payload = deepcopy(draft.fiscal_payload or {})
+        previous_additional_costs = deepcopy(
+            fiscal_payload.get("additional_costs") or {}
+        )
 
         for section in ("document", "transport", "payment"):
             if section in payload:
@@ -3259,6 +2986,28 @@ class ImportNfeService:
             ).first()
             is not None
         )
+        if "additional_costs" in payload:
+            next_costs = {
+                **previous_additional_costs,
+                **(payload.get("additional_costs") or {}),
+            }
+            fiscal_payload["additional_costs"] = next_costs
+            self._recalculate_draft_rows(
+                rows,
+                fiscal_payload=fiscal_payload,
+                additional_costs=next_costs,
+            )
+            if self._json_compatible(previous_additional_costs) != next_costs:
+                fiscal_payload.setdefault("audit_trail", []).append(
+                    self._draft_audit_event(
+                        section="additional_costs",
+                        reason="Despesas de importação atualizadas no editor.",
+                        previous=previous_additional_costs,
+                        current=next_costs,
+                        changed_at=now,
+                    )
+                )
+
         draft.fiscal_payload = fiscal_payload
         self._refresh_draft_payload_from_items(draft)
         validation = self.validate_nfe_payload(draft.fiscal_payload)
@@ -3293,6 +3042,7 @@ class ImportNfeService:
         }
 
     def update_draft_item(self, draft: NfeDraft, item: NfeDraftItem, payload: dict[str, Any]) -> NfeDraftItem:
+        self._assert_draft_editable(draft)
         allowed_fields = [
             "product_code",
             "description",
@@ -3311,7 +3061,6 @@ class ImportNfeService:
             "discount_value",
             "other_value",
             "import_payload",
-            "tax_payload",
         ]
         for field in allowed_fields:
             if field in payload:
@@ -3326,6 +3075,281 @@ class ImportNfeService:
         draft.updated_at = datetime.utcnow()
         db.session.flush()
         return item
+
+    def adjust_draft_item_tax(
+        self,
+        draft: NfeDraft,
+        item: NfeDraftItem,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._assert_draft_editable(draft)
+        had_xml_versions = NfeXmlVersion.query.filter(
+            NfeXmlVersion.nfe_draft_id == draft.id
+        ).first() is not None
+        now = datetime.utcnow()
+        source = payload.get("source") or "manual_adjustment"
+        reason = str(payload["reason"]).strip()
+        previous_cfop = item.cfop
+        previous_taxes = deepcopy(item.tax_payload or {})
+        previous_icms = deepcopy(previous_taxes.get("icms") or {})
+
+        if payload.get("cfop"):
+            item.cfop = payload["cfop"]
+
+        if source == "tax_rule":
+            if not item.tax_rule:
+                raise ValueError(
+                    "O item não possui uma regra tributária vinculada para reaplicar."
+                )
+            calculated = self._calculate_row_from_tax_rule(draft, item)
+            next_taxes = deepcopy(calculated.get("tax_payload") or {})
+            next_icms = deepcopy(next_taxes.get("icms") or {})
+            next_icms["calculation_source"] = "tax_rule"
+        else:
+            adjustment = self._json_compatible(payload["icms"])
+            next_taxes = deepcopy(previous_taxes)
+            next_icms = self._manual_icms_values(previous_icms, adjustment)
+
+        event = self._draft_audit_event(
+            section="taxes",
+            reason=reason,
+            previous={"cfop": previous_cfop, "icms": previous_icms},
+            current={"cfop": item.cfop, "icms": next_icms},
+            changed_at=now,
+        )
+        event["source"] = source
+        history = list(previous_icms.get("adjustment_history") or [])
+        history.append(event)
+        next_icms["adjustment_history"] = history
+        next_icms["manual_adjustment"] = (
+            {
+                "reason": reason,
+                "changed_at": event["changed_at"],
+                "changed_by_user_id": event["changed_by_user_id"],
+                "changed_by_name": event["changed_by_name"],
+                "values": self._json_compatible(payload.get("icms") or {}),
+            }
+            if source == "manual_adjustment"
+            else None
+        )
+        next_taxes["icms"] = next_icms
+        item.tax_payload = next_taxes
+        item.updated_at = now
+
+        self._refresh_draft_payload_from_items(draft)
+        validation = self.validate_nfe_payload(draft.fiscal_payload)
+        draft.validation_errors = validation.errors or None
+        draft.validation_warnings = validation.warnings or None
+        draft.status = (
+            NfeDraftStatus.READY_FOR_XML.value
+            if validation.is_valid
+            else NfeDraftStatus.VALIDATION_FAILED.value
+        )
+        draft.updated_at = now
+        db.session.flush()
+        return {
+            "draft": draft,
+            "item": item,
+            "validation": validation.to_dict(),
+            "audit": event,
+            "requires_new_xml": had_xml_versions,
+        }
+
+    def soft_delete_draft(self, draft: NfeDraft, *, reason: str) -> dict[str, Any]:
+        current_status = self._enum_value(draft.status)
+        signed_xml_exists = NfeXmlVersion.query.filter(
+            NfeXmlVersion.nfe_draft_id == draft.id,
+            NfeXmlVersion.xml_type.in_([
+                NfeXmlType.SIGNED.value,
+                NfeXmlType.AUTHORIZED.value,
+            ]),
+        ).first() is not None
+        if signed_xml_exists or current_status in {
+            NfeDraftStatus.SIGNED.value,
+            NfeDraftStatus.TRANSMITTED.value,
+            NfeDraftStatus.AUTHORIZED.value,
+            NfeDraftStatus.CANCELLED.value,
+        }:
+            raise ValueError(
+                "Rascunhos assinados, transmitidos, autorizados ou cancelados "
+                "não podem ser excluídos nem arquivados."
+            )
+
+        now = datetime.utcnow()
+        has_xml = NfeXmlVersion.query.filter(
+            NfeXmlVersion.nfe_draft_id == draft.id
+        ).first() is not None
+        has_reserved_number = bool(draft.number or draft.access_key)
+        mode = "archived" if has_reserved_number or has_xml else "deleted"
+        fiscal_payload = deepcopy(draft.fiscal_payload or {})
+        if mode == "archived":
+            fiscal_payload["numbering_disposition"] = {
+                "status": "pending_inutilization_review",
+                "number": draft.number,
+                "series": draft.series,
+                "access_key": draft.access_key,
+            }
+        fiscal_payload.setdefault("audit_trail", []).append(
+            self._draft_audit_event(
+                section="draft_lifecycle",
+                reason=reason,
+                previous={"deletion_mode": None},
+                current={"deletion_mode": mode},
+                changed_at=now,
+            )
+        )
+        draft.fiscal_payload = fiscal_payload
+        draft.deleted_at = now
+        draft.deleted_by_user_id = self.user_id
+        draft.deletion_reason = reason.strip()
+        draft.deletion_mode = mode
+        draft.updated_at = now
+        db.session.flush()
+        return {
+            "draft_id": str(draft.id),
+            "deletion_mode": mode,
+            "deleted_at": now.isoformat() + "Z",
+            "number": draft.number,
+            "series": draft.series,
+            "access_key": draft.access_key,
+            "requires_inutilization_review": mode == "archived",
+            "message": (
+                "Rascunho arquivado. A numeração reservada foi mantida para revisão de inutilização."
+                if mode == "archived"
+                else "Rascunho excluído logicamente. Nenhuma numeração fiscal havia sido reservada."
+            ),
+        }
+
+    def _assert_draft_editable(self, draft: NfeDraft) -> None:
+        if draft.deleted_at:
+            raise ValueError("Rascunho excluído ou arquivado não pode ser alterado.")
+        current_status = self._enum_value(draft.status)
+        if current_status in {
+            NfeDraftStatus.SIGNED.value,
+            NfeDraftStatus.TRANSMITTED.value,
+            NfeDraftStatus.AUTHORIZED.value,
+            NfeDraftStatus.CANCELLED.value,
+        }:
+            raise ValueError(
+                "Rascunho assinado, transmitido, autorizado ou cancelado "
+                "não pode mais ser alterado."
+            )
+
+    def _draft_audit_event(
+        self,
+        *,
+        section: str,
+        reason: str,
+        previous: dict[str, Any],
+        current: dict[str, Any],
+        changed_at: datetime,
+    ) -> dict[str, Any]:
+        return {
+            "section": section,
+            "reason": reason,
+            "previous": self._json_compatible(previous),
+            "current": self._json_compatible(current),
+            "changed_by_user_id": str(self.user_id) if self.user_id else None,
+            "changed_by_name": getattr(self.current_user, "nome", None),
+            "changed_at": changed_at.isoformat() + "Z",
+        }
+
+    def _manual_icms_values(
+        self,
+        previous: dict[str, Any],
+        adjustment: dict[str, Any],
+    ) -> dict[str, Any]:
+        cst = str(adjustment["cst"]).zfill(2)
+        base = self._decimal(adjustment.get("base")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        rate = self._decimal(adjustment.get("rate"))
+        reduction = self._decimal(adjustment.get("reduction_rate"))
+        deferment = self._decimal(adjustment.get("deferment_rate"))
+        if cst in {"40", "41", "50"}:
+            base = Decimal("0.00")
+            rate = Decimal("0")
+            value = Decimal("0.00")
+            operation_value = None
+            deferred_value = None
+        else:
+            if rate <= 0 or rate >= 100:
+                raise ValueError(
+                    "A alíquota do ICMS deve ser maior que zero e menor que 100."
+                )
+            operation_value = (base * rate / Decimal("100")).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            deferred_value = (
+                operation_value * deferment / Decimal("100")
+            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            value = operation_value - deferred_value
+
+        duimp_value = previous.get("duimp_value")
+        next_icms = {
+            **previous,
+            "cst": cst,
+            "base": format(base, ".2f"),
+            "rate": None if cst in {"40", "41", "50"} else format(rate, ".4f"),
+            "base_reduction_rate": (
+                format(reduction, ".4f") if reduction else None
+            ),
+            "deferment_rate": (
+                format(deferment, ".4f") if cst == "51" and deferment else None
+            ),
+            "operation_value": (
+                format(operation_value, ".2f") if operation_value is not None else None
+            ),
+            "deferred_value": (
+                format(deferred_value, ".2f") if deferred_value is not None else None
+            ),
+            "value": format(value, ".2f"),
+            "diagnostic_only": False,
+            "tax_treatment_confirmed": True,
+            "calculation_source": "manual_adjustment",
+        }
+        if duimp_value not in (None, ""):
+            next_icms["difference"] = format(
+                (value - self._decimal(duimp_value)).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                ),
+                ".2f",
+            )
+        return next_icms
+
+    def _calculate_row_from_tax_rule(
+        self,
+        draft: NfeDraft,
+        item: NfeDraftItem,
+    ) -> dict[str, Any]:
+        source = self._item_to_payload(item)
+        current_item = next(
+            (
+                row for row in (draft.fiscal_payload or {}).get("items") or []
+                if str(row.get("item_number")) == str(item.item_number)
+            ),
+            {},
+        )
+        allocation = deepcopy(current_item.get("cost_allocation") or {})
+        source["customs_value"] = current_item.get("customs_value") or source["product_value"]
+        source["net_weight"] = current_item.get("net_weight") or "0"
+        source["other_value"] = format(
+            (
+                self._decimal(source.get("other_value"))
+                - sum(
+                    (self._decimal(value) for value in allocation.values()),
+                    Decimal("0"),
+                )
+            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+            ".2f",
+        )
+        calculated, _ = self.tax_calculator.calculate(
+            [source],
+            configuration=deepcopy(item.tax_rule.configuration_json or {}),
+            additional_costs=allocation,
+            preallocated_costs=[allocation],
+        )
+        return calculated[0]
 
     def validate_draft(self, draft: NfeDraft) -> ValidationResult:
         self._refresh_draft_payload_from_items(draft)
@@ -4648,6 +4672,15 @@ class ImportNfeService:
 
     def _build_draft_item(self, *, draft: NfeDraft, item_payload: dict[str, Any]) -> NfeDraftItem:
         now = datetime.utcnow()
+        import_payload = deepcopy(item_payload.get("import_payload") or {})
+        import_payload["cost_allocation"] = deepcopy(
+            item_payload.get("cost_allocation") or {}
+        )
+        tax_payload = deepcopy(item_payload.get("tax_payload") or {})
+        tax_payload.setdefault("icms", {}).setdefault(
+            "calculation_source",
+            "tax_rule" if item_payload.get("tax_rule_id") else "request_configuration",
+        )
         return NfeDraftItem(
             nfe_draft_id=draft.id,
             item_number=item_payload["item_number"],
@@ -4668,8 +4701,8 @@ class ImportNfeService:
             insurance_value=self._decimal(item_payload.get("insurance_value", 0)),
             discount_value=self._decimal(item_payload.get("discount_value", 0)),
             other_value=self._decimal(item_payload.get("other_value", 0)),
-            import_payload=item_payload.get("import_payload"),
-            tax_payload=item_payload.get("tax_payload"),
+            import_payload=import_payload,
+            tax_payload=tax_payload,
             import_purpose=item_payload.get("import_purpose"),
             tax_rule_id=(
                 UUID(str(item_payload["tax_rule_id"]))
@@ -4696,10 +4729,147 @@ class ImportNfeService:
         payload = dict(draft.fiscal_payload or {})
         payload["items"] = [self._item_to_payload(row) for row in rows]
         payload["totals"] = self.calculate_nfe_totals(payload["items"])
+        expected_taxes = {}
+        for check in (payload.get("reconciliation") or {}).get("checks") or []:
+            name = str(check.get("name") or "")
+            if name.startswith("duimp_"):
+                expected_taxes[name.removeprefix("duimp_")] = {
+                    "value": check.get("expected")
+                }
+        payload["reconciliation"] = self.tax_calculator.reconcile(
+            payload["items"],
+            payload["totals"],
+            expected_tax_totals=expected_taxes,
+            expected_additional_costs=payload.get("additional_costs") or {},
+        )
         payload["authorization"] = self._authorization_metadata(payload["items"])
         draft.fiscal_payload = payload
 
+    def _recalculate_draft_rows(
+        self,
+        rows: list[NfeDraftItem],
+        *,
+        fiscal_payload: dict[str, Any],
+        additional_costs: dict[str, Any],
+    ) -> None:
+        current_items = {
+            str(item.get("item_number")): item
+            for item in fiscal_payload.get("items") or []
+        }
+        source_items = []
+        for row in rows:
+            source = self._item_to_payload(row)
+            current = current_items.get(str(row.item_number), {})
+            old_allocation = deepcopy(
+                current.get("cost_allocation")
+                or (row.import_payload or {}).get("cost_allocation")
+                or {}
+            )
+            base_other = self._decimal(source.get("other_value")) - sum(
+                (self._decimal(value) for value in old_allocation.values()),
+                Decimal("0"),
+            )
+            source["other_value"] = format(
+                base_other.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+                ".2f",
+            )
+            source["customs_value"] = (
+                current.get("customs_value") or source.get("product_value")
+            )
+            source["net_weight"] = current.get("net_weight") or "0"
+            source_items.append(source)
+
+        costs = {
+            name: self._decimal(additional_costs.get(name)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            for name in ("afrmm", "siscomex_fee", "thc", "other")
+        }
+        customs_weights = [
+            self._decimal(item.get("customs_value") or item.get("product_value"))
+            for item in source_items
+        ]
+        net_weights = [self._decimal(item.get("net_weight")) for item in source_items]
+        afrmm_weights = (
+            net_weights
+            if all(weight > 0 for weight in net_weights)
+            else customs_weights
+        )
+        allocations = {
+            "afrmm": self.tax_calculator.allocate(costs["afrmm"], afrmm_weights),
+            "siscomex_fee": self.tax_calculator.allocate(costs["siscomex_fee"], customs_weights),
+            "thc": self.tax_calculator.allocate(costs["thc"], customs_weights),
+            "other": self.tax_calculator.allocate(costs["other"], customs_weights),
+        }
+
+        for index, (row, source) in enumerate(zip(rows, source_items)):
+            item_costs = {
+                name: values[index] for name, values in allocations.items()
+            }
+            current_icms = deepcopy((row.tax_payload or {}).get("icms") or {})
+            configuration = (
+                deepcopy(row.tax_rule.configuration_json or {})
+                if row.tax_rule
+                else self._tax_configuration_from_item(row)
+            )
+            calculated, _ = self.tax_calculator.calculate(
+                [source],
+                configuration=configuration,
+                additional_costs=item_costs,
+                preallocated_costs=[item_costs],
+            )
+            result = calculated[0]
+            result_import = deepcopy(result.get("import_payload") or {})
+            result_import["cost_allocation"] = {
+                name: format(value, ".2f") for name, value in item_costs.items()
+            }
+            result["import_payload"] = result_import
+            if current_icms.get("calculation_source") == "manual_adjustment":
+                manual = (current_icms.get("manual_adjustment") or {}).get("values") or {}
+                manual_icms = self._manual_icms_values(
+                    current_icms,
+                    manual,
+                )
+                manual_icms["adjustment_history"] = deepcopy(
+                    current_icms.get("adjustment_history") or []
+                )
+                manual_icms["manual_adjustment"] = deepcopy(
+                    current_icms.get("manual_adjustment")
+                )
+                result.setdefault("tax_payload", {})["icms"] = manual_icms
+
+            row.other_value = self._decimal(result.get("other_value"))
+            row.import_payload = result_import
+            row.tax_payload = result.get("tax_payload") or {}
+            row.updated_at = datetime.utcnow()
+
+        fiscal_payload["items"] = [self._item_to_payload(row) for row in rows]
+        fiscal_payload["totals"] = self.calculate_nfe_totals(fiscal_payload["items"])
+
+    @staticmethod
+    def _tax_configuration_from_item(item: NfeDraftItem) -> dict[str, Any]:
+        taxes = item.tax_payload or {}
+        icms = taxes.get("icms") or {}
+        ipi = taxes.get("ipi") or {}
+        pis = taxes.get("pis") or {}
+        cofins = taxes.get("cofins") or {}
+        return {
+            "icms_origin": icms.get("origin") or "1",
+            "icms_cst": icms.get("cst") or "90",
+            "icms_base_method": icms.get("base_method") or "3",
+            "icms_rate": icms.get("rate"),
+            "icms_base_reduction_rate": icms.get("base_reduction_rate"),
+            "icms_deferment_rate": icms.get("deferment_rate"),
+            "icms_tax_treatment_confirmed": icms.get("tax_treatment_confirmed"),
+            "ipi_cst": ipi.get("cst") or "49",
+            "ipi_enquiry_code": ipi.get("enquiry_code") or "999",
+            "pis_cst": pis.get("cst") or "98",
+            "cofins_cst": cofins.get("cst") or "98",
+        }
+
     def _item_to_payload(self, item: NfeDraftItem) -> dict[str, Any]:
+        import_payload = deepcopy(item.import_payload or {})
+        cost_allocation = deepcopy(import_payload.pop("cost_allocation", {}) or {})
         return {
             "item_number": item.item_number,
             "duimp_item_number": item.duimp_item_number,
@@ -4731,8 +4901,9 @@ class ImportNfeService:
             "insurance_value": str(item.insurance_value),
             "discount_value": str(item.discount_value),
             "other_value": str(item.other_value),
-            "additional_info": (item.import_payload or {}).get("additional_info"),
-            "import_payload": item.import_payload,
+            "additional_info": import_payload.get("additional_info"),
+            "cost_allocation": cost_allocation,
+            "import_payload": import_payload,
             "tax_payload": item.tax_payload,
             "raw_source_payload": item.raw_source_payload,
         }

@@ -577,6 +577,18 @@ class NfeDraft(Base):
 
     access_key = Column(String(44), nullable=True)
 
+    # Exclusão sempre lógica. Quando já existe número/chave, deletion_mode é
+    # ``archived`` e o payload mantém a indicação de possível inutilização.
+    deleted_at = Column(DateTime, nullable=True, index=True)
+    deleted_by_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=True,
+        index=True,
+    )
+    deletion_reason = Column(Text, nullable=True)
+    deletion_mode = Column(String(20), nullable=True)
+
     created_at = Column(DateTime, nullable=False)
     updated_at = Column(DateTime, nullable=False)
 
@@ -588,6 +600,7 @@ class NfeDraft(Base):
         "NfePlannedDocument",
         back_populates="drafts",
     )
+    deleted_by = relationship("User", foreign_keys=[deleted_by_user_id])
     items = relationship("NfeDraftItem", back_populates="nfe_draft", lazy=True, cascade="all, delete-orphan")
     xml_versions = relationship("NfeXmlVersion", back_populates="nfe_draft", lazy=True, cascade="all, delete-orphan")
 
