@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Mapping
 
+from app.nfe_reference import NFE_TRANSPORT_MODE_CODES
+
 
 class NfeContextResolver:
     """Consolida fontes da NF-e sem transformar inferências em fatos fiscais."""
@@ -187,6 +189,15 @@ class NfeContextResolver:
             if value not in (None, ""):
                 resolved[field] = value
                 sources[field] = "operator_override"
+
+        transport_mode_code = resolved.get("transport_mode_code")
+        if transport_mode_code not in (None, ""):
+            transport_mode_code = str(transport_mode_code).strip()
+            if transport_mode_code in NFE_TRANSPORT_MODE_CODES:
+                resolved["transport_mode_code"] = transport_mode_code
+            else:
+                resolved["transport_mode_code"] = None
+                sources.pop("transport_mode_code", None)
 
         resolved["automation_field_sources"] = {
             **previous_sources,

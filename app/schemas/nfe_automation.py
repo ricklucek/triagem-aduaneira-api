@@ -3,6 +3,7 @@ from decimal import Decimal, InvalidOperation
 from marshmallow import EXCLUDE, Schema, ValidationError, fields, validate, validates_schema
 
 from ..models import FiscalEnvironment, ImportPurpose
+from ..nfe_reference import NFE_TRANSPORT_MODE_CODES
 from .import_process import (
     NfeAdditionalInfoSchema,
     NfeDocumentOptionsSchema,
@@ -216,6 +217,23 @@ class NfeContextQuerySchema(Schema):
 class ResolveNfeContextSchema(NfeContextQuerySchema):
     refresh_external = fields.Boolean(load_default=True)
     overrides = fields.Dict(load_default=dict)
+
+    @validates_schema
+    def validate_transport_mode_code(self, data, **kwargs):
+        overrides = data.get("overrides") or {}
+        value = overrides.get("transport_mode_code")
+        if value in (None, ""):
+            return
+        if str(value).strip() not in NFE_TRANSPORT_MODE_CODES:
+            raise ValidationError(
+                {
+                    "transport_mode_code": [
+                        "Selecione uma via de transporte válida (códigos 1 a 13)."
+                    ]
+                },
+                field_name="overrides",
+            )
+
 
 class NfeItemClassificationQuerySchema(Schema):
     duimp_snapshot_id = fields.UUID(load_default=None, allow_none=True)

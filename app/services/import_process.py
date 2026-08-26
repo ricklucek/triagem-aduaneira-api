@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import case, func, or_
 
 from app.cnpj import is_valid_cnpj, normalize_cnpj
+from app.nfe_reference import NFE_TRANSPORT_MODE_CODES
 from ..extensions import db
 from ..integrations.portal_unico import (
     DefaultPortalCredentialResolver,
@@ -4679,6 +4680,17 @@ class ImportNfeService:
         }.items():
             if not duimp.get(field):
                 errors.append({"field": f"duimp.{field}", "message": message})
+        transport_mode_code = duimp.get("transport_mode_code")
+        if (
+            transport_mode_code
+            and str(transport_mode_code).strip() not in NFE_TRANSPORT_MODE_CODES
+        ):
+            errors.append(
+                {
+                    "field": "duimp.transport_mode_code",
+                    "message": "Via de transporte inválida. Selecione um código de 1 a 13.",
+                }
+            )
         if duimp.get("intermediation_type") in {"2", "3"}:
             if len(self._digits(duimp.get("third_party_tax_id"))) not in {11, 14}:
                 errors.append(

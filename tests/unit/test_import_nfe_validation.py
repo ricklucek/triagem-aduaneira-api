@@ -47,6 +47,37 @@ def test_validation_rejects_item_not_enriched_by_catalog():
     } in result.errors
 
 
+def test_validation_rejects_transport_mode_outside_nfe_schema():
+    service = ImportNfeService(
+        current_user=SimpleNamespace(organization_id=None, id=None)
+    )
+
+    result = service.validate_nfe_payload(
+        {
+            "document": {
+                "model": "55",
+                "operation_type": "entry",
+                "environment": "production",
+                "series": "1",
+            },
+            "duimp": {
+                "number": "26BR0000000000-1",
+                "registration_date": "2026-07-14",
+                "clearance_location": "PARANAGUA",
+                "clearance_state": "PR",
+                "clearance_date": "2026-07-15",
+                "transport_mode_code": "14",
+            },
+            "items": [],
+        }
+    )
+
+    assert {
+        "field": "duimp.transport_mode_code",
+        "message": "Via de transporte inválida. Selecione um código de 1 a 13.",
+    } in result.errors
+
+
 def test_validation_warns_and_blocks_diagnostic_icms_authorization():
     service = ImportNfeService(
         current_user=SimpleNamespace(organization_id=None, id=None)

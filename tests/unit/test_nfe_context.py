@@ -1,3 +1,8 @@
+import pytest
+from marshmallow import ValidationError
+
+from app.nfe_reference import NFE_TRANSPORT_MODES
+from app.schemas.nfe_automation import ResolveNfeContextSchema
 from app.services.nfe_context import NfeContextResolver
 from app.services.import_process import ImportNfeService
 
@@ -90,6 +95,46 @@ def test_context_resolver_keeps_unconfirmed_fields_missing():
         "source": None,
         "status": "missing",
     }
+
+
+@pytest.mark.parametrize("transport_mode_code", NFE_TRANSPORT_MODES)
+def test_context_accepts_every_transport_mode_from_nfe_schema(
+    transport_mode_code,
+):
+    result = NfeContextResolver().resolve(
+        normalized={"registration_date": "2026-05-26", "foreign_supplier": {}},
+        overrides={"transport_mode_code": transport_mode_code},
+    )
+
+    assert result["normalized"]["transport_mode_code"] == transport_mode_code
+
+
+def test_context_schema_rejects_unknown_transport_mode():
+    with pytest.raises(ValidationError) as exc_info:
+        ResolveNfeContextSchema().load(
+            {"overrides": {"transport_mode_code": "14"}}
+        )
+
+    assert exc_info.value.messages == {
+        "overrides": {
+            "transport_mode_code": [
+                "Selecione uma via de transporte válida (códigos 1 a 13)."
+            ]
+        }
+    }
+
+
+def test_context_marks_unknown_transport_mode_as_missing():
+    result = NfeContextResolver().resolve(
+        normalized={
+            "registration_date": "2026-05-26",
+            "transport_mode_code": "14",
+            "foreign_supplier": {},
+        }
+    )
+
+    assert result["normalized"]["transport_mode_code"] is None
+    assert "transport_mode_code" in result["missing_fields"]
 
 
 def test_context_uses_controlled_official_references_without_tabx():
