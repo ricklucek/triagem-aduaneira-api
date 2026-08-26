@@ -117,7 +117,10 @@ class NfeWorkflowStateQuerySchema(Schema):
     )
     environment = fields.String(
         load_default=FiscalEnvironment.PRODUCTION.value,
-        validate=validate.OneOf(FiscalEnvironment.values()),
+        validate=validate.OneOf(
+            [FiscalEnvironment.PRODUCTION.value],
+            error="Novas operações fiscais aceitam somente o ambiente production.",
+        ),
     )
     series = fields.String(load_default="1", validate=validate.Length(min=1, max=10))
 
@@ -144,7 +147,13 @@ class UpdateImportProcessSchema(Schema):
 class CreateProviderConnectionSchema(Schema):
     importer_id = fields.UUID(load_default=None, allow_none=True)
     provider = fields.String(required=True, validate=validate.OneOf(ExternalProvider.values()))
-    environment = fields.String(required=True, validate=validate.OneOf(FiscalEnvironment.values()))
+    environment = fields.String(
+        required=True,
+        validate=validate.OneOf(
+            [FiscalEnvironment.PRODUCTION.value],
+            error="Novas operações fiscais aceitam somente o ambiente production.",
+        ),
+    )
     auth_type = fields.String(required=True, validate=validate.OneOf(ExternalAuthType.values()))
     status = fields.String(
         load_default=ExternalConnectionStatus.ACTIVE.value,
@@ -157,7 +166,10 @@ class CreateProviderConnectionSchema(Schema):
 class ProviderConnectionListQuerySchema(Schema):
     importer_id = fields.UUID(load_default=None)
     provider = fields.String(validate=validate.OneOf(ExternalProvider.values()), load_default=None)
-    environment = fields.String(validate=validate.OneOf(FiscalEnvironment.values()), load_default=None)
+    environment = fields.String(
+        validate=validate.OneOf(FiscalEnvironment.values()),
+        load_default=None,
+    )
     status = fields.String(validate=validate.OneOf(ExternalConnectionStatus.values()), load_default=None)
     limit = fields.Integer(load_default=25, validate=validate.Range(min=1, max=100))
     offset = fields.Integer(load_default=0, validate=validate.Range(min=0))
@@ -177,7 +189,10 @@ class CreateManualDuimpSnapshotSchema(Schema):
 class FetchDuimpSchema(Schema):
     provider_environment = fields.String(
         load_default=FiscalEnvironment.PRODUCTION.value,
-        validate=validate.OneOf(FiscalEnvironment.values()),
+        validate=validate.OneOf(
+            [FiscalEnvironment.PRODUCTION.value],
+            error="Novas operações fiscais aceitam somente o ambiente production.",
+        ),
     )
     source_provider = fields.String(
         load_default=ExternalProvider.PORTAL_UNICO.value,
@@ -279,7 +294,13 @@ class NfeAdditionalInfoSchema(Schema):
 
 
 class CreateNfeDraftFromDuimpSchema(Schema):
-    environment = fields.String(load_default=FiscalEnvironment.PRODUCTION.value, validate=validate.OneOf(FiscalEnvironment.values()))
+    environment = fields.String(
+        load_default=FiscalEnvironment.PRODUCTION.value,
+        validate=validate.OneOf(
+            [FiscalEnvironment.PRODUCTION.value],
+            error="Novas operações fiscais aceitam somente o ambiente production.",
+        ),
+    )
     series = fields.String(load_default="1", validate=validate.Length(min=1, max=10))
     number = fields.Integer(load_default=None, allow_none=True)
     import_purpose = fields.String(load_default=None, allow_none=True, validate=validate.OneOf(ImportPurpose.values()))
@@ -290,7 +311,10 @@ class CreateNfeDraftFromDuimpSchema(Schema):
     provider_environment = fields.String(
         load_default=None,
         allow_none=True,
-        validate=validate.OneOf(FiscalEnvironment.values()),
+        validate=validate.OneOf(
+            [FiscalEnvironment.PRODUCTION.value],
+            error="Novas operações fiscais aceitam somente o ambiente production.",
+        ),
     )
     duimp_payload = fields.Dict(load_default=None, allow_none=True)
     duimp_snapshot_id = fields.UUID(load_default=None, allow_none=True)
@@ -487,7 +511,10 @@ class NfeNumberSequenceSchema(SQLAlchemyAutoSchema):
 class UpsertNfeNumberSequenceSchema(Schema):
     environment = fields.String(
         required=True,
-        validate=validate.OneOf(["homologation", "production"]),
+        validate=validate.OneOf(
+            ["production"],
+            error="A sequência fiscal aceita somente o ambiente production.",
+        ),
     )
 
     model = fields.String(
@@ -496,9 +523,19 @@ class UpsertNfeNumberSequenceSchema(Schema):
     )
 
     series = fields.String(required=True)
-    current_number = fields.Integer(load_default=0)
-    initial_number = fields.Integer(load_default=1)
-    max_number = fields.Integer(load_default=999999999)
+    current_number = fields.Integer(
+        load_default=None,
+        allow_none=True,
+        validate=validate.Range(min=0, max=999999999),
+    )
+    initial_number = fields.Integer(
+        load_default=1,
+        validate=validate.Range(min=1, max=999999999),
+    )
+    max_number = fields.Integer(
+        load_default=999999999,
+        validate=validate.Range(min=1, max=999999999),
+    )
 
     status = fields.String(
         load_default="active",

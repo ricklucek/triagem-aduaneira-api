@@ -1,7 +1,7 @@
 from flask import Blueprint, g, jsonify, request
 from marshmallow import ValidationError
 
-from ..auth import auth_required
+from ..auth import admin_required, auth_required
 from ..extensions import db
 from ..schemas.import_process import (
     CreateProviderConnectionSchema,
@@ -31,7 +31,7 @@ def _service() -> ImportNfeService:
 
 
 @provider_connection_bp.post("")
-@auth_required
+@admin_required
 def create_provider_connection():
     try:
         payload = CreateProviderConnectionSchema().load(json_payload())

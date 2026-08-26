@@ -1,11 +1,10 @@
 ## Triagem Aduaneira API (Flask)
 
-Backend Flask em Python 3 para atender o contrato do frontend com autenticação JWT, PostgreSQL, SQLAlchemy e versionamento via Flask-Migrate/Alembic.
+Backend Flask em Python 3 para atender o contrato do frontend com autenticação JWT, PostgreSQL e SQLAlchemy.
 
 ### Stack
 - Flask
 - Flask-SQLAlchemy
-- Flask-Migrate
 - marshmallow + marshmallow-sqlalchemy
 - PostgreSQL
 - JWT (access + refresh)
@@ -34,3 +33,13 @@ flask --app wsgi.py run --host 0.0.0.0 --port 5000
 - Endpoints: `docs/ENDPOINTS.md`
 - Contexto da transformação backend/frontend: `docs/BACKEND_TRANSFORMATION.md`
 - Teste da NF-e de importação: `docs/NFE_IMPORT_TESTING.md`
+
+
+### Política de banco e NF-e
+
+A aplicação não executa upgrades de schema no startup nem durante deploys. A
+evolução do banco é aplicada de forma controlada pelo ambiente responsável.
+
+Novos processos de NF-e e consultas ao Portal Único operam somente em
+`production`. Cadastros fiscais reutilizáveis (perfil, regras, sequência e
+conexão) exigem usuário administrador.

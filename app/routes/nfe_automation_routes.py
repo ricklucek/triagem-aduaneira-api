@@ -1,7 +1,7 @@
 from flask import Blueprint, g, jsonify, request
 from marshmallow import ValidationError
 
-from ..auth import auth_required
+from ..auth import admin_required, auth_required
 from ..extensions import db
 from ..schemas.nfe_automation import (
     BulkNfeItemClassificationSchema,
@@ -75,7 +75,7 @@ def import_tax_rule_diagnostics(client_id: str):
 
 
 @client_import_tax_rule_bp.post("/<client_id>/import-tax-rules")
-@auth_required
+@admin_required
 def create_import_tax_rule(client_id: str):
     client_uuid = uuid_or_404(client_id)
     try:
@@ -101,7 +101,7 @@ def create_import_tax_rule(client_id: str):
 
 
 @client_import_tax_rule_bp.put("/<client_id>/import-tax-rules/<rule_id>")
-@auth_required
+@admin_required
 def update_import_tax_rule(client_id: str, rule_id: str):
     client_uuid = uuid_or_404(client_id)
     rule_uuid = uuid_or_404(rule_id)
@@ -133,7 +133,7 @@ def update_import_tax_rule(client_id: str, rule_id: str):
 
 
 @client_import_tax_rule_bp.delete("/<client_id>/import-tax-rules/<rule_id>")
-@auth_required
+@admin_required
 def deactivate_import_tax_rule(client_id: str, rule_id: str):
     client_uuid = uuid_or_404(client_id)
     rule_uuid = uuid_or_404(rule_id)

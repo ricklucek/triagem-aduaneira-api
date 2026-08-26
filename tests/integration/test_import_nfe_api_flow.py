@@ -114,7 +114,7 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
         f"/import-processes/{process_id}/nfe-draft/from-duimp",
         headers=headers,
         json={
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
             "number": 14422,
             "import_purpose": "resale",
@@ -278,7 +278,7 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
         f"/import-processes/{process_id}/nfe-workflow-state",
         headers=headers,
         query_string={
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
@@ -313,7 +313,7 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
         f"/clients/{importer_id}/fiscal-certificates",
         headers=headers,
         json={
-            "environment": "homologation",
+            "environment": "production",
             "provider": "gcp_secret_manager",
             "certificate_ref": "gcp:nfe-hom-client-test-pfx@1",
             "password_ref": "gcp:nfe-hom-client-test-password@1",
@@ -756,7 +756,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         f"/import-processes/{process_id}/nfe-draft/from-duimp",
         headers=headers,
         json={
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
             "import_purpose": "resale",
             "duimp_snapshot_id": snapshot_id,
@@ -803,7 +803,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         headers=headers,
         query_string={
             "import_purpose": "resale",
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
@@ -824,7 +824,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         "has_document_plan": False,
         "planned_documents_count": 0,
         "import_purpose": "resale",
-        "environment": "homologation",
+        "environment": "production",
         "series": "1",
     }
     assert workflow_body["next_action"] == "configure_number_sequence"
@@ -929,7 +929,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         f"/import-processes/{process_id}/nfe-draft/from-duimp",
         headers=headers,
         json={
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
             "import_purpose": "resale",
             "duimp_snapshot_id": snapshot_id,
@@ -997,7 +997,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert updated_document["operation_nature"] == "Importação para revenda"
     assert updated_document["presence_indicator"] == "9"
     assert updated_document["intermediary_indicator"] == "0"
-    assert updated_document["environment"] == "homologation"
+    assert updated_document["environment"] == "production"
     assert updated_document["series"] == "1"
     updated_issuer = updated["draft"]["fiscal_payload"]["issuer"]
     assert updated_issuer["state_registration"] == "1234567890"
@@ -1043,7 +1043,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         headers=headers,
         query_string={
             "import_purpose": "resale",
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
@@ -1098,7 +1098,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         headers=headers,
         query_string={
             "import_purpose": "resale",
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
@@ -1338,7 +1338,7 @@ def test_document_plan_groups_exporters_and_reconciles_shared_costs(api):
         headers=headers,
         query_string={
             "import_purpose": "resale",
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
@@ -1353,7 +1353,7 @@ def test_document_plan_groups_exporters_and_reconciles_shared_costs(api):
         headers=headers,
         json={
             "duimp_snapshot_id": snapshot_id,
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
@@ -1370,7 +1370,7 @@ def test_document_plan_groups_exporters_and_reconciles_shared_costs(api):
         headers=headers,
         json={
             "duimp_snapshot_id": snapshot_id,
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
@@ -1389,7 +1389,7 @@ def test_document_plan_groups_exporters_and_reconciles_shared_costs(api):
         f"/clients/{importer_id}/nfe-number-sequences",
         headers=headers,
         json={
-            "environment": "homologation",
+            "environment": "production",
             "model": "55",
             "series": "1",
             "current_number": 100,
@@ -1424,7 +1424,7 @@ def test_document_plan_groups_exporters_and_reconciles_shared_costs(api):
         headers=headers,
         query_string={
             "import_purpose": "resale",
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
@@ -1435,7 +1435,7 @@ def test_document_plan_groups_exporters_and_reconciles_shared_costs(api):
         f"/import-processes/{process_id}/nfe-draft/from-duimp",
         headers=headers,
         json={
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
             "import_purpose": "resale",
             "duimp_snapshot_id": snapshot_id,
@@ -1561,3 +1561,50 @@ def test_process_dashboard_groups_by_client_and_exposes_next_action(
     assert process["planned_documents_count"] == 0
     assert process["last_responsible"]["name"] == "Operador Teste"
     assert process["last_responsible"]["is_current_user"] is True
+
+
+def test_number_sequence_preserves_progress_and_rejects_regression(api):
+    client, headers, importer_id = api
+    created = client.put(
+        f"/clients/{importer_id}/nfe-number-sequences",
+        headers=headers,
+        json={
+            "environment": "production",
+            "model": "55",
+            "series": "1",
+            "current_number": 100,
+            "initial_number": 1,
+            "status": "active",
+        },
+    )
+    assert created.status_code == 200, created.get_json()
+
+    preserved = client.put(
+        f"/clients/{importer_id}/nfe-number-sequences",
+        headers=headers,
+        json={
+            "environment": "production",
+            "model": "55",
+            "series": "1",
+            "initial_number": 1,
+            "status": "active",
+        },
+    )
+    assert preserved.status_code == 200, preserved.get_json()
+    assert preserved.get_json()["current_number"] == 100
+
+    rejected = client.put(
+        f"/clients/{importer_id}/nfe-number-sequences",
+        headers=headers,
+        json={
+            "environment": "production",
+            "model": "55",
+            "series": "1",
+            "current_number": 99,
+            "initial_number": 1,
+            "status": "active",
+        },
+    )
+    assert rejected.status_code == 409
+    assert rejected.get_json()["error"] == "nfe_sequence_regression"
+    assert rejected.get_json()["minimum_safe_number"] == 100

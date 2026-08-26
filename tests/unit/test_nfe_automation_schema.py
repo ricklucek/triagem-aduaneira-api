@@ -16,6 +16,7 @@ def diagnostic_icms51_rule():
         "issuer_state": "SC",
         "import_purpose": "industrialization",
         "configuration_json": {
+            "cfop": "3101",
             "icms_origin": "1",
             "icms_cst": "51",
             "icms_deferment_rate": "100",
@@ -37,6 +38,7 @@ def test_accepts_icms00_with_nominal_rate():
         "issuer_state": "SP",
         "import_purpose": "resale",
         "configuration_json": {
+            "cfop": "3102",
             "icms_origin": "1",
             "icms_cst": "00",
             "icms_rate": "12",
@@ -78,6 +80,7 @@ def test_accepts_non_taxed_icms_rule_without_nominal_rate(cst):
         "issuer_state": "PR",
         "import_purpose": "resale",
         "configuration_json": {
+            "cfop": "3102",
             "icms_origin": "1",
             "icms_cst": cst,
             "icms_tax_treatment_confirmed": False,
@@ -96,6 +99,8 @@ def test_rejects_nominal_rate_for_non_taxed_icms_rule():
         "issuer_state": "PR",
         "import_purpose": "resale",
         "configuration_json": {
+            "cfop": "3102",
+            "icms_origin": "1",
             "icms_cst": "40",
             "icms_rate": "19.5",
         },
@@ -120,3 +125,33 @@ def test_checkpoint_4a_allows_client_first_process():
     )
     assert process["reference_code"] is None
     assert process["duimp_number"] is None
+
+
+@pytest.mark.parametrize(
+    ("schema", "payload"),
+    [
+        (FetchDuimpSchema(), {"provider_environment": "homologation"}),
+        (NfeWorkflowStateQuerySchema(), {"environment": "homologation"}),
+        (CreateNfeDraftFromDuimpSchema(), {"environment": "homologation"}),
+    ],
+)
+def test_checkpoint_4b_rejects_non_production_environments(schema, payload):
+    with pytest.raises(ValidationError):
+        schema.load(payload)
+
+
+def test_tax_rule_rejects_reduction_and_deferment_together():
+    payload = {
+        "name": "Tratamento inválido",
+        "issuer_state": "PR",
+        "import_purpose": "resale",
+        "configuration_json": {
+            "cfop": "3102",
+            "icms_origin": "1",
+            "icms_cst": "51",
+            "icms_base_reduction_rate": "100",
+            "icms_deferment_rate": "100",
+        },
+    }
+    with pytest.raises(ValidationError, match="não podem ser aplicados simultaneamente"):
+        ClientImportTaxRuleSchema().load(payload)

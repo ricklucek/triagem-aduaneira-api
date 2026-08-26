@@ -1,14 +1,17 @@
 from flask import Blueprint, g, jsonify
 from marshmallow import ValidationError
 
-from ..auth import auth_required
+from ..auth import admin_required, auth_required
 from ..extensions import db
 from ..models.import_process import NfeNumberSequence
 from ..schemas.import_process import (
     NfeNumberSequenceSchema,
     UpsertNfeNumberSequenceSchema,
 )
-from ..services.nfe_number_service import NfeNumberSequenceService
+from ..services.nfe_number_service import (
+    NfeNumberSequenceService,
+    NfeSequenceRegressionError,
+)
 from .route_helpers import (
     bad_request_response,
     json_payload,
@@ -50,7 +53,7 @@ def list_client_nfe_number_sequences(client_id: str):
 
 
 @nfe_number_sequence_bp.put("/<client_id>/nfe-number-sequences")
-@auth_required
+@admin_required
 def upsert_client_nfe_number_sequence(client_id: str):
     client_uuid = uuid_or_404(client_id)
 
@@ -61,7 +64,7 @@ def upsert_client_nfe_number_sequence(client_id: str):
             environment=data["environment"],
             model=data.get("model", "55"),
             series=data["series"],
-            current_number=data.get("current_number", 0),
+            current_number=data.get("current_number"),
             initial_number=data.get("initial_number", 1),
             max_number=data.get("max_number", 999999999),
             status=data.get("status", "active"),
@@ -71,6 +74,19 @@ def upsert_client_nfe_number_sequence(client_id: str):
     except ValidationError as exc:
         db.session.rollback()
         return validation_error_response(exc)
+    except NfeSequenceRegressionError as exc:
+        db.session.rollback()
+        return (
+            jsonify(
+                {
+                    "error": "nfe_sequence_regression",
+                    "message": str(exc),
+                    "requested_number": exc.requested,
+                    "minimum_safe_number": exc.minimum,
+                }
+            ),
+            409,
+        )
     except ValueError as exc:
         db.session.rollback()
         return bad_request_response(exc)
