@@ -457,6 +457,7 @@ def test_tax_rule_conflict_is_rejected_and_diagnosed(api):
         "priority": 100,
         "configuration_json": {
             "cfop": "3102",
+            "icms_origin": "1",
             "icms_rate": "12",
             "icms_cst": "90",
         },
