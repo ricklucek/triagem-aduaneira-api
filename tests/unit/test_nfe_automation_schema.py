@@ -131,7 +131,6 @@ def test_checkpoint_4a_allows_client_first_process():
     ("schema", "payload"),
     [
         (FetchDuimpSchema(), {"provider_environment": "homologation"}),
-        (NfeWorkflowStateQuerySchema(), {"environment": "homologation"}),
         (CreateNfeDraftFromDuimpSchema(), {"environment": "homologation"}),
     ],
 )
@@ -155,3 +154,8 @@ def test_tax_rule_rejects_reduction_and_deferment_together():
     }
     with pytest.raises(ValidationError, match="não podem ser aplicados simultaneamente"):
         ClientImportTaxRuleSchema().load(payload)
+
+
+def test_checkpoint_4b_keeps_legacy_workflow_environment_readable():
+    result = NfeWorkflowStateQuerySchema().load({"environment": "homologation"})
+    assert result["environment"] == "homologation"

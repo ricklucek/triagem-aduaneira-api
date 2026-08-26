@@ -117,10 +117,7 @@ class NfeWorkflowStateQuerySchema(Schema):
     )
     environment = fields.String(
         load_default=FiscalEnvironment.PRODUCTION.value,
-        validate=validate.OneOf(
-            [FiscalEnvironment.PRODUCTION.value],
-            error="Novas operações fiscais aceitam somente o ambiente production.",
-        ),
+        validate=validate.OneOf(FiscalEnvironment.values()),
     )
     series = fields.String(load_default="1", validate=validate.Length(min=1, max=10))
 

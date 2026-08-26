@@ -454,3 +454,9 @@ fiscal, com regras próprias.
   `nfe_sequence_regression` e não altera a sequência;
 - nenhuma migration é executada pela aplicação: upgrades de banco permanecem sob
   controle do ambiente responsável pela implantação.
+
+
+Processos e rascunhos legados preservam o ambiente persistido. A consulta do
+workflow ainda aceita `homologation` para leitura histórica; essa exceção não
+libera captura, criação de rascunho, conexão ou sequência novas fora de
+`production`.
