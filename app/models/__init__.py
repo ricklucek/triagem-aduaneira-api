@@ -7,3 +7,4 @@ from app.models.user import *
 from app.models.import_process import *
 from app.models.nfe_issuance import *
 from app.models.nfe_tax_rule import *
+from app.models.fiscal_reference import *

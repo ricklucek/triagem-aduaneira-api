@@ -1,0 +1,167 @@
+from datetime import date, datetime, timedelta
+
+import jwt
+import pytest
+
+from app import create_app
+from app.extensions import db
+from app.models import FiscalCountry, FiscalMunicipality, Organization, User
+
+
+class TestConfig:
+    TESTING = True
+    SECRET_KEY = "fiscal-reference-test-secret"
+    SQLALCHEMY_DATABASE_URI = "sqlite://"
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+
+@pytest.fixture
+def api():
+    app = create_app(TestConfig)
+    with app.app_context():
+        db.create_all()
+        organization = Organization(nome="Organização Teste", slug="org-referencia")
+        db.session.add(organization)
+        db.session.flush()
+        user = User(
+            organization_id=organization.id,
+            nome="Operador Teste",
+            email="referencia@example.invalid",
+            role="operacao",
+            ativo=True,
+        )
+        user.set_password("test-password")
+        db.session.add_all(
+            [
+                user,
+                FiscalMunicipality(
+                    code="3550308",
+                    name="São Paulo",
+                    state="SP",
+                    active=True,
+                    updated_at=datetime.utcnow(),
+                ),
+                FiscalMunicipality(
+                    code="4106902",
+                    name="Curitiba",
+                    state="PR",
+                    active=True,
+                    updated_at=datetime.utcnow(),
+                ),
+                FiscalMunicipality(
+                    code="9999999",
+                    name="Município desativado",
+                    state="PR",
+                    active=False,
+                    updated_at=datetime.utcnow(),
+                ),
+                FiscalCountry(
+                    bacen_code="1600",
+                    iso_alpha_2="CN",
+                    iso_alpha_3="CHN",
+                    name="China",
+                    valid_from=date(2000, 1, 1),
+                    active=True,
+                    updated_at=datetime.utcnow(),
+                ),
+                FiscalCountry(
+                    bacen_code="9998",
+                    iso_alpha_2="ZZ",
+                    iso_alpha_3="ZZZ",
+                    name="País expirado",
+                    valid_until=date(2010, 12, 31),
+                    active=True,
+                    updated_at=datetime.utcnow(),
+                ),
+            ]
+        )
+        db.session.commit()
+
+        now = datetime.utcnow()
+        token = jwt.encode(
+            {
+                "sub": str(user.id),
+                "email": user.email,
+                "role": user.role,
+                "principal_type": "user",
+                "type": "access",
+                "iat": now,
+                "exp": now + timedelta(hours=1),
+            },
+            app.config["SECRET_KEY"],
+            algorithm="HS256",
+        )
+        yield app.test_client(), {"Authorization": f"Bearer {token}"}
+        db.session.remove()
+        db.drop_all()
+
+
+def test_search_municipalities_is_accent_insensitive_and_filters_state(api):
+    client, headers = api
+    response = client.get(
+        "/fiscal-reference/municipalities?q=sao&state=sp",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["state"] == "SP"
+    assert body["items"] == [
+        {
+            "active": True,
+            "code": "3550308",
+            "name": "São Paulo",
+            "state": "SP",
+            "updated_at": body["items"][0]["updated_at"],
+        }
+    ]
+
+
+def test_search_municipalities_accepts_ibge_code(api):
+    client, headers = api
+    response = client.get(
+        "/fiscal-reference/municipalities?q=4106902",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["items"][0]["name"] == "Curitiba"
+
+
+def test_search_countries_respects_nfe_emission_date(api):
+    client, headers = api
+    current = client.get(
+        "/fiscal-reference/countries?q=china&active_on=2026-08-25",
+        headers=headers,
+    )
+    expired = client.get(
+        "/fiscal-reference/countries?q=expirado&active_on=2026-08-25",
+        headers=headers,
+    )
+    historical = client.get(
+        "/fiscal-reference/countries?q=expirado&active_on=2010-01-01",
+        headers=headers,
+    )
+
+    assert current.status_code == 200
+    assert current.get_json()["items"][0]["bacen_code"] == "1600"
+    assert expired.get_json()["items"] == []
+    assert historical.get_json()["items"][0]["bacen_code"] == "9998"
+
+
+def test_reference_endpoints_require_authentication(api):
+    client, _ = api
+
+    assert client.get("/fiscal-reference/municipalities?q=curitiba").status_code == 401
+    assert client.get("/fiscal-reference/countries?q=china").status_code == 401
+
+
+def test_country_search_rejects_invalid_active_on(api):
+    client, headers = api
+    response = client.get(
+        "/fiscal-reference/countries?q=china&active_on=25-08-2026",
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "validation_error"
