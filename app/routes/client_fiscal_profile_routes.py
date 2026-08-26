@@ -1,7 +1,7 @@
 from flask import Blueprint, g, jsonify
 from marshmallow import ValidationError
 
-from ..auth import auth_required
+from ..auth import admin_required, auth_required
 from ..extensions import db
 from ..schemas.client import ClientFiscalProfileSchema
 from ..services.import_process import ImportNfeService
@@ -38,7 +38,7 @@ def get_client_fiscal_profile(client_id: str):
 
 
 @client_fiscal_profile_bp.put("/<client_id>/fiscal-profile")
-@auth_required
+@admin_required
 def upsert_client_fiscal_profile(client_id: str):
     client_uuid = uuid_or_404(client_id)
     payload = json_payload()

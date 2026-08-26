@@ -4,7 +4,7 @@ Este fluxo cobre a consulta da DUIMP, criação do rascunho fiscal, cálculo dos
 tributos, geração da chave, geração da NF-e 4.00 e validação XSD. Assinatura
 com certificado e transmissão à SEFAZ ficam propositalmente fora desta etapa.
 
-Todos os endpoints exigem `Authorization: Bearer <accessToken>`.
+Todos os endpoints exigem `Authorization: Bearer <accessToken>`. Alterações de perfil fiscal, sequência numérica, regras tributárias e conexão com o Portal Único exigem usuário `admin`.
 
 ## 1. Preparar o ambiente
 
@@ -99,8 +99,6 @@ POST /import-processes
 ```json
 {
   "importer_id": "UUID_DO_CLIENTE",
-  "reference_code": "PROCESSO-INTERNO-001",
-  "duimp_number": "26BR0000000000-1",
   "source": "portal_unico"
 }
 ```
@@ -113,7 +111,6 @@ POST /import-processes/{process_id}/duimp/fetch
 
 ```json
 {
-  "provider_environment": "production",
   "source_provider": "portal_unico",
   "enrich_catalog": true
 }
@@ -153,11 +150,8 @@ Exemplo mínimo para importação própria:
 
 ```json
 {
-  "environment": "homologation",
-  "provider_environment": "production",
   "series": "1",
   "number": 123,
-  "import_purpose": "resale",
   "source_provider": "portal_unico",
   "duimp_snapshot_id": "UUID_RETORNADO_NA_CAPTURA",
   "tax_configuration": {
@@ -446,5 +440,23 @@ fiscal, com regras próprias.
   regras de negócio aplicadas pela autorização da SEFAZ.
 - O cálculo usa parâmetros explícitos porque ICMS e benefícios dependem da UF,
   NCM, finalidade, regime e enquadramento do cliente.
-- Antes de produção, compare uma amostra representativa com o cálculo do
-  despachante/ERP e execute a autorização no ambiente de homologação da SEFAZ.
+- Novos processos são fixados em produção para NF-e e Portal Único. Antes de
+  autorizar documentos, compare uma amostra representativa com o cálculo do
+  despachante/ERP e valide o procedimento operacional no seu ambiente controlado.
+
+
+## Checkpoint 4B — invariantes operacionais
+
+- novos fluxos aceitam somente `production` para NF-e e Portal Único;
+- o modelo é 55 e a série operacional padrão é 1;
+- atualizar uma sequência sem `current_number` preserva o progresso existente;
+- reduzir `current_number` abaixo do número atual ou do último reservado retorna
+  `nfe_sequence_regression` e não altera a sequência;
+- nenhuma migration é executada pela aplicação: upgrades de banco permanecem sob
+  controle do ambiente responsável pela implantação.
+
+
+Processos e rascunhos legados preservam o ambiente persistido. A consulta do
+workflow ainda aceita `homologation` para leitura histórica; essa exceção não
+libera captura, criação de rascunho, conexão ou sequência novas fora de
+`production`.

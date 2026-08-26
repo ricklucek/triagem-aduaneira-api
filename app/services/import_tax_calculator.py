@@ -224,6 +224,7 @@ class ImportTaxCalculator:
             }
 
             taxes = deepcopy(item.get("tax_payload") or item.get("taxes") or {})
+            source_icms = deepcopy(taxes.get("icms") or {})
             ii = self._tax(taxes, "ii")
             ipi = self._tax(taxes, "ipi")
             pis = self._tax(taxes, "pis")
@@ -360,7 +361,20 @@ class ImportTaxCalculator:
                 "st_base": "0.00",
                 "st_rate": "0.0000",
                 "st_value": "0.00",
+                "duimp_value": (
+                    source_icms.get("duimp_value")
+                    if source_icms.get("duimp_value") not in (None, "")
+                    else source_icms.get("value")
+                ),
+                "calculation_source": (
+                    source_icms.get("calculation_source") or "tax_rule"
+                ),
             }
+            if taxes["icms"].get("duimp_value") not in (None, ""):
+                taxes["icms"]["difference"] = self._format_money(
+                    self._money(taxes["icms"].get("value"))
+                    - self._money(taxes["icms"]["duimp_value"])
+                )
             benefit_code = item.get("benefit_code") or configuration.get(
                 "icms_benefit_code"
             )

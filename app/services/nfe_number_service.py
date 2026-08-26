@@ -7,6 +7,16 @@ from app.models.import_process import (
 )
 
 
+class NfeSequenceRegressionError(ValueError):
+    def __init__(self, *, requested: int, minimum: int):
+        self.requested = requested
+        self.minimum = minimum
+        super().__init__(
+            f"O número atual não pode regredir para {requested}. "
+            f"O menor valor seguro é {minimum}."
+        )
+
+
 class NfeNumberSequenceService:
     def __init__(self, current_user):
         self.current_user = current_user
@@ -103,22 +113,23 @@ class NfeNumberSequenceService:
         environment: str,
         model: str,
         series: str,
-        current_number: int = 0,
+        current_number: int | None = None,
         initial_number: int = 1,
         max_number: int = 999999999,
         status: str = "active",
-    ):
+    ) -> NfeNumberSequence:
+        if environment != "production":
+            raise ValueError(
+                "Novas sequências fiscais aceitam somente o ambiente production."
+            )
         if initial_number < 1:
             raise ValueError("Número inicial da sequência deve ser maior ou igual a 1.")
-
         if max_number > 999999999:
             raise ValueError("Número máximo da NF-e não pode ultrapassar 999999999.")
-
-        if current_number < 0:
+        if max_number < initial_number:
+            raise ValueError("Número máximo não pode ser menor que o número inicial.")
+        if current_number is not None and current_number < 0:
             raise ValueError("Número atual da sequência não pode ser negativo.")
-
-        if current_number >= max_number:
-            raise ValueError("Número atual deve ser menor que o número máximo.")
 
         sequence = (
             NfeNumberSequence.query
@@ -129,12 +140,13 @@ class NfeNumberSequenceService:
                 NfeNumberSequence.model == model,
                 NfeNumberSequence.series == series,
             )
+            .with_for_update()
             .first()
         )
 
         now = datetime.now()
-
-        if not sequence:
+        is_new = sequence is None
+        if is_new:
             sequence = NfeNumberSequence(
                 organization_id=self.current_user.organization_id,
                 client_id=client_id,
@@ -147,10 +159,23 @@ class NfeNumberSequenceService:
             )
             db.session.add(sequence)
 
-        sequence.current_number = current_number
+        persisted_current = 0 if is_new else int(sequence.current_number or 0)
+        last_reserved = 0 if is_new else int(sequence.last_reserved_number or 0)
+        minimum_safe = max(persisted_current, last_reserved, initial_number - 1)
+        requested_current = minimum_safe if current_number is None else current_number
+        if requested_current < minimum_safe:
+            raise NfeSequenceRegressionError(
+                requested=requested_current,
+                minimum=minimum_safe,
+            )
+        if requested_current > max_number:
+            raise ValueError(
+                "Número atual não pode ser maior que o número máximo da sequência."
+            )
+
+        sequence.current_number = requested_current
         sequence.initial_number = initial_number
         sequence.max_number = max_number
         sequence.status = status
         sequence.updated_at = now
-
         return sequence

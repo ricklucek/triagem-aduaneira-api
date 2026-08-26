@@ -3,6 +3,7 @@ from decimal import Decimal, InvalidOperation
 from marshmallow import EXCLUDE, Schema, ValidationError, fields, validate, validates_schema
 
 from ..models import FiscalEnvironment, ImportPurpose
+from ..nfe_reference import NFE_TRANSPORT_MODE_CODES
 from .import_process import (
     NfeAdditionalInfoSchema,
     NfeDocumentOptionsSchema,
@@ -43,7 +44,10 @@ class ClientImportTaxRuleSchema(Schema):
         allow_none=True,
         validate=validate.Regexp(r"^[0-9]{2,8}$"),
     )
-    priority = fields.Integer(load_default=0)
+    priority = fields.Integer(
+        load_default=0,
+        validate=validate.Range(min=0, max=1000000),
+    )
     configuration_json = fields.Dict(required=True)
     additional_cost_defaults = fields.Dict(load_default=None, allow_none=True)
     transport_defaults = fields.Dict(load_default=None, allow_none=True)
@@ -90,6 +94,54 @@ class ClientImportTaxRuleSchema(Schema):
                         {field_name: exc.messages},
                         field_name="configuration_json",
                     ) from exc
+        cfop = str(configuration.get("cfop") or "")
+        if not cfop.isdigit() or len(cfop) != 4:
+            raise ValidationError(
+                "configuration_json.cfop deve conter 4 dígitos.",
+                field_name="configuration_json",
+            )
+        origin = str(configuration.get("icms_origin") or "")
+        if origin not in set("012345678"):
+            raise ValidationError(
+                "configuration_json.icms_origin deve ser um dígito entre 0 e 8.",
+                field_name="configuration_json",
+            )
+        for tax_field in ("ipi_cst", "ipi_zero_rate_cst", "pis_cst", "cofins_cst"):
+            tax_code = configuration.get(tax_field)
+            if tax_code is not None and (
+                not str(tax_code).isdigit() or len(str(tax_code)) != 2
+            ):
+                raise ValidationError(
+                    f"configuration_json.{tax_field} deve conter 2 dígitos.",
+                    field_name="configuration_json",
+                )
+
+        def decimal_rate(field_name):
+            raw_value = configuration.get(field_name)
+            if raw_value in (None, ""):
+                return Decimal("0")
+            try:
+                value = Decimal(str(raw_value))
+            except (InvalidOperation, TypeError, ValueError):
+                raise ValidationError(
+                    f"configuration_json.{field_name} deve ser numérico.",
+                    field_name="configuration_json",
+                )
+            if not Decimal("0") <= value <= Decimal("100"):
+                raise ValidationError(
+                    f"configuration_json.{field_name} deve estar entre 0 e 100.",
+                    field_name="configuration_json",
+                )
+            return value
+
+        base_reduction_rate = decimal_rate("icms_base_reduction_rate")
+        deferment_rate = decimal_rate("icms_deferment_rate")
+        if base_reduction_rate > 0 and deferment_rate > 0:
+            raise ValidationError(
+                "Redução de base e diferimento de ICMS não podem ser aplicados simultaneamente.",
+                field_name="configuration_json",
+            )
+
         cst = str(configuration.get("icms_cst") or "90").zfill(2)
         supported_csts = {"00", "40", "41", "50", "51", "90"}
         if cst not in supported_csts:
@@ -113,18 +165,6 @@ class ClientImportTaxRuleSchema(Schema):
                 )
             return
         if raw_rate in (None, "") and cst == "51":
-            try:
-                base_reduction_rate = Decimal(
-                    str(configuration.get("icms_base_reduction_rate"))
-                )
-            except (InvalidOperation, TypeError, ValueError):
-                base_reduction_rate = Decimal("0")
-            try:
-                deferment_rate = Decimal(
-                    str(configuration.get("icms_deferment_rate"))
-                )
-            except (InvalidOperation, TypeError, ValueError):
-                deferment_rate = Decimal("0")
             if (
                 deferment_rate != Decimal("100")
                 and base_reduction_rate != Decimal("100")
@@ -159,13 +199,17 @@ class UpdateClientImportTaxRuleSchema(ClientImportTaxRuleSchema):
 class NfeContextQuerySchema(Schema):
     duimp_snapshot_id = fields.UUID(load_default=None, allow_none=True)
     import_purpose = fields.String(
-        required=True,
+        load_default=None,
+        allow_none=True,
         validate=validate.OneOf(ImportPurpose.values()),
     )
     provider_environment = fields.String(
         load_default=None,
         allow_none=True,
-        validate=validate.OneOf(FiscalEnvironment.values()),
+        validate=validate.OneOf(
+            [FiscalEnvironment.PRODUCTION.value],
+            error="Novas operações fiscais aceitam somente o ambiente production.",
+        ),
     )
     refresh_external = fields.Boolean(load_default=False)
 
@@ -173,6 +217,23 @@ class NfeContextQuerySchema(Schema):
 class ResolveNfeContextSchema(NfeContextQuerySchema):
     refresh_external = fields.Boolean(load_default=True)
     overrides = fields.Dict(load_default=dict)
+
+    @validates_schema
+    def validate_transport_mode_code(self, data, **kwargs):
+        overrides = data.get("overrides") or {}
+        value = overrides.get("transport_mode_code")
+        if value in (None, ""):
+            return
+        if str(value).strip() not in NFE_TRANSPORT_MODE_CODES:
+            raise ValidationError(
+                {
+                    "transport_mode_code": [
+                        "Selecione uma via de transporte válida (códigos 1 a 13)."
+                    ]
+                },
+                field_name="overrides",
+            )
+
 
 class NfeItemClassificationQuerySchema(Schema):
     duimp_snapshot_id = fields.UUID(load_default=None, allow_none=True)
@@ -209,4 +270,3 @@ class BulkNfeItemClassificationSchema(Schema):
                 "Cada item da DUIMP deve aparecer apenas uma vez.",
                 field_name="items",
             )
-

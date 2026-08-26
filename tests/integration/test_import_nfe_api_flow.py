@@ -114,7 +114,7 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
         f"/import-processes/{process_id}/nfe-draft/from-duimp",
         headers=headers,
         json={
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
             "number": 14422,
             "import_purpose": "resale",
@@ -278,17 +278,15 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
         f"/import-processes/{process_id}/nfe-workflow-state",
         headers=headers,
         query_string={
-            "import_purpose": "resale",
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
     assert workflow_after_edit.status_code == 200
-    # Este cenário usa tax_configuration ad hoc, sem regra persistida. O
-    # workflow preserva corretamente a precedência desse pré-requisito.
-    assert workflow_after_edit.get_json()["next_action"] == (
-        "configure_tax_rule"
-    )
+    # A ausência de regra persistida não volta a bloquear o processo. Este
+    # cenário legado ainda possui dados de contexto não normalizados e, por
+    # isso, a próxima ação válida passa a ser a complementação do contexto.
+    assert workflow_after_edit.get_json()["next_action"] == "resolve_context"
 
     replacement_xml_response = client.post(
         f"/nfe-drafts/{draft_id}/generate-xml",
@@ -315,7 +313,7 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
         f"/clients/{importer_id}/fiscal-certificates",
         headers=headers,
         json={
-            "environment": "homologation",
+            "environment": "production",
             "provider": "gcp_secret_manager",
             "certificate_ref": "gcp:nfe-hom-client-test-pfx@1",
             "password_ref": "gcp:nfe-hom-client-test-password@1",
@@ -446,6 +444,103 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
         assert events[0].current_status == "signed"
         assert "certificate_ref" not in events[0].event_metadata
         assert "password_ref" not in events[0].event_metadata
+
+
+def test_tax_rule_conflict_is_rejected_and_diagnosed(api):
+    client, headers, importer_id = api
+    payload = {
+        "name": "PR revenda padrão A",
+        "issuer_state": "PR",
+        "import_purpose": "resale",
+        "import_modality": "direct",
+        "tax_regime": "3",
+        "priority": 100,
+        "configuration_json": {
+            "cfop": "3102",
+            "icms_origin": "1",
+            "icms_rate": "12",
+            "icms_cst": "90",
+        },
+    }
+
+    first = client.post(
+        f"/clients/{importer_id}/import-tax-rules",
+        headers=headers,
+        json=payload,
+    )
+    assert first.status_code == 201, first.get_json()
+
+    conflicting = client.post(
+        f"/clients/{importer_id}/import-tax-rules",
+        headers=headers,
+        json={**payload, "name": "PR revenda padrão B"},
+    )
+    assert conflicting.status_code == 409
+    conflict_body = conflicting.get_json()
+    assert conflict_body["error"] == "tax_rule_conflict"
+    assert conflict_body["conflicts"] == [
+        {
+            "id": first.get_json()["id"],
+            "name": "PR revenda padrão A",
+            "issuer_state": "PR",
+            "import_purpose": "resale",
+            "import_modality": "direct",
+            "tax_regime": "3",
+            "ncm_pattern": None,
+            "priority": 100,
+            "effective_from": None,
+            "effective_until": None,
+        }
+    ]
+
+    diagnostics = client.get(
+        f"/clients/{importer_id}/import-tax-rules/diagnostics",
+        headers=headers,
+    )
+    assert diagnostics.status_code == 200
+    assert diagnostics.get_json()["summary"] == {
+        "total": 1,
+        "active": 1,
+        "inactive": 0,
+        "conflict_count": 0,
+    }
+
+
+def test_missing_tax_rule_does_not_block_duimp_preparation(api):
+    client, headers, importer_id = api
+    profile = client.put(
+        f"/clients/{importer_id}/fiscal-profile",
+        headers=headers,
+        json={
+            "legal_name": "Importadora Teste Ltda",
+            "cnpj": "00000000000191",
+            "state_registration": "1234567890",
+            "tax_regime": "3",
+            "street": "Rua de Teste",
+            "number": "100",
+            "district": "Centro",
+            "city_code": "4106902",
+            "city_name": "Curitiba",
+            "state": "PR",
+            "zip_code": "80000000",
+        },
+    )
+    assert profile.status_code == 200
+    process = client.post(
+        "/import-processes",
+        headers=headers,
+        json={"importer_id": importer_id, "source": "portal_unico"},
+    )
+    assert process.status_code == 201
+
+    workflow = client.get(
+        f"/import-processes/{process.get_json()['id']}/nfe-workflow-state",
+        headers=headers,
+    )
+    assert workflow.status_code == 200
+    body = workflow.get_json()
+    assert body["prerequisites"]["has_active_tax_rule"] is False
+    assert body["next_action"] == "configure_number_sequence"
 
 
 def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
@@ -662,7 +757,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         f"/import-processes/{process_id}/nfe-draft/from-duimp",
         headers=headers,
         json={
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
             "import_purpose": "resale",
             "duimp_snapshot_id": snapshot_id,
@@ -709,7 +804,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         headers=headers,
         query_string={
             "import_purpose": "resale",
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
@@ -721,13 +816,16 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert workflow_body["prerequisites"] == {
         "has_fiscal_profile": True,
         "has_active_tax_rule": True,
+        "active_tax_rule_count": 2,
+        "tax_rule_conflict_count": 0,
         "has_number_sequence": False,
+        "has_provider_connection": False,
         "has_item_classification": False,
         "item_classification_ready": False,
         "has_document_plan": False,
         "planned_documents_count": 0,
         "import_purpose": "resale",
-        "environment": "homologation",
+        "environment": "production",
         "series": "1",
     }
     assert workflow_body["next_action"] == "configure_number_sequence"
@@ -832,7 +930,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         f"/import-processes/{process_id}/nfe-draft/from-duimp",
         headers=headers,
         json={
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
             "import_purpose": "resale",
             "duimp_snapshot_id": snapshot_id,
@@ -900,7 +998,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert updated_document["operation_nature"] == "Importação para revenda"
     assert updated_document["presence_indicator"] == "9"
     assert updated_document["intermediary_indicator"] == "0"
-    assert updated_document["environment"] == "homologation"
+    assert updated_document["environment"] == "production"
     assert updated_document["series"] == "1"
     updated_issuer = updated["draft"]["fiscal_payload"]["issuer"]
     assert updated_issuer["state_registration"] == "1234567890"
@@ -946,7 +1044,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         headers=headers,
         query_string={
             "import_purpose": "resale",
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
@@ -965,8 +1063,9 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert [
         (step["key"], step["status"], step["can_view"])
         for step in classified_workflow_body["steps"]
-    ] == [
-        ("duimp", "completed", True),
+        ] == [
+            ("client", "completed", True),
+            ("duimp", "completed", True),
         ("context", "completed", True),
         ("purposes", "completed", True),
         ("planning", "current", True),
@@ -1000,7 +1099,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         headers=headers,
         query_string={
             "import_purpose": "resale",
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
@@ -1014,6 +1113,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         (step["key"], step["status"], step["can_view"])
         for step in planned_workflow_body["steps"]
     ] == [
+        ("client", "completed", True),
         ("duimp", "completed", True),
         ("context", "completed", True),
         ("purposes", "completed", True),
@@ -1239,7 +1339,7 @@ def test_document_plan_groups_exporters_and_reconciles_shared_costs(api):
         headers=headers,
         query_string={
             "import_purpose": "resale",
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
@@ -1254,7 +1354,7 @@ def test_document_plan_groups_exporters_and_reconciles_shared_costs(api):
         headers=headers,
         json={
             "duimp_snapshot_id": snapshot_id,
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
@@ -1271,7 +1371,7 @@ def test_document_plan_groups_exporters_and_reconciles_shared_costs(api):
         headers=headers,
         json={
             "duimp_snapshot_id": snapshot_id,
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
@@ -1290,7 +1390,7 @@ def test_document_plan_groups_exporters_and_reconciles_shared_costs(api):
         f"/clients/{importer_id}/nfe-number-sequences",
         headers=headers,
         json={
-            "environment": "homologation",
+            "environment": "production",
             "model": "55",
             "series": "1",
             "current_number": 100,
@@ -1325,7 +1425,7 @@ def test_document_plan_groups_exporters_and_reconciles_shared_costs(api):
         headers=headers,
         query_string={
             "import_purpose": "resale",
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
         },
     )
@@ -1336,7 +1436,7 @@ def test_document_plan_groups_exporters_and_reconciles_shared_costs(api):
         f"/import-processes/{process_id}/nfe-draft/from-duimp",
         headers=headers,
         json={
-            "environment": "homologation",
+            "environment": "production",
             "series": "1",
             "import_purpose": "resale",
             "duimp_snapshot_id": snapshot_id,
@@ -1413,9 +1513,7 @@ def test_process_dashboard_groups_by_client_and_exposes_next_action(
         headers=headers,
         json={
             "importer_id": str(second_client.id),
-            "reference_code": "PAINEL-CLIENTE-001",
-            "duimp_number": "26BR0000999999-1",
-            "source": "manual",
+            "source": "portal_unico",
         },
     )
     assert created.status_code == 201
@@ -1457,8 +1555,57 @@ def test_process_dashboard_groups_by_client_and_exposes_next_action(
     assert processes.status_code == 200
     process = processes.get_json()["items"][0]
     assert process["importer"]["name"] == "Cliente Painel"
-    assert process["next_action"] == "fetch_duimp"
+    assert process["reference_code"].startswith("NFE-")
+    assert process["duimp_number"] is None
+    assert process["next_action"] == "configure_fiscal_profile"
     assert process["pending"] is True
     assert process["planned_documents_count"] == 0
     assert process["last_responsible"]["name"] == "Operador Teste"
     assert process["last_responsible"]["is_current_user"] is True
+
+
+def test_number_sequence_preserves_progress_and_rejects_regression(api):
+    client, headers, importer_id = api
+    created = client.put(
+        f"/clients/{importer_id}/nfe-number-sequences",
+        headers=headers,
+        json={
+            "environment": "production",
+            "model": "55",
+            "series": "1",
+            "current_number": 100,
+            "initial_number": 1,
+            "status": "active",
+        },
+    )
+    assert created.status_code == 200, created.get_json()
+
+    preserved = client.put(
+        f"/clients/{importer_id}/nfe-number-sequences",
+        headers=headers,
+        json={
+            "environment": "production",
+            "model": "55",
+            "series": "1",
+            "initial_number": 1,
+            "status": "active",
+        },
+    )
+    assert preserved.status_code == 200, preserved.get_json()
+    assert preserved.get_json()["current_number"] == 100
+
+    rejected = client.put(
+        f"/clients/{importer_id}/nfe-number-sequences",
+        headers=headers,
+        json={
+            "environment": "production",
+            "model": "55",
+            "series": "1",
+            "current_number": 99,
+            "initial_number": 1,
+            "status": "active",
+        },
+    )
+    assert rejected.status_code == 409
+    assert rejected.get_json()["error"] == "nfe_sequence_regression"
+    assert rejected.get_json()["minimum_safe_number"] == 100

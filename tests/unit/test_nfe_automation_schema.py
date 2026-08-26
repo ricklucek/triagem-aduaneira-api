@@ -2,6 +2,12 @@ import pytest
 from marshmallow import ValidationError
 
 from app.schemas.nfe_automation import ClientImportTaxRuleSchema
+from app.schemas.import_process import (
+    CreateImportProcessSchema,
+    CreateNfeDraftFromDuimpSchema,
+    FetchDuimpSchema,
+    NfeWorkflowStateQuerySchema,
+)
 
 
 def diagnostic_icms51_rule():
@@ -10,6 +16,7 @@ def diagnostic_icms51_rule():
         "issuer_state": "SC",
         "import_purpose": "industrialization",
         "configuration_json": {
+            "cfop": "3101",
             "icms_origin": "1",
             "icms_cst": "51",
             "icms_deferment_rate": "100",
@@ -31,6 +38,7 @@ def test_accepts_icms00_with_nominal_rate():
         "issuer_state": "SP",
         "import_purpose": "resale",
         "configuration_json": {
+            "cfop": "3102",
             "icms_origin": "1",
             "icms_cst": "00",
             "icms_rate": "12",
@@ -72,6 +80,7 @@ def test_accepts_non_taxed_icms_rule_without_nominal_rate(cst):
         "issuer_state": "PR",
         "import_purpose": "resale",
         "configuration_json": {
+            "cfop": "3102",
             "icms_origin": "1",
             "icms_cst": cst,
             "icms_tax_treatment_confirmed": False,
@@ -90,6 +99,8 @@ def test_rejects_nominal_rate_for_non_taxed_icms_rule():
         "issuer_state": "PR",
         "import_purpose": "resale",
         "configuration_json": {
+            "cfop": "3102",
+            "icms_origin": "1",
             "icms_cst": "40",
             "icms_rate": "19.5",
         },
@@ -97,3 +108,54 @@ def test_rejects_nominal_rate_for_non_taxed_icms_rule():
 
     with pytest.raises(ValidationError, match="não aceita alíquota nominal"):
         ClientImportTaxRuleSchema().load(payload)
+
+
+def test_checkpoint_4a_defaults_new_operations_to_production():
+    assert FetchDuimpSchema().load({})["provider_environment"] == "production"
+    assert NfeWorkflowStateQuerySchema().load({})["environment"] == "production"
+    draft = CreateNfeDraftFromDuimpSchema().load({})
+    assert draft["environment"] == "production"
+    assert draft["series"] == "1"
+    assert draft["import_purpose"] is None
+
+
+def test_checkpoint_4a_allows_client_first_process():
+    process = CreateImportProcessSchema().load(
+        {"importer_id": "11111111-1111-1111-1111-111111111111"}
+    )
+    assert process["reference_code"] is None
+    assert process["duimp_number"] is None
+
+
+@pytest.mark.parametrize(
+    ("schema", "payload"),
+    [
+        (FetchDuimpSchema(), {"provider_environment": "homologation"}),
+        (CreateNfeDraftFromDuimpSchema(), {"environment": "homologation"}),
+    ],
+)
+def test_checkpoint_4b_rejects_non_production_environments(schema, payload):
+    with pytest.raises(ValidationError):
+        schema.load(payload)
+
+
+def test_tax_rule_rejects_reduction_and_deferment_together():
+    payload = {
+        "name": "Tratamento inválido",
+        "issuer_state": "PR",
+        "import_purpose": "resale",
+        "configuration_json": {
+            "cfop": "3102",
+            "icms_origin": "1",
+            "icms_cst": "51",
+            "icms_base_reduction_rate": "100",
+            "icms_deferment_rate": "100",
+        },
+    }
+    with pytest.raises(ValidationError, match="não podem ser aplicados simultaneamente"):
+        ClientImportTaxRuleSchema().load(payload)
+
+
+def test_checkpoint_4b_keeps_legacy_workflow_environment_readable():
+    result = NfeWorkflowStateQuerySchema().load({"environment": "homologation"})
+    assert result["environment"] == "homologation"

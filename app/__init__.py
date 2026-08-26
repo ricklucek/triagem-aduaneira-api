@@ -37,6 +37,8 @@ def create_app(config_object=Config):
         client_import_tax_rule_bp,
         nfe_context_bp,
     )
+    from .routes.nfe_carrier_routes import nfe_carrier_bp
+    from .routes.fiscal_reference_routes import fiscal_reference_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(scope_bp)
@@ -54,7 +56,9 @@ def create_app(config_object=Config):
     app.register_blueprint(nfe_number_sequence_bp)
     app.register_blueprint(client_import_tax_rule_bp)
     app.register_blueprint(nfe_context_bp)
-
+    app.register_blueprint(nfe_carrier_bp)
+    app.register_blueprint(fiscal_reference_bp)
+    
     @app.get("/health")
     def health():
         return {"status": "ok"}

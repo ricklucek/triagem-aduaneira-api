@@ -10,6 +10,21 @@ def json_payload() -> dict:
 
 
 def validation_error_response(exc: ValidationError):
+    environment_fields = {"environment", "provider_environment"}
+    if environment_fields.intersection(exc.messages):
+        return (
+            jsonify(
+                {
+                    "error": "environment_not_allowed",
+                    "message": (
+                        "Novas operações de NF-e e Portal Único aceitam "
+                        "somente o ambiente production."
+                    ),
+                    "messages": exc.messages,
+                }
+            ),
+            400,
+        )
     return jsonify({"error": "validation_error", "messages": exc.messages}), 400
 
 
