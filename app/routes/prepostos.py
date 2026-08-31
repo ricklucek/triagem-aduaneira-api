@@ -2,6 +2,7 @@ from flask import Blueprint, g, jsonify, request
 from marshmallow import ValidationError
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
+from uuid import UUID
 
 from app.auth import admin_required
 from app.extensions import db
@@ -35,6 +36,10 @@ from app.schemas import (
 
 prepostos_bp = Blueprint("prepostos", __name__, url_prefix="/prepostos")
 
+
+def as_uuid(value):
+    return value if isinstance(value, UUID) else UUID(str(value))
+
 def json_error(message: str, status_code: int = 400, errors=None):
     payload = {"message": message}
     if errors is not None:
@@ -44,7 +49,7 @@ def json_error(message: str, status_code: int = 400, errors=None):
 
 def get_preposto_or_404(preposto_id: str):
     preposto = Preposto.query.filter_by(
-        id=preposto_id,
+        id=as_uuid(preposto_id),
         organization_id=g.current_user.organization_id,
     ).first()
     if not preposto:
@@ -53,7 +58,10 @@ def get_preposto_or_404(preposto_id: str):
 
 
 def get_contato_or_404(preposto_id: str, contato_id: str):
-    contato = PrepostoContato.query.filter_by(id=contato_id, preposto_id=preposto_id).first()
+    contato = PrepostoContato.query.filter_by(
+        id=as_uuid(contato_id),
+        preposto_id=as_uuid(preposto_id),
+    ).first()
     if not contato:
         return None
     return contato
@@ -61,8 +69,8 @@ def get_contato_or_404(preposto_id: str, contato_id: str):
 
 def get_localidade_or_404(preposto_id: str, localidade_id: str):
     localidade = PrepostoLocalidade.query.filter_by(
-        id=localidade_id,
-        preposto_id=preposto_id,
+        id=as_uuid(localidade_id),
+        preposto_id=as_uuid(preposto_id),
     ).first()
     if not localidade:
         return None
@@ -71,14 +79,14 @@ def get_localidade_or_404(preposto_id: str, localidade_id: str):
 
 def get_tarifa_or_404(localidade_id: str, tarifa_id: str):
     return PrepostoTarifa.query.filter_by(
-        id=tarifa_id,
-        localidade_id=localidade_id,
+        id=as_uuid(tarifa_id),
+        localidade_id=as_uuid(localidade_id),
     ).first()
 
 
 def get_credenciado_or_404(credenciado_id: str):
     return PrepostoCredenciado.query.filter_by(
-        id=credenciado_id,
+        id=as_uuid(credenciado_id),
         organization_id=g.current_user.organization_id,
     ).first()
 
@@ -705,7 +713,7 @@ def delete_preposto_credenciado_vinculo(
         return json_error("Localidade não encontrada para este preposto.", 404)
 
     vinculo = PrepostoCredenciadoVinculo.query.filter_by(
-        credenciado_id=str(credenciado_id),
+        credenciado_id=as_uuid(credenciado_id),
         preposto_id=preposto.id,
         localidade_id=localidade.id,
     ).first()
