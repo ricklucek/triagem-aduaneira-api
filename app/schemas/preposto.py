@@ -196,7 +196,7 @@ class PrepostoTarifaCreateSchema(Schema):
     codigo = fields.String(required=True)
     operacao = fields.String(
         required=True,
-        validate=validate.OneOf(["IMPORTACAO", "EXPORTACAO", "AMBAS"]),
+        validate=validate.OneOf(["IMPORTACAO", "EXPORTACAO"]),
     )
     tipo = fields.String(required=True)
     valor = fields.Decimal(as_string=False, allow_none=True)
@@ -212,7 +212,7 @@ class PrepostoTarifaUpdateSchema(Schema):
     codigo = fields.String(required=False)
     operacao = fields.String(
         required=False,
-        validate=validate.OneOf(["IMPORTACAO", "EXPORTACAO", "AMBAS"]),
+        validate=validate.OneOf(["IMPORTACAO", "EXPORTACAO"]),
     )
     tipo = fields.String(required=False)
     valor = fields.Decimal(as_string=False, allow_none=True, required=False)
@@ -228,7 +228,10 @@ class PrepostoCredenciadoCreateSchema(Schema):
     nome = fields.String(required=True)
     cpf = fields.String(required=True)
     registro_rfb = fields.String(allow_none=True)
-    categoria = fields.String(load_default="DESPACHANTE")
+    categoria = fields.String(
+        load_default="DESPACHANTE",
+        validate=validate.OneOf(["DESPACHANTE", "AJUDANTE"]),
+    )
     ativo = fields.Boolean(load_default=True)
     observacoes = fields.String(allow_none=True)
 
@@ -244,7 +247,10 @@ class PrepostoCredenciadoUpdateSchema(Schema):
     nome = fields.String(required=False)
     cpf = fields.String(required=False)
     registro_rfb = fields.String(allow_none=True, required=False)
-    categoria = fields.String(required=False)
+    categoria = fields.String(
+        required=False,
+        validate=validate.OneOf(["DESPACHANTE", "AJUDANTE"]),
+    )
     ativo = fields.Boolean(required=False)
     observacoes = fields.String(allow_none=True, required=False)
 
