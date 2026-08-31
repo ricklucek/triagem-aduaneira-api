@@ -58,6 +58,10 @@ def create_app(config_object=Config):
     app.register_blueprint(nfe_context_bp)
     app.register_blueprint(nfe_carrier_bp)
     app.register_blueprint(fiscal_reference_bp)
+
+    from .preposto_catalog_cli import preposto_catalog_cli
+
+    app.cli.add_command(preposto_catalog_cli)
     
     @app.get("/health")
     def health():

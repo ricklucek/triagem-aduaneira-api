@@ -3,7 +3,14 @@ from marshmallow import ValidationError
 from sqlalchemy import and_, func
 
 from app.extensions import db
-from app.models import Preposto, PrepostoContato, PrepostoLocalidade
+from app.models import (
+    Preposto,
+    PrepostoContato,
+    PrepostoCredenciado,
+    PrepostoCredenciadoVinculo,
+    PrepostoLocalidade,
+    PrepostoTarifa,
+)
 from app.schemas import (
     PrepostoSchema,
     PrepostoCreateSchema,
@@ -335,6 +342,12 @@ def lookup_prepostos():
     cidade = params.get("cidade", "").strip()
     operacao = params.get("operacao")
 
+    if operacao not in ("IMPORTACAO", "EXPORTACAO"):
+        return json_error(
+            "Operação inválida. Utilize IMPORTACAO ou EXPORTACAO.",
+            422,
+        )
+
     principal_contact_subquery = (
         db.session.query(
             PrepostoContato.id.label("contato_id"),
@@ -353,6 +366,7 @@ def lookup_prepostos():
     q = (
         db.session.query(
             Preposto.id.label("id"),
+            PrepostoLocalidade.id.label("localidade_id"),
             Preposto.nome.label("nome"),
             PrepostoLocalidade.cidade.label("cidade"),
             PrepostoLocalidade.uf.label("uf"),
@@ -392,6 +406,80 @@ def lookup_prepostos():
 
     rows = q.order_by(Preposto.nome.asc()).all()
 
+    locality_ids = [row.localidade_id for row in rows]
+    tariffs_by_locality = {locality_id: [] for locality_id in locality_ids}
+    credentials_by_locality = {locality_id: [] for locality_id in locality_ids}
+
+    if locality_ids:
+        tariff_rows = (
+            PrepostoTarifa.query.filter(
+                PrepostoTarifa.localidade_id.in_(locality_ids),
+                PrepostoTarifa.ativo.is_(True),
+                PrepostoTarifa.operacao.in_((operacao, "AMBAS")),
+            )
+            .order_by(
+                PrepostoTarifa.principal.desc(),
+                PrepostoTarifa.condicao.asc(),
+            )
+            .all()
+        )
+        for tariff in tariff_rows:
+            tariffs_by_locality[tariff.localidade_id].append(
+                {
+                    "id": str(tariff.id),
+                    "codigo": tariff.codigo,
+                    "tipo": tariff.tipo,
+                    "operacao": tariff.operacao,
+                    "valor": float(tariff.valor) if tariff.valor is not None else None,
+                    "valorDescricao": tariff.valor_descricao,
+                    "condicao": tariff.condicao,
+                    "principal": tariff.principal,
+                    "moeda": tariff.moeda or "BRL",
+                    "observacoes": tariff.observacoes,
+                }
+            )
+
+        credential_rows = (
+            db.session.query(
+                PrepostoCredenciadoVinculo.localidade_id.label("localidade_id"),
+                PrepostoCredenciado.id.label("id"),
+                PrepostoCredenciado.nome.label("nome"),
+                PrepostoCredenciado.cpf.label("cpf"),
+                PrepostoCredenciado.registro_rfb.label("registro_rfb"),
+                PrepostoCredenciado.categoria.label("categoria"),
+            )
+            .join(
+                PrepostoCredenciado,
+                PrepostoCredenciado.id
+                == PrepostoCredenciadoVinculo.credenciado_id,
+            )
+            .filter(
+                PrepostoCredenciadoVinculo.localidade_id.in_(locality_ids),
+                PrepostoCredenciadoVinculo.ativo.is_(True),
+                PrepostoCredenciado.ativo.is_(True),
+            )
+            .order_by(PrepostoCredenciado.nome.asc())
+            .all()
+        )
+        for credential in credential_rows:
+            cpf = "".join(
+                character
+                for character in (credential.cpf or "")
+                if character.isdigit()
+            )
+            cpf_masked = (
+                f"***.{cpf[3:6]}.{cpf[6:9]}-**" if len(cpf) == 11 else None
+            )
+            credentials_by_locality[credential.localidade_id].append(
+                {
+                    "id": str(credential.id),
+                    "nome": credential.nome,
+                    "cpfMascarado": cpf_masked,
+                    "registroRfb": credential.registro_rfb,
+                    "categoria": credential.categoria,
+                }
+            )
+
     items = []
     for row in rows:
         if operacao == "IMPORTACAO":
@@ -404,6 +492,7 @@ def lookup_prepostos():
         items.append(
             {
                 "id": str(row.id),
+                "localidadeId": str(row.localidade_id),
                 "nome": row.nome,
                 "cidade": row.cidade,
                 "uf": row.uf,
@@ -416,6 +505,8 @@ def lookup_prepostos():
                 "email": row.email,
                 "contatoNome": row.contato_nome,
                 "observacoes": row.observacoes,
+                "tarifas": tariffs_by_locality[row.localidade_id],
+                "credenciados": credentials_by_locality[row.localidade_id],
             }
         )
 

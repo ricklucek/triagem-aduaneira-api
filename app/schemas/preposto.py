@@ -4,7 +4,9 @@ from marshmallow_sqlalchemy import SQLAlchemyAutoSchema
 from app.models import (
     Preposto,
     PrepostoContato,
+    PrepostoCredenciado,
     PrepostoLocalidade,
+    PrepostoTarifa,
 )
 
 class PrepostoContatoSchema(SQLAlchemyAutoSchema):
@@ -16,6 +18,8 @@ class PrepostoContatoSchema(SQLAlchemyAutoSchema):
 
 
 class PrepostoLocalidadeSchema(SQLAlchemyAutoSchema):
+    tarifas = fields.Nested(lambda: PrepostoTarifaSchema(), many=True, dump_only=True)
+
     class Meta:
         model = PrepostoLocalidade
         load_instance = True
@@ -23,18 +27,65 @@ class PrepostoLocalidadeSchema(SQLAlchemyAutoSchema):
         exclude = ("created_at", "updated_at")
 
 
+class PrepostoTarifaSchema(SQLAlchemyAutoSchema):
+    class Meta:
+        model = PrepostoTarifa
+        load_instance = True
+        include_fk = True
+        exclude = ("created_at", "updated_at")
+
+
+class PrepostoCredenciadoSchema(SQLAlchemyAutoSchema):
+    cpf_mascarado = fields.Method("mask_cpf", dump_only=True)
+
+    class Meta:
+        model = PrepostoCredenciado
+        load_instance = True
+        exclude = ("created_at", "updated_at")
+
+    def mask_cpf(self, obj):
+        cpf = "".join(character for character in (obj.cpf or "") if character.isdigit())
+        if len(cpf) != 11:
+            return None
+        return f"***.{cpf[3:6]}.{cpf[6:9]}-**"
+
+
 class PrepostoSchema(SQLAlchemyAutoSchema):
     contatos = fields.Nested(PrepostoContatoSchema, many=True, dump_only=True)
     localidades = fields.Nested(PrepostoLocalidadeSchema, many=True, dump_only=True)
+    credenciados = fields.Method("dump_credenciados", dump_only=True)
 
     class Meta:
         model = Preposto
         load_instance = True
         exclude = ("created_at", "updated_at")
 
+    def dump_credenciados(self, obj):
+        credentials = {}
+        for link in obj.credenciado_links:
+            credential = link.credenciado
+            if not link.ativo or not credential.ativo:
+                continue
+            item = credentials.setdefault(
+                str(credential.id),
+                {
+                    "id": str(credential.id),
+                    "nome": credential.nome,
+                    "cpf_mascarado": PrepostoCredenciadoSchema().mask_cpf(
+                        credential
+                    ),
+                    "registro_rfb": credential.registro_rfb,
+                    "categoria": credential.categoria,
+                    "localidade_ids": [],
+                },
+            )
+            item["localidade_ids"].append(str(link.localidade_id))
+        return list(credentials.values())
+
 
 class PrepostoLookupItemSchema(Schema):
     id = fields.String(required=True)
+    localidadeId = fields.String(required=True)
     nome = fields.String(required=True)
     cidade = fields.String(required=True)
     uf = fields.String(allow_none=True)
@@ -47,6 +98,8 @@ class PrepostoLookupItemSchema(Schema):
     email = fields.String(allow_none=True)
     contatoNome = fields.String(allow_none=True)
     observacoes = fields.String(allow_none=True)
+    tarifas = fields.List(fields.Dict(), required=True)
+    credenciados = fields.List(fields.Dict(), required=True)
 
 
 class PrepostoLookupResponseSchema(Schema):
