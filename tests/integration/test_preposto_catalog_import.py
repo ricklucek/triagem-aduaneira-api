@@ -1,6 +1,8 @@
 import json
+from datetime import datetime, timedelta
 from uuid import uuid4
 
+import jwt
 import pytest
 
 from app import create_app
@@ -13,6 +15,7 @@ from app.models import (
     PrepostoCredenciadoVinculo,
     PrepostoLocalidade,
     PrepostoTarifa,
+    User,
 )
 from app.services.preposto_catalog_import import import_preposto_catalog_2025
 
@@ -195,3 +198,103 @@ def test_lookup_rejects_missing_operation(catalog_app):
     app, _, _ = catalog_app
     response = app.test_client().get("/prepostos/public/lookup")
     assert response.status_code == 422
+
+
+def test_lookup_accepts_partial_city(catalog_app):
+    app, organization_id, source_path = catalog_app
+    import_preposto_catalog_2025(organization_id, source_path=source_path, apply=True)
+
+    response = app.test_client().get(
+        "/prepostos/public/lookup",
+        query_string={"cidade": "taja", "operacao": "IMPORTACAO"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["items"][0]["cidade"] == "Itajaí"
+
+
+@pytest.fixture
+def admin_catalog_api(catalog_app):
+    app, organization_id, source_path = catalog_app
+    import_preposto_catalog_2025(organization_id, source_path=source_path, apply=True)
+    user = User(
+        organization_id=organization_id,
+        nome="Administrador de prepostos",
+        email="prepostos-admin@example.invalid",
+        role="admin",
+        ativo=True,
+    )
+    user.set_password("test-password")
+    db.session.add(user)
+    db.session.commit()
+
+    now = datetime.utcnow()
+    token = jwt.encode(
+        {
+            "sub": str(user.id),
+            "email": user.email,
+            "role": user.role,
+            "principal_type": "user",
+            "type": "access",
+            "iat": now,
+            "exp": now + timedelta(hours=1),
+        },
+        app.config["SECRET_KEY"],
+        algorithm="HS256",
+    )
+    return app.test_client(), {"Authorization": f"Bearer {token}"}
+
+
+def test_admin_list_returns_all_records_and_searches_nested_fields(admin_catalog_api):
+    client, headers = admin_catalog_api
+
+    all_records = client.get("/prepostos", headers=headers)
+    partial_city = client.get("/prepostos", headers=headers, query_string={"q": "tapo"})
+    contact = client.get("/prepostos", headers=headers, query_string={"q": "alexandre"})
+
+    assert all_records.status_code == 200
+    assert all_records.get_json()["total"] == 3
+    assert all_records.get_json()["summary"]["tarifas"] == 6
+    assert partial_city.get_json()["items"][0]["nome"] == "Maciel Despachos"
+    assert contact.get_json()["items"][0]["nome"] == "Maciel Despachos"
+
+
+def test_admin_can_manage_tariffs_credentials_and_bindings(admin_catalog_api):
+    client, headers = admin_catalog_api
+    prepostos = client.get("/prepostos", headers=headers).get_json()["items"]
+    maciel = next(item for item in prepostos if item["nome"] == "Maciel Despachos")
+    localidade_id = maciel["localidades"][0]["id"]
+
+    tariff = client.post(
+        f"/prepostos/{maciel['id']}/localidades/{localidade_id}/tarifas",
+        headers=headers,
+        json={
+            "codigo": "TESTE-CONDICIONAL",
+            "operacao": "EXPORTACAO",
+            "tipo": "CONDICIONAL",
+            "valor": 375,
+            "condicao": "Carga excedente",
+        },
+    )
+    credential = client.post(
+        "/prepostos/credenciados",
+        headers=headers,
+        json={
+            "nome": "Despachante de teste",
+            "cpf": "987.654.321-00",
+            "registro_rfb": "RF-123",
+        },
+    )
+    binding = client.post(
+        f"/prepostos/{maciel['id']}/localidades/{localidade_id}/credenciados",
+        headers=headers,
+        json={"credenciado_id": credential.get_json()["id"]},
+    )
+
+    assert tariff.status_code == 201
+    assert credential.status_code == 201
+    assert credential.get_json()["cpf"] == "98765432100"
+    assert binding.status_code == 201
+    linked = binding.get_json()["credenciados"][0]
+    assert linked["nome"] == "Despachante de teste"
+    assert linked["localidade_ids"] == [localidade_id]
