@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from app.extensions import db
 from app.models import Client, ClientFiscalProfile
@@ -13,6 +14,7 @@ from app.models.nfe_issuance import (
 )
 from app.services.fiscal_certificate import (
     A1CertificateInspector,
+    CertificateMaterial,
     CertificateVault,
     DefaultCertificateVault,
     FiscalCertificateError,
@@ -97,6 +99,95 @@ class FiscalCertificateRegistry:
         db.session.flush()
         return row
 
+    def upload(
+        self,
+        *,
+        client_id,
+        environment: str,
+        pkcs12_bytes: bytes,
+        password: str,
+        activate: bool = True,
+    ) -> FiscalCertificate:
+        if not self.organization_id:
+            raise FiscalCertificateError(
+                "O usuário não está vinculado a uma organização."
+            )
+        self._client(client_id, for_update=True)
+        profile = self._fiscal_profile(client_id, for_update=True)
+        environment_value = self._enum_value(
+            FiscalEnvironment,
+            environment,
+            "Ambiente fiscal inválido.",
+        )
+        material = CertificateMaterial(
+            pkcs12_bytes=bytes(pkcs12_bytes or b""),
+            password=str(password or "").encode("utf-8"),
+        )
+        loaded = self.inspector.load(
+            material,
+            expected_cnpj=self._digits(profile.cnpj),
+        )
+        duplicate = self._query().filter(
+            FiscalCertificate.client_id == client_id,
+            FiscalCertificate.certificate_fingerprint_sha256
+            == loaded.fingerprint_sha256,
+        ).first()
+        if duplicate:
+            raise FiscalCertificateError(
+                "Este certificado A1 já está cadastrado para o cliente."
+            )
+
+        certificate_id = uuid4()
+        store = getattr(self.vault, "store", None)
+        if not callable(store):
+            raise FiscalCertificateError(
+                "O cofre configurado não permite cadastrar certificados."
+            )
+        references = store(
+            organization_id=str(self.organization_id),
+            client_id=str(client_id),
+            certificate_id=str(certificate_id),
+            material=material,
+        )
+
+        now = datetime.utcnow()
+        row = FiscalCertificate(
+            id=certificate_id,
+            organization_id=self.organization_id,
+            client_id=client_id,
+            environment=environment_value,
+            provider=FiscalCredentialProvider.GCP_SECRET_MANAGER.value,
+            status=(
+                FiscalCertificateStatus.ACTIVE.value
+                if activate
+                else FiscalCertificateStatus.DISABLED.value
+            ),
+            certificate_ref=references.certificate_ref,
+            password_ref=references.password_ref,
+            issuer_cnpj=loaded.issuer_cnpj,
+            certificate_fingerprint_sha256=loaded.fingerprint_sha256,
+            certificate_serial_number=loaded.serial_number,
+            subject_name=loaded.subject_name,
+            valid_from=loaded.valid_from.replace(tzinfo=None),
+            valid_until=loaded.valid_until.replace(tzinfo=None),
+            is_active=activate,
+            last_validated_at=now,
+            validation_error=None,
+            created_by_user_id=getattr(self.current_user, "id", None),
+            created_at=now,
+            updated_at=now,
+        )
+        if activate:
+            self._disable_other_active(
+                client_id=client_id,
+                environment=environment_value,
+                excluding_id=certificate_id,
+                now=now,
+            )
+        db.session.add(row)
+        db.session.flush()
+        return row
+
     def validate(self, certificate_id, *, client_id) -> FiscalCertificate:
         row = self.get(certificate_id, client_id=client_id)
         try:
@@ -111,31 +202,39 @@ class FiscalCertificateRegistry:
             raise
 
         self._apply_metadata(row, loaded)
-        row.status = FiscalCertificateStatus.PENDING_VALIDATION.value
-        row.is_active = False
+        row.status = (
+            FiscalCertificateStatus.ACTIVE.value
+            if row.is_active
+            else FiscalCertificateStatus.DISABLED.value
+        )
         db.session.flush()
         return row
 
     def activate(self, certificate_id, *, client_id) -> FiscalCertificate:
+        self._client(client_id, for_update=True)
         row = self.get(certificate_id, client_id=client_id)
         loaded = self._load(row)
         self._apply_metadata(row, loaded)
         now = datetime.utcnow()
 
-        active_rows = self._query().filter(
-            FiscalCertificate.client_id == client_id,
-            FiscalCertificate.environment == row.environment,
-            FiscalCertificate.id != row.id,
-            FiscalCertificate.is_active.is_(True),
-        ).with_for_update()
-        for active in active_rows.all():
-            active.is_active = False
-            active.status = FiscalCertificateStatus.DISABLED.value
-            active.updated_at = now
+        self._disable_other_active(
+            client_id=client_id,
+            environment=row.environment,
+            excluding_id=row.id,
+            now=now,
+        )
 
         row.status = FiscalCertificateStatus.ACTIVE.value
         row.is_active = True
         row.updated_at = now
+        db.session.flush()
+        return row
+
+    def deactivate(self, certificate_id, *, client_id) -> FiscalCertificate:
+        row = self.get(certificate_id, client_id=client_id)
+        row.is_active = False
+        row.status = FiscalCertificateStatus.DISABLED.value
+        row.updated_at = datetime.utcnow()
         db.session.flush()
         return row
 
@@ -214,6 +313,25 @@ class FiscalCertificateRegistry:
         row.validation_error = None
         row.updated_at = now
 
+    def _disable_other_active(
+        self,
+        *,
+        client_id,
+        environment,
+        excluding_id,
+        now: datetime,
+    ) -> None:
+        active_rows = self._query().filter(
+            FiscalCertificate.client_id == client_id,
+            FiscalCertificate.environment == environment,
+            FiscalCertificate.id != excluding_id,
+            FiscalCertificate.is_active.is_(True),
+        ).with_for_update()
+        for active in active_rows.all():
+            active.is_active = False
+            active.status = FiscalCertificateStatus.DISABLED.value
+            active.updated_at = now
+
     def _query(self):
         query = FiscalCertificate.query
         if self.organization_id:
@@ -222,18 +340,25 @@ class FiscalCertificateRegistry:
             )
         return query
 
-    def _client(self, client_id) -> Client:
+    def _client(self, client_id, *, for_update: bool = False) -> Client:
         query = Client.query.filter(Client.id == client_id)
         if self.organization_id:
             query = query.filter(
                 Client.organization_id == self.organization_id
             )
+        if for_update:
+            query = query.with_for_update()
         client = query.first()
         if not client:
             raise FiscalCertificateError("Cliente não encontrado.")
         return client
 
-    def _fiscal_profile(self, client_id) -> ClientFiscalProfile:
+    def _fiscal_profile(
+        self,
+        client_id,
+        *,
+        for_update: bool = False,
+    ) -> ClientFiscalProfile:
         query = ClientFiscalProfile.query.filter(
             ClientFiscalProfile.client_id == client_id,
             ClientFiscalProfile.is_default.is_(True),
@@ -242,6 +367,8 @@ class FiscalCertificateRegistry:
             query = query.filter(
                 ClientFiscalProfile.organization_id == self.organization_id
             )
+        if for_update:
+            query = query.with_for_update()
         profile = query.first()
         if not profile:
             raise FiscalCertificateError(
@@ -254,13 +381,25 @@ class FiscalCertificateRegistry:
         def value(item):
             return getattr(item, "value", item)
 
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        expired = bool(row.valid_until and row.valid_until < now)
+        status = (
+            FiscalCertificateStatus.EXPIRED.value
+            if expired
+            else value(row.status)
+        )
+        expires_in_days = (
+            (row.valid_until.date() - now.date()).days
+            if row.valid_until
+            else None
+        )
         return {
             "id": str(row.id),
             "organization_id": str(row.organization_id),
             "client_id": str(row.client_id),
             "environment": value(row.environment),
             "provider": value(row.provider),
-            "status": value(row.status),
+            "status": status,
             "issuer_cnpj": row.issuer_cnpj,
             "certificate_fingerprint_sha256": (
                 row.certificate_fingerprint_sha256
@@ -273,13 +412,17 @@ class FiscalCertificateRegistry:
             "valid_until": (
                 row.valid_until.isoformat() if row.valid_until else None
             ),
-            "is_active": row.is_active,
+            "is_active": bool(row.is_active and not expired),
+            "expires_in_days": expires_in_days,
             "last_validated_at": (
                 row.last_validated_at.isoformat()
                 if row.last_validated_at
                 else None
             ),
             "validation_error": row.validation_error,
+            "created_by_name": (
+                row.created_by.nome if row.created_by else None
+            ),
             "created_at": (
                 row.created_at.isoformat() if row.created_at else None
             ),

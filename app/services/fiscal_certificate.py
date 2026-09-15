@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import os
 import re
 from dataclasses import dataclass
@@ -34,6 +35,12 @@ class LoadedA1Certificate:
     subject_name: str
     valid_from: datetime
     valid_until: datetime
+
+
+@dataclass(frozen=True)
+class StoredCertificateReferences:
+    certificate_ref: str
+    password_ref: str
 
 
 class CertificateVault(Protocol):
@@ -120,6 +127,7 @@ class GcpSecretManagerCertificateVault:
 
     _SECRET_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
     _VERSION = re.compile(r"^[1-9][0-9]*$|^latest$")
+    MAX_SECRET_BYTES = 64 * 1024
 
     def __init__(
         self,
@@ -149,7 +157,7 @@ class GcpSecretManagerCertificateVault:
         certificate_resource = self._resource_name(certificate_ref)
         password_resource = self._resource_name(password_ref)
         pkcs12_bytes = self._access_secret(certificate_resource)
-        password_bytes = self._access_secret(password_resource).rstrip(b"\r\n")
+        password_bytes = self._access_secret(password_resource)
         if not pkcs12_bytes:
             raise FiscalCertificateError(
                 "O secret do certificado A1 está vazio."
@@ -161,6 +169,87 @@ class GcpSecretManagerCertificateVault:
         return CertificateMaterial(
             pkcs12_bytes=pkcs12_bytes,
             password=password_bytes,
+        )
+
+    def store(
+        self,
+        *,
+        organization_id: str,
+        client_id: str,
+        certificate_id: str,
+        material: CertificateMaterial,
+    ) -> StoredCertificateReferences:
+        if not self.project_id:
+            raise FiscalCertificateError(
+                "GOOGLE_CLOUD_PROJECT ou GCP_PROJECT_ID é obrigatório."
+            )
+        if not material.pkcs12_bytes:
+            raise FiscalCertificateError("O arquivo do certificado A1 está vazio.")
+        if len(material.pkcs12_bytes) > self.MAX_SECRET_BYTES:
+            raise FiscalCertificateError(
+                "O arquivo do certificado A1 excede o limite de 64 KiB."
+            )
+        if not material.password:
+            raise FiscalCertificateError("A senha do certificado A1 é obrigatória.")
+        if len(material.password) > self.MAX_SECRET_BYTES:
+            raise FiscalCertificateError(
+                "A senha do certificado A1 excede o limite permitido."
+            )
+
+        base = "-".join(
+            [
+                "nfe-a1",
+                self._resource_token(organization_id),
+                self._resource_token(client_id),
+                self._resource_token(certificate_id),
+            ]
+        )
+        certificate_secret_id = f"{base}-pfx"
+        password_secret_id = f"{base}-password"
+        created_secret_names: list[str] = []
+        try:
+            certificate_secret_name = self._create_secret(
+                certificate_secret_id,
+                created_secret_names=created_secret_names,
+            )
+            password_secret_name = self._create_secret(
+                password_secret_id,
+                created_secret_names=created_secret_names,
+            )
+            certificate_version = self._add_secret_version(
+                certificate_secret_name,
+                material.pkcs12_bytes,
+            )
+            password_version = self._add_secret_version(
+                password_secret_name,
+                material.password,
+            )
+            stored_certificate = self._access_secret(
+                f"{certificate_secret_name}/versions/{certificate_version}"
+            )
+            stored_password = self._access_secret(
+                f"{password_secret_name}/versions/{password_version}"
+            )
+            if not hmac.compare_digest(
+                stored_certificate,
+                material.pkcs12_bytes,
+            ) or not hmac.compare_digest(stored_password, material.password):
+                raise FiscalCertificateError(
+                    "O Secret Manager não confirmou o conteúdo armazenado."
+                )
+        except Exception as exc:
+            self._rollback_created_secrets(created_secret_names)
+            if isinstance(exc, FiscalCertificateError):
+                raise
+            raise FiscalCertificateError(
+                "Não foi possível armazenar o certificado A1 no Secret Manager."
+            ) from exc
+
+        return StoredCertificateReferences(
+            certificate_ref=(
+                f"gcp:{certificate_secret_id}@{certificate_version}"
+            ),
+            password_ref=f"gcp:{password_secret_id}@{password_version}",
         )
 
     def _resource_name(self, reference: str) -> str:
@@ -194,6 +283,63 @@ class GcpSecretManagerCertificateVault:
             raise FiscalCertificateError(
                 "Não foi possível acessar um secret do certificado A1."
             ) from exc
+
+    def _create_secret(
+        self,
+        secret_id: str,
+        *,
+        created_secret_names: list[str],
+    ) -> str:
+        response = self._secret_manager_client().create_secret(
+            request={
+                "parent": f"projects/{self.project_id}",
+                "secret_id": secret_id,
+                "secret": {
+                    "replication": {"automatic": {}},
+                    "labels": {
+                        "application": "triagem-aduaneira",
+                        "credential": "nfe-a1",
+                    },
+                },
+            }
+        )
+        name = str(response.name)
+        created_secret_names.append(name)
+        return name
+
+    def _add_secret_version(self, parent: str, payload: bytes) -> str:
+        response = self._secret_manager_client().add_secret_version(
+            request={
+                "parent": parent,
+                "payload": {"data": payload},
+            }
+        )
+        version = str(response.name).rsplit("/", 1)[-1]
+        if not version.isdigit() or int(version) < 1:
+            raise FiscalCertificateError(
+                "O Secret Manager não retornou uma versão válida."
+            )
+        return version
+
+    def _rollback_created_secrets(self, secret_names: list[str]) -> None:
+        for secret_name in reversed(secret_names):
+            try:
+                self._secret_manager_client().delete_secret(
+                    request={"name": secret_name}
+                )
+            except Exception:
+                # Não mascara a falha original. O Secret Manager mantém sua
+                # própria trilha de auditoria para uma eventual limpeza.
+                continue
+
+    @staticmethod
+    def _resource_token(value: str) -> str:
+        token = re.sub(r"[^a-fA-F0-9]", "", str(value or "")).lower()
+        if not token:
+            raise FiscalCertificateError(
+                "Não foi possível gerar o identificador seguro do secret."
+            )
+        return token
 
     def _secret_manager_client(self) -> Any:
         if self._client is None:
@@ -253,6 +399,26 @@ class DefaultCertificateVault:
             )
         raise FiscalCertificateError(
             "Certificado e senha devem usar o mesmo provider env: ou gcp:."
+        )
+
+    def store(
+        self,
+        *,
+        organization_id: str,
+        client_id: str,
+        certificate_id: str,
+        material: CertificateMaterial,
+    ) -> StoredCertificateReferences:
+        store = getattr(self.gcp_vault, "store", None)
+        if not callable(store):
+            raise FiscalCertificateError(
+                "O cofre configurado não permite cadastrar certificados."
+            )
+        return store(
+            organization_id=organization_id,
+            client_id=client_id,
+            certificate_id=certificate_id,
+            material=material,
         )
 
 
