@@ -206,6 +206,17 @@ def test_manual_tax_adjustment_is_recalculated_and_audited(api):
     assert detail.get_json()["auditTrail"][0]["reason"].startswith("Correção")
 
 
+def test_draft_detail_serializes_empty_validation_collections_as_arrays(api):
+    client, headers, _, draft_id, _, _, _ = api
+
+    response = client.get(f"/nfe-drafts/{draft_id}", headers=headers)
+
+    assert response.status_code == 200
+    draft = response.get_json()["draft"]
+    assert draft["validation_errors"] == []
+    assert draft["validation_warnings"] == []
+
+
 def test_additional_costs_reallocate_and_refresh_reconciliation(api):
     client, headers, _, draft_id, _, _, _ = api
     response = client.patch(
