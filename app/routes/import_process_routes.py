@@ -247,7 +247,12 @@ def list_duimp_snapshots(process_id: str):
         .order_by(DuimpSnapshot.created_at.desc())
         .all()
     )
-    return jsonify(duimp_snapshot_schema.dump(rows, many=True))
+    dumped = duimp_snapshot_schema.dump(rows, many=True)
+    for snapshot, item in zip(rows, dumped):
+        item["normalized_payload"] = service.normalized_duimp_for_snapshot(
+            snapshot
+        )
+    return jsonify(dumped)
 
 
 @import_process_bp.get("/<process_id>/nfe-drafts")

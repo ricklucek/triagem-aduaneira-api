@@ -671,6 +671,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
                 "versao": "1",
                 "dataRegistro": "2026-07-14",
                 "modalidadeImportacao": "direct",
+                "pesoBruto": "4.000",
                 "itens": [
                     {
                         "numeroItem": "1",
@@ -712,6 +713,17 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     )
     assert snapshot_response.status_code == 201, snapshot_response.get_json()
     snapshot_id = snapshot_response.get_json()["id"]
+
+    snapshots_response = client.get(
+        f"/import-processes/{process_id}/duimp-snapshots",
+        headers=headers,
+    )
+    assert snapshots_response.status_code == 200
+    normalized_snapshot = snapshots_response.get_json()[0][
+        "normalized_payload"
+    ]
+    assert normalized_snapshot["net_weight"] == "3.500"
+    assert normalized_snapshot["gross_weight"] == "4.000"
 
     before = client.get(
         f"/import-processes/{process_id}/nfe-context",
@@ -784,6 +796,13 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         "Transportadora Teste"
     )
     assert fiscal_payload["transport"]["volume"]["net_weight"] == "3.500"
+    assert fiscal_payload["transport"]["volume"]["net_weight_source"] == (
+        "duimp_items"
+    )
+    assert fiscal_payload["transport"]["volume"]["gross_weight"] == "4.000"
+    assert fiscal_payload["transport"]["volume"]["gross_weight_source"] == (
+        "duimp_cargo_total"
+    )
     assert "II: R$ 26,00" in fiscal_payload["additional_info"][
         "complementary"
     ]
@@ -1014,6 +1033,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert updated_transport["carrier"]["name"] == "Transportadora Teste"
     assert updated_transport["volume"] == {
         "gross_weight": "4.500",
+        "gross_weight_source": "operator_override",
         "net_weight": "4.000",
         "net_weight_source": "operator_override",
         "quantity": 2,
@@ -1030,6 +1050,40 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
     assert "Complemento informado pelo operador." in updated["draft"][
         "fiscal_payload"
     ]["additional_info"]["complementary"]
+
+    inconsistent_weights_response = client.patch(
+        f"/nfe-drafts/{draft_id}",
+        headers=headers,
+        json={"transport": {"volume": {"gross_weight": "3.000"}}},
+    )
+    assert inconsistent_weights_response.status_code == 200
+    assert "net_weight_exceeds_gross_weight" in {
+        warning.get("code")
+        for warning in inconsistent_weights_response.get_json()["validation"][
+            "warnings"
+        ]
+    }
+
+    restore_weights_response = client.patch(
+        f"/nfe-drafts/{draft_id}",
+        headers=headers,
+        json={
+            "transport": {
+                "volume": {
+                    "net_weight": None,
+                    "gross_weight": None,
+                }
+            }
+        },
+    )
+    assert restore_weights_response.status_code == 200
+    restored_volume = restore_weights_response.get_json()["draft"][
+        "fiscal_payload"
+    ]["transport"]["volume"]
+    assert restored_volume["net_weight"] == "3.500"
+    assert restored_volume["net_weight_source"] == "duimp_items"
+    assert restored_volume["gross_weight"] == "4.000"
+    assert restored_volume["gross_weight_source"] == "duimp_cargo_total"
 
     # Um processo totalmente classificado e ainda sem rascunho deve montar
     # primeiro o plano documental auditável.

@@ -1621,10 +1621,7 @@ class ImportNfeService:
             process,
             payload.get("duimp_snapshot_id"),
         )
-        normalized = deepcopy(
-            snapshot.normalized_payload
-            or self.normalize_duimp_payload(snapshot.raw_payload)
-        )
+        normalized = self.normalized_duimp_for_snapshot(snapshot)
 
         external: dict[str, Any] = {"errors": []}
         connection_config: dict[str, Any] = {}
@@ -2842,9 +2839,7 @@ class ImportNfeService:
             )
             if snapshot is None:
                 raise ValueError("Snapshot da DUIMP não encontrado para este processo.")
-            normalized = snapshot.normalized_payload or self.normalize_duimp_payload(
-                snapshot.raw_payload
-            )
+            normalized = self.normalized_duimp_for_snapshot(snapshot)
         else:
             fetch_result = self.fetch_duimp_for_process(process, payload)
             normalized = fetch_result["normalized"]
@@ -2994,6 +2989,22 @@ class ImportNfeService:
             tax_rule.transport_defaults if tax_rule else None,
             payload.get("transport"),
         )
+        transport_volume = deepcopy(transport.get("volume") or {})
+        transport["volume"] = transport_volume
+        explicit_volume = (payload.get("transport") or {}).get("volume") or {}
+        for field in ("net_weight", "gross_weight"):
+            source_field = f"{field}_source"
+            if explicit_volume.get(field) not in (None, ""):
+                transport_volume[source_field] = "operator_override"
+            elif normalized.get(field) not in (None, ""):
+                # O peso da própria operação prevalece sobre um default
+                # estático eventualmente cadastrado na regra tributária.
+                transport_volume.pop(field, None)
+                transport_volume.pop(source_field, None)
+            elif transport_volume.get(field) not in (None, ""):
+                transport_volume[source_field] = "tax_rule_default"
+        if not transport_volume:
+            transport.pop("volume", None)
         payment = self._merge_defaults(
             tax_rule.payment_defaults if tax_rule else None,
             payload.get("payment"),
@@ -3168,6 +3179,9 @@ class ImportNfeService:
         )
         now = datetime.utcnow()
         fiscal_payload = deepcopy(draft.fiscal_payload or {})
+        previous_volume = deepcopy(
+            (fiscal_payload.get("transport") or {}).get("volume") or {}
+        )
         previous_additional_costs = deepcopy(
             fiscal_payload.get("additional_costs") or {}
         )
@@ -3235,10 +3249,30 @@ class ImportNfeService:
         volume_update = (
             (payload.get("transport") or {}).get("volume") or {}
         )
-        if volume_update.get("net_weight") not in (None, ""):
-            fiscal_payload.setdefault("transport", {}).setdefault(
-                "volume", {}
-            )["net_weight_source"] = "operator_override"
+        current_volume = fiscal_payload.setdefault("transport", {}).setdefault(
+            "volume", {}
+        )
+        for field in ("net_weight", "gross_weight"):
+            if field not in volume_update:
+                continue
+            source_field = f"{field}_source"
+            incoming = volume_update.get(field)
+            if incoming in (None, ""):
+                current_volume.pop(field, None)
+                current_volume.pop(source_field, None)
+                continue
+            previous = previous_volume.get(field)
+            if (
+                previous_volume.get(source_field) == "operator_override"
+                or self._decimal(incoming) != self._decimal(previous)
+            ):
+                current_volume[source_field] = "operator_override"
+
+        fiscal_payload["transport"] = self._transport_with_automatic_weight(
+            fiscal_payload.get("transport"),
+            fiscal_payload.get("items") or [],
+            duimp=fiscal_payload.get("duimp") or {},
+        )
 
         if "additional_info" in payload:
             additional_update = deepcopy(payload["additional_info"] or {})
@@ -4063,6 +4097,46 @@ class ImportNfeService:
     def normalize_duimp_payload(self, raw_payload: dict[str, Any]) -> dict[str, Any]:
         return self.duimp_normalizer.normalize(raw_payload)
 
+    def normalized_duimp_for_snapshot(
+        self,
+        snapshot: DuimpSnapshot,
+    ) -> dict[str, Any]:
+        """Expõe os pesos atuais sem reescrever snapshots históricos.
+
+        Snapshots criados antes do checkpoint 4F não possuem os campos de peso
+        no contrato normalizado, embora o payload bruto já possa contê-los.
+        Apenas esses campos derivados são complementados em memória.
+        """
+
+        normalized = deepcopy(
+            snapshot.normalized_payload
+            or self.normalize_duimp_payload(snapshot.raw_payload)
+        )
+        weight_fields = {
+            "net_weight",
+            "net_weight_source",
+            "gross_weight",
+            "gross_weight_source",
+        }
+        normalized_cargo = normalized.get("cargo") or {}
+        if weight_fields.issubset(normalized) and weight_fields.issubset(
+            normalized_cargo
+        ):
+            return normalized
+        if not snapshot.raw_payload:
+            return normalized
+        refreshed = self.normalize_duimp_payload(snapshot.raw_payload)
+        for field in weight_fields:
+            if normalized.get(field) in (None, ""):
+                normalized[field] = refreshed.get(field)
+        normalized_cargo = deepcopy(normalized_cargo)
+        refreshed_cargo = refreshed.get("cargo") or {}
+        for field in weight_fields:
+            if normalized_cargo.get(field) in (None, ""):
+                normalized_cargo[field] = refreshed_cargo.get(field)
+        normalized["cargo"] = normalized_cargo
+        return normalized
+
     def map_duimp_to_nfe_payload(
         self,
         *,
@@ -4153,6 +4227,10 @@ class ImportNfeService:
             "clearance_state": duimp.get("clearance_state"),
             "clearance_date": duimp.get("clearance_date"),
             "transport_mode_code": duimp.get("transport_mode_code"),
+            "net_weight": duimp.get("net_weight"),
+            "net_weight_source": duimp.get("net_weight_source"),
+            "gross_weight": duimp.get("gross_weight"),
+            "gross_weight_source": duimp.get("gross_weight_source"),
             "afrmm_value": duimp.get("afrmm_value", "0"),
             "intermediation_type": duimp.get("intermediation_type") or "1",
             "exporter_code": duimp.get("exporter_code"),
@@ -4173,6 +4251,7 @@ class ImportNfeService:
         resolved_transport = self._transport_with_automatic_weight(
             transport,
             items,
+            duimp=duimp,
         )
         resolved_additional_info = self._build_import_additional_info(
             duimp=duimp,
@@ -4269,20 +4348,41 @@ class ImportNfeService:
         self,
         transport: dict[str, Any] | None,
         items: list[dict[str, Any]],
+        *,
+        duimp: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         resolved = deepcopy(transport or {})
         resolved.setdefault("freight_mode", "9")
-        net_weight = sum(
-            (self._decimal(item.get("net_weight")) for item in items),
-            Decimal("0"),
-        )
+        net_weight = self._decimal((duimp or {}).get("net_weight"))
+        if net_weight <= 0:
+            net_weight = sum(
+                (self._duimp_item_net_weight(item) for item in items),
+                Decimal("0"),
+            )
         volume = deepcopy(resolved.get("volume") or {})
         if net_weight > 0 and volume.get("net_weight") in (None, ""):
             volume["net_weight"] = str(net_weight)
             volume["net_weight_source"] = "duimp_items"
+        gross_weight = self._decimal((duimp or {}).get("gross_weight"))
+        if gross_weight > 0 and volume.get("gross_weight") in (None, ""):
+            volume["gross_weight"] = str(gross_weight)
+            volume["gross_weight_source"] = (
+                (duimp or {}).get("gross_weight_source")
+                or "duimp_cargo_total"
+            )
         if volume:
             resolved["volume"] = volume
         return resolved
+
+    def _duimp_item_net_weight(self, item: dict[str, Any]) -> Decimal:
+        if item.get("net_weight") not in (None, ""):
+            return self._decimal(item.get("net_weight"))
+        raw = item.get("raw_source_payload") or item.get("raw") or {}
+        merchandise = raw.get("mercadoria") or raw
+        return self._decimal(
+            merchandise.get("pesoLiquido")
+            or merchandise.get("netWeight")
+        )
 
     def _build_import_additional_info(
         self,
@@ -4799,8 +4899,21 @@ class ImportNfeService:
                     "message": (
                         "Complete os volumes da carga antes da emissão final: "
                         + ", ".join(missing_volume_fields)
-                        + ". O peso líquido, quando disponível, é calculado "
-                        "automaticamente pelos itens da DUIMP."
+                        + ". Os pesos são preenchidos automaticamente quando "
+                        "a DUIMP disponibiliza uma origem completa e confiável."
+                    ),
+                }
+            )
+        net_weight = self._decimal(volume.get("net_weight"))
+        gross_weight = self._decimal(volume.get("gross_weight"))
+        if net_weight > 0 and gross_weight > 0 and net_weight > gross_weight:
+            warnings.append(
+                {
+                    "field": "transport.volume.gross_weight",
+                    "code": "net_weight_exceeds_gross_weight",
+                    "message": (
+                        "O peso líquido está maior que o peso bruto. Confira "
+                        "os totalizadores da DUIMP e os volumes antes da emissão."
                     ),
                 }
             )
