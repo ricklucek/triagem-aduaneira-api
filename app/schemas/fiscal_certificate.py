@@ -27,5 +27,19 @@ class RegisterFiscalCertificateSchema(Schema):
     )
 
 
+class UploadFiscalCertificateSchema(Schema):
+    environment = fields.String(
+        load_default=FiscalEnvironment.PRODUCTION.value,
+        validate=validate.OneOf(
+            [item.value for item in FiscalEnvironment]
+        ),
+    )
+    password = fields.String(
+        required=True,
+        validate=validate.Length(min=1, max=1024),
+    )
+    activate = fields.Boolean(load_default=True)
+
+
 class SignNfeXmlSchema(Schema):
     certificate_id = fields.UUID(load_default=None, allow_none=True)
