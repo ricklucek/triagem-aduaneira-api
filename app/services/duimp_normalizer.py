@@ -31,7 +31,7 @@ class DuimpNormalizer:
     def _normalize_portal_unico(self, payload: dict[str, Any]) -> dict[str, Any]:
         general = payload.get("dadosGerais") or {}
         identification = general.get("identificacao") or {}
-        cargo = general.get("carga") or {}
+        cargo = general.get("carga") or general.get("dadosCarga") or {}
         general_taxes = (general.get("tributos") or {}).get(
             "tributosCalculados"
         ) or []
@@ -68,6 +68,22 @@ class DuimpNormalizer:
         unit = cargo.get("unidadeDeclarada") or {}
         country = cargo.get("paisProcedencia") or {}
         registration_datetime = identification.get("dataRegistro")
+        net_weight = sum(
+            (self._decimal(item.get("net_weight")) for item in items),
+            Decimal("0"),
+        )
+        gross_weight, gross_weight_source = self._cargo_gross_weight(
+            cargo,
+            root_payload=general,
+        )
+        normalized_cargo = {
+            "net_weight": str(net_weight) if net_weight > 0 else None,
+            "net_weight_source": "duimp_items" if net_weight > 0 else None,
+            "gross_weight": (
+                str(gross_weight) if gross_weight is not None else None
+            ),
+            "gross_weight_source": gross_weight_source,
+        }
 
         return {
             "number": identifier.formatted,
@@ -86,6 +102,11 @@ class DuimpNormalizer:
             "transport_mode_code": self._string(
                 cargo.get("viaTransporteCodigo") or general.get("viaTransporteCodigo")
             ),
+            "net_weight": normalized_cargo["net_weight"],
+            "net_weight_source": normalized_cargo["net_weight_source"],
+            "gross_weight": normalized_cargo["gross_weight"],
+            "gross_weight_source": normalized_cargo["gross_weight_source"],
+            "cargo": normalized_cargo,
             "afrmm_value": str(self._extract_afrmm(cargo)),
             "tax_totals": self._normalize_taxes(general_taxes),
             "intermediation_type": self._string(
@@ -337,6 +358,23 @@ class DuimpNormalizer:
         unique_exporters = self._unique_foreign_operators(
             item_exporters + ([root_supplier] if isinstance(root_supplier, dict) else [])
         )
+        net_weight = sum(
+            (self._decimal(item.get("net_weight")) for item in normalized_items),
+            Decimal("0"),
+        )
+        raw_cargo = raw_payload.get("carga") or raw_payload.get("cargo") or {}
+        gross_weight, gross_weight_source = self._cargo_gross_weight(
+            raw_cargo,
+            root_payload=raw_payload,
+        )
+        normalized_cargo = {
+            "net_weight": str(net_weight) if net_weight > 0 else None,
+            "net_weight_source": "duimp_items" if net_weight > 0 else None,
+            "gross_weight": (
+                str(gross_weight) if gross_weight is not None else None
+            ),
+            "gross_weight_source": gross_weight_source,
+        }
         return {
             "number": parsed_number.formatted if parsed_number else None,
             "api_number": parsed_number.compact if parsed_number else None,
@@ -351,6 +389,11 @@ class DuimpNormalizer:
             or raw_payload.get("clearanceDate"),
             "transport_mode_code": raw_payload.get("viaTransporteCodigo")
             or raw_payload.get("transportModeCode"),
+            "net_weight": normalized_cargo["net_weight"],
+            "net_weight_source": normalized_cargo["net_weight_source"],
+            "gross_weight": normalized_cargo["gross_weight"],
+            "gross_weight_source": normalized_cargo["gross_weight_source"],
+            "cargo": normalized_cargo,
             "afrmm_value": str(
                 self._decimal(raw_payload.get("valorAfrmm") or raw_payload.get("afrmmValue"))
             ),
@@ -437,6 +480,124 @@ class DuimpNormalizer:
             afrmm = reference.get("dadosAfrmmTum") or {}
             total += self._decimal(afrmm.get("valorDevido") or afrmm.get("valorPago"))
         return total
+
+    def _cargo_gross_weight(
+        self,
+        cargo: dict[str, Any],
+        *,
+        root_payload: dict[str, Any] | None = None,
+    ) -> tuple[Decimal | None, str | None]:
+        """Recupera somente pesos brutos explicitamente informados pela DUIMP.
+
+        A API da Sefaz expõe o peso de cargas RUC no ``resumoRUC``. Releases
+        mais recentes também podem retornar um totalizador direto da carga.
+        Quando há múltiplos conhecimentos, um peso parcial nunca é utilizado:
+        ou existe um totalizador oficial, ou todas as cargas possuem peso para
+        que a soma seja segura.
+        """
+
+        root_payload = root_payload or {}
+        for source in (cargo, root_payload):
+            value = self._first_positive_decimal(
+                source,
+                (
+                    "pesoBrutoTotal",
+                    "totalPesoBrutoKg",
+                    "pesoBrutoKg",
+                    "pesoBruto",
+                    "grossWeight",
+                ),
+            )
+            if value is not None:
+                return value, "duimp_cargo_total"
+
+        main_weight = self._ruc_gross_weight(cargo)
+        references = (
+            (cargo.get("multiplosConhecimentosCarga") or {}).get(
+                "cargasReferenciadas"
+            )
+            or cargo.get("cargasReferenciadas")
+            or []
+        )
+        if not references:
+            if main_weight is None:
+                return None, None
+            return main_weight[0], main_weight[1]
+
+        reference_weights: list[Decimal] = []
+        for reference in references:
+            if not isinstance(reference, dict):
+                return None, None
+            direct_weight = self._first_positive_decimal(
+                reference,
+                (
+                    "pesoBruto",
+                    "pesoBrutoKg",
+                    "totalPesoBrutoKg",
+                    "grossWeight",
+                ),
+            )
+            nested_weight = self._ruc_gross_weight(reference)
+            weight = direct_weight or (
+                nested_weight[0] if nested_weight is not None else None
+            )
+            if weight is None:
+                # Evita preencher a NF-e com apenas a carga principal.
+                return None, None
+            reference_weights.append(weight)
+
+        if main_weight is None:
+            return None, None
+        return (
+            main_weight[0] + sum(reference_weights, Decimal("0")),
+            "duimp_cargo_totalized",
+        )
+
+    def _ruc_gross_weight(
+        self,
+        cargo: dict[str, Any],
+    ) -> tuple[Decimal, str] | None:
+        blocks = [cargo]
+        for key in (
+            "dadosCargaAerea",
+            "dadosCargaRodoviaria",
+            "cargaAerea",
+            "cargaRodoviaria",
+        ):
+            value = cargo.get(key)
+            if isinstance(value, dict):
+                blocks.append(value)
+
+        for block in blocks:
+            summary = block.get("resumoRUC") or block.get("resumoRuc") or {}
+            if not isinstance(summary, dict):
+                continue
+            received = self._first_positive_decimal(
+                summary,
+                ("totalPesoBrutoKgRecepcionados",),
+            )
+            if received is not None:
+                return received, "duimp_cargo_received"
+            delivered = self._first_positive_decimal(
+                summary,
+                ("totalPesoBrutoKgEntregues",),
+            )
+            if delivered is not None:
+                return delivered, "duimp_cargo_delivered"
+        return None
+
+    def _first_positive_decimal(
+        self,
+        payload: dict[str, Any],
+        keys: tuple[str, ...],
+    ) -> Decimal | None:
+        for key in keys:
+            if payload.get(key) in (None, ""):
+                continue
+            value = self._decimal(payload.get(key))
+            if value > 0:
+                return value
+        return None
 
     @staticmethod
     def _addition_references(general: dict[str, Any]) -> dict[str, tuple[str, str]]:

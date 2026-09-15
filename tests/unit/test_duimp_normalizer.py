@@ -135,6 +135,76 @@ def test_normalizes_official_portal_payload_separating_fiscal_components():
     assert item["tax_classification_code"] == "000001"
 
 
+def test_normalizes_automatic_net_and_received_ruc_gross_weights():
+    payload = portal_payload()
+    cargo = payload["dadosGerais"].pop("carga")
+    payload["dadosGerais"]["dadosCarga"] = cargo
+    cargo["multiplosConhecimentosCarga"][
+        "cargasReferenciadas"
+    ] = []
+    cargo["dadosCargaAerea"] = {
+        "resumoRUC": {
+            "totalPesoBrutoKgRecepcionados": "28.75000",
+            "totalPesoBrutoKgEntregues": "28.50000",
+        }
+    }
+
+    result = DuimpNormalizer().normalize(payload)
+
+    assert result["net_weight"] == "25.5"
+    assert result["net_weight_source"] == "duimp_items"
+    assert result["gross_weight"] == "28.75000"
+    assert result["gross_weight_source"] == "duimp_cargo_received"
+    assert result["cargo"] == {
+        "net_weight": "25.5",
+        "net_weight_source": "duimp_items",
+        "gross_weight": "28.75000",
+        "gross_weight_source": "duimp_cargo_received",
+    }
+
+
+def test_totalizes_gross_weight_only_when_all_referenced_cargo_has_weight():
+    payload = portal_payload()
+    cargo = payload["dadosGerais"]["carga"]
+    cargo["dadosCargaRodoviaria"] = {
+        "resumoRUC": {"totalPesoBrutoKgRecepcionados": "20.000"}
+    }
+    cargo["multiplosConhecimentosCarga"]["cargasReferenciadas"] = [
+        {"pesoBrutoKg": "5.500"},
+        {
+            "resumoRUC": {
+                "totalPesoBrutoKgRecepcionados": "3.250"
+            }
+        },
+    ]
+
+    result = DuimpNormalizer().normalize(payload)
+
+    assert result["gross_weight"] == "28.750"
+    assert result["gross_weight_source"] == "duimp_cargo_totalized"
+
+    del cargo["multiplosConhecimentosCarga"]["cargasReferenciadas"][1][
+        "resumoRUC"
+    ]
+    incomplete = DuimpNormalizer().normalize(payload)
+    assert incomplete["gross_weight"] is None
+    assert incomplete["gross_weight_source"] is None
+
+
+def test_prefers_official_cargo_totalizer_for_multiple_knowledge_duimp():
+    payload = portal_payload()
+    cargo = payload["dadosGerais"]["carga"]
+    cargo["pesoBrutoTotal"] = "40.12500"
+    cargo["multiplosConhecimentosCarga"]["cargasReferenciadas"] = [
+        {"identificacaoCarga": "REF-WITHOUT-INDIVIDUAL-WEIGHT"}
+    ]
+
+    result = DuimpNormalizer().normalize(payload)
+
+    assert result["gross_weight"] == "40.12500"
+    assert result["gross_weight_source"] == "duimp_cargo_total"
+
+
 def test_normalizes_catalog_enrichment_into_fiscal_product_fields():
     payload = portal_payload()
     payload["catalogEnrichment"] = {
