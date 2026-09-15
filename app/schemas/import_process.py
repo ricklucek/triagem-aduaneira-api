@@ -1,6 +1,14 @@
 from decimal import Decimal, InvalidOperation
 
-from marshmallow import EXCLUDE, Schema, ValidationError, fields, validate, validates_schema
+from marshmallow import (
+    EXCLUDE,
+    Schema,
+    ValidationError,
+    fields,
+    post_dump,
+    validate,
+    validates_schema,
+)
 from marshmallow_sqlalchemy import SQLAlchemyAutoSchema, auto_field
 
 from app.models.import_process import NfeNumberSequence
@@ -79,6 +87,13 @@ class NfeDraftSchema(BaseAutoSchema):
     id = auto_field(dump_only=True)
     created_at = auto_field(dump_only=True)
     updated_at = auto_field(dump_only=True)
+
+    @post_dump
+    def normalize_validation_collections(self, data, **kwargs):
+        """Keep the API contract stable for drafts without validation issues."""
+        data["validation_errors"] = data.get("validation_errors") or []
+        data["validation_warnings"] = data.get("validation_warnings") or []
+        return data
 
 
 class NfeDraftItemSchema(BaseAutoSchema):
