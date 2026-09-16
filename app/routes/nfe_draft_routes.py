@@ -92,6 +92,7 @@ def get_nfe_draft(draft_id: str):
                 detail["xml_versions"], many=True
             ),
             "auditTrail": detail["audit_trail"],
+            "signature": service.signature_summary(draft),
         }
     )
 

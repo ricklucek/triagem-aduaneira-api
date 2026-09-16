@@ -414,6 +414,52 @@ def test_api_flow_from_manual_duimp_snapshot_to_unsigned_xml(api):
         in signed_download.headers["Content-Disposition"]
     )
 
+    signed_xsd_validation = client.post(
+        (
+            f"/nfe-drafts/{draft_id}/xml-versions/"
+            f"{signed_version_id}/validate-xsd"
+        ),
+        headers=headers,
+        json={},
+    )
+    assert signed_xsd_validation.status_code == 200
+    assert signed_xsd_validation.get_json()["xsd_valid"] is True
+
+    drafts_after_signature = client.get(
+        f"/import-processes/{process_id}/nfe-drafts",
+        headers=headers,
+    )
+    assert drafts_after_signature.status_code == 200
+    signature_summary = drafts_after_signature.get_json()["items"][0][
+        "signature"
+    ]
+    assert signature_summary["status"] == "signed"
+    assert signature_summary["certificate_id"] == certificate_id
+    assert signature_summary["signed_by_name"] == "Operador Teste"
+    assert len(signature_summary["signed_checksum_sha256"]) == 64
+    assert "certificate_ref" not in signature_summary
+    assert "password_ref" not in signature_summary
+
+    signed_validation = client.post(
+        f"/nfe-drafts/{draft_id}/validate",
+        headers=headers,
+        json={},
+    )
+    assert signed_validation.status_code == 400
+    assert "não pode mais ser alterado" in signed_validation.get_json()[
+        "message"
+    ]
+
+    signed_regeneration = client.post(
+        f"/nfe-drafts/{draft_id}/generate-xml",
+        headers=headers,
+        json={},
+    )
+    assert signed_regeneration.status_code == 400
+    assert "não pode mais ser alterado" in signed_regeneration.get_json()[
+        "message"
+    ]
+
     process_after_signature = client.get(
         f"/import-processes/{process_id}",
         headers=headers,
@@ -839,6 +885,7 @@ def test_api_uses_client_tax_rule_and_persisted_nfe_context(api):
         "tax_rule_conflict_count": 0,
         "has_number_sequence": False,
         "has_provider_connection": False,
+        "has_active_certificate": False,
         "has_item_classification": False,
         "item_classification_ready": False,
         "has_document_plan": False,
@@ -1484,7 +1531,16 @@ def test_document_plan_groups_exporters_and_reconciles_shared_costs(api):
         },
     )
     assert completed_workflow.status_code == 200
-    assert completed_workflow.get_json()["next_action"] == "completed"
+    assert (
+        completed_workflow.get_json()["next_action"]
+        == "configure_certificate"
+    )
+    assert (
+        completed_workflow.get_json()["prerequisites"][
+            "has_active_certificate"
+        ]
+        is False
+    )
 
     legacy_draft = client.post(
         f"/import-processes/{process_id}/nfe-draft/from-duimp",

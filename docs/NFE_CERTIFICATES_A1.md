@@ -123,6 +123,7 @@ tabelas de emissão publicadas nos checkpoints anteriores já estejam presentes.
 
 ## Limites do checkpoint
 
-O 4G não disponibiliza download do certificado e não assina ou transmite XML.
-A seleção do certificado e a assinatura XMLDSig pertencem ao Checkpoint 4H; a
+O 4G não disponibiliza download do certificado e, isoladamente, não assina ou
+transmite XML. A seleção do certificado e a assinatura XMLDSig foram integradas
+ao workflow no Checkpoint 4H, documentado em `NFE_XML_SIGNATURE.md`; a
 comunicação com a SEFAZ pertence ao 4I.
