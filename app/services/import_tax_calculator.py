@@ -13,7 +13,12 @@ class ImportTaxCalculator:
     MONEY = Decimal("0.01")
     RATE = Decimal("0.0001")
     NON_TAXED_ICMS_CSTS = {"40", "41", "50"}
-    SUPPORTED_ICMS_CSTS = NON_TAXED_ICMS_CSTS | {"00", "51", "90"}
+    REDUCED_BASE_ICMS_CSTS = {"20"}
+    SUPPORTED_ICMS_CSTS = NON_TAXED_ICMS_CSTS | REDUCED_BASE_ICMS_CSTS | {
+        "00",
+        "51",
+        "90",
+    }
 
     def calculate(
         self,
@@ -29,7 +34,7 @@ class ImportTaxCalculator:
         icms_cst = str(configuration.get("icms_cst") or "90").zfill(2)
         if icms_cst not in self.SUPPORTED_ICMS_CSTS:
             raise ImportTaxCalculationError(
-                "ICMS CST não suportado. Informe 00, 40, 41, 50, 51 ou 90."
+                "ICMS CST não suportado. Informe 00, 20, 40, 41, 50, 51 ou 90."
             )
         raw_icms_rate = configuration.get("icms_rate")
         has_icms_rate = raw_icms_rate not in (None, "")
@@ -54,6 +59,19 @@ class ImportTaxCalculator:
             if has_icms_rate:
                 raise ImportTaxCalculationError(
                     f"ICMS CST {icms_cst} não aceita alíquota nominal."
+                )
+        elif icms_cst in self.REDUCED_BASE_ICMS_CSTS:
+            if not has_base_reduction or not (
+                Decimal("0") < base_reduction_rate < Decimal("100")
+            ):
+                raise ImportTaxCalculationError(
+                    "O percentual de redução da base do ICMS CST 20 deve ser "
+                    "maior que zero e menor que 100."
+                )
+            if not has_icms_rate or not Decimal("0") < icms_rate < Decimal("100"):
+                raise ImportTaxCalculationError(
+                    "A alíquota nominal do ICMS CST 20 deve ser maior que zero "
+                    "e menor que 100."
                 )
         elif icms_cst == "51":
             if deferment_rate and not (
@@ -247,10 +265,29 @@ class ImportTaxCalculator:
             )
             if icms_cst in self.NON_TAXED_ICMS_CSTS:
                 icms_base = Decimal("0.00")
+                icms_base_before_reduction = None
                 icms_operation_value = None
                 icms_deferred_value = None
                 icms_value = Decimal("0.00")
+            elif icms_cst in self.REDUCED_BASE_ICMS_CSTS:
+                reduction_factor = Decimal("1") - (
+                    base_reduction_rate / Decimal("100")
+                )
+                effective_rate = icms_rate * reduction_factor
+                icms_base_before_reduction = self._money(
+                    icms_base_numerator
+                    / (Decimal("1") - effective_rate / Decimal("100"))
+                )
+                icms_base = self._money(
+                    icms_base_before_reduction * reduction_factor
+                )
+                icms_operation_value = None
+                icms_deferred_value = None
+                icms_value = self._money(
+                    icms_base * icms_rate / Decimal("100")
+                )
             elif icms_cst == "51":
+                icms_base_before_reduction = None
                 effective_rate = (
                     icms_rate
                     * (
@@ -294,6 +331,7 @@ class ImportTaxCalculator:
                     else calculated_icms_value
                 )
             else:
+                icms_base_before_reduction = None
                 icms_base = self._money(
                     icms_base_numerator
                     / (Decimal("1") - icms_rate / Decimal("100"))
@@ -311,7 +349,7 @@ class ImportTaxCalculator:
                 "base": self._format_money(icms_base),
                 "base_reduction_rate": (
                     self._format_rate(base_reduction_rate)
-                    if icms_cst == "51" and has_base_reduction
+                    if icms_cst in {"20", "51"} and has_base_reduction
                     else None
                 ),
                 "base_benefit_code": (
@@ -370,6 +408,10 @@ class ImportTaxCalculator:
                     source_icms.get("calculation_source") or "tax_rule"
                 ),
             }
+            if icms_base_before_reduction is not None:
+                taxes["icms"]["base_before_reduction"] = self._format_money(
+                    icms_base_before_reduction
+                )
             if taxes["icms"].get("duimp_value") not in (None, ""):
                 taxes["icms"]["difference"] = self._format_money(
                     self._money(taxes["icms"].get("value"))

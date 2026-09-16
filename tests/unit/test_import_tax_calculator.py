@@ -85,6 +85,54 @@ def test_calculates_taxed_icms00_import():
     assert totals["icms_base"] == "9686.49"
     assert totals["icms_value"] == "1162.38"
 
+
+def test_calculates_icms20_with_reduced_base_and_8_8_effective_burden():
+    reduced_configuration = configuration()
+    reduced_configuration.update(
+        {
+            "icms_cst": "20",
+            "icms_rate": "12",
+            "icms_base_reduction_rate": "26.6667",
+        }
+    )
+
+    items, totals = ImportTaxCalculator().calculate(
+        [reference_item()],
+        configuration=reduced_configuration,
+        additional_costs={"afrmm": "53.46", "other": "35.36"},
+    )
+
+    icms = items[0]["tax_payload"]["icms"]
+    assert icms["cst"] == "20"
+    assert icms["base_before_reduction"] == "9346.61"
+    assert icms["base_reduction_rate"] == "26.6667"
+    assert icms["base"] == "6854.18"
+    assert icms["rate"] == "12.0000"
+    assert icms["value"] == "822.50"
+    assert totals["icms_base"] == "6854.18"
+    assert totals["icms_value"] == "822.50"
+    assert totals["invoice_value"] == "9346.61"
+
+
+@pytest.mark.parametrize("reduction", [None, "0", "100"])
+def test_icms20_requires_partial_base_reduction(reduction):
+    reduced_configuration = configuration()
+    reduced_configuration.update(
+        {
+            "icms_cst": "20",
+            "icms_base_reduction_rate": reduction,
+        }
+    )
+
+    with pytest.raises(
+        ImportTaxCalculationError,
+        match="redução da base do ICMS CST 20",
+    ):
+        ImportTaxCalculator().calculate(
+            [reference_item()],
+            configuration=reduced_configuration,
+        )
+
 def test_allocates_costs_by_largest_remainder_with_exact_cent_total():
     calculator = ImportTaxCalculator()
     allocations = calculator.allocate(

@@ -552,6 +552,47 @@ def test_tax_rule_conflict_is_rejected_and_diagnosed(api):
     }
 
 
+def test_creates_sp_icms20_tax_rule_with_reduced_base(api):
+    client, headers, importer_id = api
+
+    response = client.post(
+        f"/clients/{importer_id}/import-tax-rules",
+        headers=headers,
+        json={
+            "name": "Válvula gaveta 84818093",
+            "issuer_state": "SP",
+            "import_purpose": "resale",
+            "import_modality": None,
+            "tax_regime": None,
+            "ncm_pattern": "84818093",
+            "priority": 200,
+            "configuration_json": {
+                "cfop": "3102",
+                "icms_origin": "1",
+                "icms_cst": "20",
+                "icms_rate": "12",
+                "icms_base_reduction_rate": "26.6667",
+            },
+        },
+    )
+
+    assert response.status_code == 201, response.get_json()
+    rule = response.get_json()
+    assert rule["name"] == "Válvula gaveta 84818093"
+    assert rule["issuer_state"] == "SP"
+    assert rule["import_purpose"] == "resale"
+    assert rule["import_modality"] is None
+    assert rule["ncm_pattern"] == "84818093"
+    assert rule["priority"] == 200
+    assert rule["configuration_json"] == {
+        "cfop": "3102",
+        "icms_origin": "1",
+        "icms_cst": "20",
+        "icms_rate": "12",
+        "icms_base_reduction_rate": "26.6667",
+    }
+
+
 def test_missing_tax_rule_does_not_block_duimp_preparation(api):
     client, headers, importer_id = api
     profile = client.put(

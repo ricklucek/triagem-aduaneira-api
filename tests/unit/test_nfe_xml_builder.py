@@ -164,6 +164,42 @@ def test_builds_xsd_valid_icms00_group():
     assert root.find(".//nfe:ICMS90", NS) is None
     assert NfeXsdValidator().validate(xml, allow_unsigned=True).is_valid is True
 
+
+def test_builds_xsd_valid_icms20_reduced_base_group():
+    data = payload()
+    data["items"][0]["tax_payload"]["icms"] = {
+        "origin": "1",
+        "cst": "20",
+        "base_method": "3",
+        "base_reduction_rate": "26.6667",
+        "base_before_reduction": "9346.61",
+        "base": "6854.18",
+        "rate": "12",
+        "value": "822.50",
+    }
+    data["totals"]["icms_base"] = "6854.18"
+    data["totals"]["icms_value"] = "822.50"
+    data["totals"]["invoice_value"] = "9346.61"
+
+    xml = NfeXmlBuilder().build(
+        data,
+        access_key="41260700000000000191550010000144221763362375",
+    )
+    root = ET.fromstring(xml)
+    icms20 = root.find(".//nfe:ICMS20", NS)
+
+    assert icms20 is not None
+    assert icms20.findtext("nfe:orig", namespaces=NS) == "1"
+    assert icms20.findtext("nfe:CST", namespaces=NS) == "20"
+    assert icms20.findtext("nfe:modBC", namespaces=NS) == "3"
+    assert icms20.findtext("nfe:pRedBC", namespaces=NS) == "26.6667"
+    assert icms20.findtext("nfe:vBC", namespaces=NS) == "6854.18"
+    assert icms20.findtext("nfe:pICMS", namespaces=NS) == "12.0000"
+    assert icms20.findtext("nfe:vICMS", namespaces=NS) == "822.50"
+    assert root.find(".//nfe:ICMS00", NS) is None
+    assert root.find(".//nfe:ICMS90", NS) is None
+    assert NfeXsdValidator().validate(xml, allow_unsigned=True).is_valid is True
+
 def test_normalizes_nfe_datetime_to_seconds():
     data = payload()
     data["document"]["issue_datetime"] = "2026-07-16T11:18:38.123456-03:00"

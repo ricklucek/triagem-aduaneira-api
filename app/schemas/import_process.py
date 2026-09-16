@@ -427,7 +427,7 @@ class NfeDraftAdditionalCostsSchema(Schema):
 class NfeDraftIcmsAdjustmentSchema(Schema):
     cst = fields.String(
         required=True,
-        validate=validate.OneOf(["00", "40", "41", "50", "51", "90"]),
+        validate=validate.OneOf(["00", "20", "40", "41", "50", "51", "90"]),
     )
     base = fields.Decimal(required=True, as_string=True, validate=validate.Range(min=0))
     rate = fields.Decimal(allow_none=True, as_string=True, validate=validate.Range(min=0, max=100))

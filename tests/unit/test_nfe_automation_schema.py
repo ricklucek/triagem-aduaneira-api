@@ -50,6 +50,49 @@ def test_accepts_icms00_with_nominal_rate():
     assert result["configuration_json"]["icms_cst"] == "00"
     assert result["configuration_json"]["icms_rate"] == "12"
 
+
+def test_accepts_icms20_with_partial_base_reduction():
+    payload = {
+        "name": "Válvula gaveta 84818093",
+        "issuer_state": "SP",
+        "import_purpose": "resale",
+        "import_modality": None,
+        "ncm_pattern": "84818093",
+        "priority": 200,
+        "configuration_json": {
+            "cfop": "3102",
+            "icms_origin": "1",
+            "icms_cst": "20",
+            "icms_rate": "12",
+            "icms_base_reduction_rate": "26.6667",
+        },
+    }
+
+    result = ClientImportTaxRuleSchema().load(payload)
+
+    assert result["configuration_json"]["icms_cst"] == "20"
+    assert result["configuration_json"]["icms_rate"] == "12"
+    assert result["configuration_json"]["icms_base_reduction_rate"] == "26.6667"
+
+
+@pytest.mark.parametrize("reduction", [None, "0", "100"])
+def test_rejects_icms20_without_partial_base_reduction(reduction):
+    payload = {
+        "name": "Válvula gaveta 84818093",
+        "issuer_state": "SP",
+        "import_purpose": "resale",
+        "configuration_json": {
+            "cfop": "3102",
+            "icms_origin": "1",
+            "icms_cst": "20",
+            "icms_rate": "12",
+            "icms_base_reduction_rate": reduction,
+        },
+    }
+
+    with pytest.raises(ValidationError, match="CST 20 exige redução"):
+        ClientImportTaxRuleSchema().load(payload)
+
 def test_rejects_partial_deferment_without_nominal_rate():
     payload = diagnostic_icms51_rule()
     payload["configuration_json"]["icms_deferment_rate"] = "50"

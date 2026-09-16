@@ -206,6 +206,34 @@ def test_manual_tax_adjustment_is_recalculated_and_audited(api):
     assert detail.get_json()["auditTrail"][0]["reason"].startswith("Correção")
 
 
+def test_manual_icms20_adjustment_preserves_reduced_base_fields(api):
+    client, headers, _, draft_id, item_id, _, _ = api
+    response = client.patch(
+        f"/nfe-drafts/{draft_id}/items/{item_id}/tax-adjustment",
+        headers=headers,
+        json={
+            "source": "manual_adjustment",
+            "reason": "Aplicação conferida do benefício fiscal para CST 20.",
+            "cfop": "3102",
+            "icms": {
+                "cst": "20",
+                "base": "80.00",
+                "rate": "12.00",
+                "reduction_rate": "26.6667",
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.get_json()
+    icms = response.get_json()["item"]["tax_payload"]["icms"]
+    assert icms["cst"] == "20"
+    assert icms["base_before_reduction"] == "109.09"
+    assert icms["base_reduction_rate"] == "26.6667"
+    assert icms["base"] == "80.00"
+    assert icms["rate"] == "12.0000"
+    assert icms["value"] == "9.60"
+
+
 def test_draft_detail_serializes_empty_validation_collections_as_arrays(api):
     client, headers, _, draft_id, _, _, _ = api
 
