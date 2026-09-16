@@ -3715,6 +3715,16 @@ class ImportNfeService:
         rate = self._decimal(adjustment.get("rate"))
         reduction = self._decimal(adjustment.get("reduction_rate"))
         deferment = self._decimal(adjustment.get("deferment_rate"))
+        if cst == "20" and not Decimal("0") < reduction < Decimal("100"):
+            raise ValueError(
+                "O percentual de redução da base do ICMS CST 20 deve ser "
+                "maior que zero e menor que 100."
+            )
+        base_before_reduction = (
+            base / (Decimal("1") - reduction / Decimal("100"))
+            if cst == "20"
+            else None
+        )
         if cst in {"40", "41", "50"}:
             base = Decimal("0.00")
             rate = Decimal("0")
@@ -3757,6 +3767,15 @@ class ImportNfeService:
             "tax_treatment_confirmed": True,
             "calculation_source": "manual_adjustment",
         }
+        if base_before_reduction is not None:
+            next_icms["base_before_reduction"] = format(
+                base_before_reduction.quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                ),
+                ".2f",
+            )
+        else:
+            next_icms.pop("base_before_reduction", None)
         if duimp_value not in (None, ""):
             next_icms["difference"] = format(
                 (value - self._decimal(duimp_value)).quantize(

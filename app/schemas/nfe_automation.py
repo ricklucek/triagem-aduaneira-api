@@ -143,10 +143,10 @@ class ClientImportTaxRuleSchema(Schema):
             )
 
         cst = str(configuration.get("icms_cst") or "90").zfill(2)
-        supported_csts = {"00", "40", "41", "50", "51", "90"}
+        supported_csts = {"00", "20", "40", "41", "50", "51", "90"}
         if cst not in supported_csts:
             raise ValidationError(
-                "configuration_json.icms_cst deve ser 00, 40, 41, 50, 51 ou 90.",
+                "configuration_json.icms_cst deve ser 00, 20, 40, 41, 50, 51 ou 90.",
                 field_name="configuration_json",
             )
         raw_rate = configuration.get("icms_rate")
@@ -164,6 +164,13 @@ class ClientImportTaxRuleSchema(Schema):
                     field_name="configuration_json",
                 )
             return
+        if cst == "20" and not (
+            Decimal("0") < base_reduction_rate < Decimal("100")
+        ):
+            raise ValidationError(
+                "ICMS CST 20 exige redução da base maior que 0 e menor que 100%.",
+                field_name="configuration_json",
+            )
         if raw_rate in (None, "") and cst == "51":
             if (
                 deferment_rate != Decimal("100")
