@@ -751,6 +751,9 @@ class ImportNfeService:
             "generate_access_key": "xml",
             "generate_xml": "xml",
             "validate_xml": "xml",
+            "configure_certificate": "xml",
+            "sign_xml": "xml",
+            "sign_child_xmls": "xml",
             "completed": "review",
         }
         current_step = action_step.get(next_action, "duimp")
@@ -863,12 +866,34 @@ class ImportNfeService:
             .first()
         )
 
+        try:
+            active_certificate = self.certificate_registry.active_for(
+                client_id=process.importer_id,
+                environment=environment,
+            )
+        except FiscalCertificateError:
+            active_certificate = None
+
         draft_detail = self.get_nfe_draft_detail(latest_draft) if latest_draft else None
-        latest_xml = (
-            draft_detail["xml_versions"][0]
-            if draft_detail and draft_detail["xml_versions"]
-            else None
-        )
+        latest_unsigned_xml = None
+        latest_signed_xml = None
+        if latest_draft:
+            latest_unsigned_xml = (
+                NfeXmlVersion.query.filter(
+                    NfeXmlVersion.nfe_draft_id == latest_draft.id,
+                    NfeXmlVersion.xml_type == NfeXmlType.UNSIGNED.value,
+                )
+                .order_by(NfeXmlVersion.version_number.desc())
+                .first()
+            )
+            latest_signed_xml = (
+                NfeXmlVersion.query.filter(
+                    NfeXmlVersion.nfe_draft_id == latest_draft.id,
+                    NfeXmlVersion.xml_type == NfeXmlType.SIGNED.value,
+                )
+                .order_by(NfeXmlVersion.version_number.desc())
+                .first()
+            )
         tax_rule_diagnostics = self.import_tax_rule_diagnostics(
             process.importer_id
         )
@@ -938,6 +963,18 @@ class ImportNfeService:
             xml is not None and xml.xsd_valid is not True
             for xml in child_xmls
         )
+        missing_child_signatures = bool(is_multi_document_plan) and any(
+            xml is not None
+            and NfeXmlVersion.query.filter(
+                NfeXmlVersion.nfe_draft_id == draft.id,
+                NfeXmlVersion.xml_type == NfeXmlType.SIGNED.value,
+                NfeXmlVersion.version_number == xml.version_number,
+                NfeXmlVersion.xsd_valid.is_(True),
+            ).first()
+            is None
+            for draft, xml in zip(child_drafts, child_xmls)
+            if draft is not None
+        )
 
         if fiscal_profile is None:
             next_action = "configure_fiscal_profile"
@@ -974,6 +1011,12 @@ class ImportNfeService:
             next_action = "generate_child_xmls"
         elif is_multi_document_plan and invalid_child_xmls:
             next_action = "validate_child_xmls"
+        elif is_multi_document_plan and missing_child_signatures:
+            next_action = (
+                "sign_child_xmls"
+                if active_certificate
+                else "configure_certificate"
+            )
         elif is_multi_document_plan:
             next_action = "completed"
         elif latest_draft is None:
@@ -986,16 +1029,25 @@ class ImportNfeService:
             next_action = "correct_draft"
         elif not latest_draft.access_key:
             next_action = "generate_access_key"
-        elif latest_xml is None:
+        elif latest_unsigned_xml is None:
             next_action = "generate_xml"
         elif (
             latest_draft.updated_at
-            and latest_xml.generated_at
-            and latest_draft.updated_at > latest_xml.generated_at
+            and latest_unsigned_xml.generated_at
+            and latest_draft.updated_at > latest_unsigned_xml.generated_at
+            and latest_signed_xml is None
         ):
             next_action = "generate_xml"
-        elif latest_xml.xsd_valid is not True:
+        elif latest_unsigned_xml.xsd_valid is not True:
             next_action = "validate_xml"
+        elif (
+            latest_signed_xml is None
+            or latest_signed_xml.version_number
+            != latest_unsigned_xml.version_number
+        ):
+            next_action = (
+                "sign_xml" if active_certificate else "configure_certificate"
+            )
         else:
             next_action = "completed"
 
@@ -1032,6 +1084,7 @@ class ImportNfeService:
                 ],
                 "has_number_sequence": sequence is not None,
                 "has_provider_connection": has_provider_connection,
+                "has_active_certificate": active_certificate is not None,
                 "has_item_classification": bool(
                     classifications
                     and classifications.get("has_classifications")
@@ -2600,7 +2653,7 @@ class ImportNfeService:
         draft_summary = None
         derived_status = document.status
         if latest_draft:
-            latest_xml = (
+            latest_unsigned_xml = (
                 NfeXmlVersion.query.filter(
                     NfeXmlVersion.nfe_draft_id == latest_draft.id,
                     NfeXmlVersion.xml_type == NfeXmlType.UNSIGNED.value,
@@ -2608,7 +2661,18 @@ class ImportNfeService:
                 .order_by(NfeXmlVersion.version_number.desc())
                 .first()
             )
-            if latest_xml and latest_xml.xsd_valid is True:
+            latest_signed_xml = None
+            if latest_unsigned_xml:
+                latest_signed_xml = NfeXmlVersion.query.filter(
+                    NfeXmlVersion.nfe_draft_id == latest_draft.id,
+                    NfeXmlVersion.xml_type == NfeXmlType.SIGNED.value,
+                    NfeXmlVersion.version_number
+                    == latest_unsigned_xml.version_number,
+                ).first()
+            latest_xml = latest_signed_xml or latest_unsigned_xml
+            if latest_signed_xml and latest_signed_xml.xsd_valid is True:
+                derived_status = "signed"
+            elif latest_xml and latest_xml.xsd_valid is True:
                 derived_status = "xsd_validated"
             elif latest_xml and latest_xml.xsd_valid is False:
                 derived_status = "xsd_invalid"
@@ -2760,6 +2824,29 @@ class ImportNfeService:
                     .order_by(NfeXmlVersion.version_number.desc())
                     .first()
                 )
+                signed_xml = (
+                    NfeXmlVersion.query.filter(
+                        NfeXmlVersion.nfe_draft_id == draft.id,
+                        NfeXmlVersion.xml_type == NfeXmlType.SIGNED.value,
+                        NfeXmlVersion.version_number
+                        == getattr(latest_xml, "version_number", None),
+                    ).first()
+                    if latest_xml
+                    else None
+                )
+                if signed_xml:
+                    document.status = "signed"
+                    document.updated_at = datetime.utcnow()
+                    results.append({
+                        "planned_document_id": str(document.id),
+                        "draft_id": str(draft.id),
+                        "xml_version_id": str(signed_xml.id),
+                        "success": True,
+                        "xsd_valid": signed_xml.xsd_valid is True,
+                        "xsd_errors": signed_xml.xsd_errors or [],
+                        "signed": True,
+                    })
+                    continue
                 xml_is_current = bool(
                     latest_xml
                     and (
@@ -2796,8 +2883,13 @@ class ImportNfeService:
         all_valid = bool(results) and all(
             result.get("xsd_valid") is True for result in results
         )
+        all_signed = bool(results) and all(
+            result.get("signed") is True for result in results
+        )
         process.status = (
-            ImportProcessStatus.XML_VALIDATED.value
+            ImportProcessStatus.XML_SIGNED.value
+            if all_signed
+            else ImportProcessStatus.XML_VALIDATED.value
             if all_valid
             else ImportProcessStatus.XML_VALIDATION_FAILED.value
         )
@@ -2806,6 +2898,7 @@ class ImportNfeService:
         db.session.flush()
         return {
             "all_valid": all_valid,
+            "all_signed": all_signed,
             "results": results,
             "plan": self._serialize_document_plan(plan),
         }
@@ -3114,7 +3207,10 @@ class ImportNfeService:
         )
         xml_versions = (
             NfeXmlVersion.query.filter(NfeXmlVersion.nfe_draft_id == draft.id)
-            .order_by(NfeXmlVersion.version_number.desc())
+            .order_by(
+                NfeXmlVersion.version_number.desc(),
+                NfeXmlVersion.generated_at.desc(),
+            )
             .all()
         )
         audit_trail = list((draft.fiscal_payload or {}).get("audit_trail") or [])
@@ -3694,6 +3790,7 @@ class ImportNfeService:
         return calculated[0]
 
     def validate_draft(self, draft: NfeDraft) -> ValidationResult:
+        self._assert_draft_editable(draft)
         self._refresh_draft_payload_from_items(draft)
         validation = self.validate_nfe_payload(draft.fiscal_payload)
         draft.validation_errors = validation.errors or None
@@ -3705,6 +3802,7 @@ class ImportNfeService:
 
     def generate_unsigned_xml(self, draft: NfeDraft) -> NfeXmlVersion:
         draft = self.get_nfe_draft_or_404(draft.id)
+        self._assert_draft_editable(draft)
 
         if not draft.access_key:
             self.generate_access_key_for_draft(draft.id)
@@ -3794,11 +3892,17 @@ class ImportNfeService:
                 .first()
             )
             if process:
-                process.status = (
-                    ImportProcessStatus.XML_VALIDATED.value
-                    if result.is_valid
-                    else ImportProcessStatus.XML_VALIDATION_FAILED.value
-                )
+                if (
+                    xml_type == NfeXmlType.SIGNED.value
+                    and result.is_valid
+                ):
+                    process.status = ImportProcessStatus.XML_SIGNED.value
+                else:
+                    process.status = (
+                        ImportProcessStatus.XML_VALIDATED.value
+                        if result.is_valid
+                        else ImportProcessStatus.XML_VALIDATION_FAILED.value
+                    )
                 process.updated_at = datetime.utcnow()
 
         db.session.flush()
@@ -3811,6 +3915,20 @@ class ImportNfeService:
         *,
         certificate_id=None,
     ) -> dict[str, Any]:
+        draft = (
+            self.nfe_draft_query_for_current_user()
+            .filter(NfeDraft.id == draft.id)
+            .with_for_update()
+            .one()
+        )
+        xml_version = (
+            NfeXmlVersion.query.filter(
+                NfeXmlVersion.id == xml_version.id,
+                NfeXmlVersion.nfe_draft_id == draft.id,
+            )
+            .with_for_update()
+            .one()
+        )
         if xml_version.nfe_draft_id != draft.id:
             raise ValueError("Versão XML não pertence ao rascunho informado.")
         xml_type = getattr(xml_version.xml_type, "value", xml_version.xml_type)
@@ -4005,6 +4123,79 @@ class ImportNfeService:
             "certificate": certificate,
             "issuance": issuance,
             "replayed": False,
+        }
+
+    def signature_summary(self, draft: NfeDraft) -> dict[str, Any] | None:
+        issuance = NfeIssuance.query.filter(
+            NfeIssuance.organization_id == draft.organization_id,
+            NfeIssuance.nfe_draft_id == draft.id,
+        ).first()
+        if issuance is None:
+            return None
+
+        attempt = (
+            NfeIssuanceAttempt.query.filter(
+                NfeIssuanceAttempt.nfe_issuance_id == issuance.id,
+                NfeIssuanceAttempt.operation
+                == NfeAttemptOperation.SIGNATURE.value,
+            )
+            .order_by(NfeIssuanceAttempt.attempt_number.desc())
+            .first()
+        )
+        event = (
+            NfeIssuanceEvent.query.filter(
+                NfeIssuanceEvent.nfe_issuance_id == issuance.id,
+                NfeIssuanceEvent.current_status == "signed",
+            )
+            .order_by(NfeIssuanceEvent.created_at.desc())
+            .first()
+        )
+        certificate = issuance.certificate
+        metadata = event.event_metadata if event and event.event_metadata else {}
+        return {
+            "issuance_id": str(issuance.id),
+            "status": str(getattr(issuance.status, "value", issuance.status)),
+            "certificate_id": (
+                str(issuance.certificate_id)
+                if issuance.certificate_id
+                else None
+            ),
+            "certificate_fingerprint_sha256": (
+                certificate.certificate_fingerprint_sha256
+                if certificate
+                else None
+            ),
+            "certificate_serial_number": (
+                certificate.certificate_serial_number
+                if certificate
+                else None
+            ),
+            "certificate_valid_until": (
+                self._iso(certificate.valid_until) if certificate else None
+            ),
+            "signed_at": self._iso(event.created_at) if event else None,
+            "signed_by_user_id": (
+                str(event.actor_user_id)
+                if event and event.actor_user_id
+                else None
+            ),
+            "signed_by_name": (
+                event.actor.nome if event and event.actor else None
+            ),
+            "unsigned_checksum_sha256": metadata.get(
+                "unsigned_checksum_sha256"
+            ),
+            "signed_checksum_sha256": metadata.get(
+                "signed_checksum_sha256"
+            ),
+            "attempt_number": attempt.attempt_number if attempt else None,
+            "attempt_status": (
+                str(getattr(attempt.status, "value", attempt.status))
+                if attempt
+                else None
+            ),
+            "last_error_code": issuance.last_error_code,
+            "last_error_message": issuance.last_error_message,
         }
 
     def _issuance_for_signature(

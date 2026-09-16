@@ -1,6 +1,6 @@
 # Arquitetura da emissão de NF-e de importação
 
-Status: checkpoint 3 - XML assinado com A1 e validado no XSD oficial.
+Status: checkpoint 4H - assinatura A1 integrada ao workflow operacional.
 
 ## Objetivo
 

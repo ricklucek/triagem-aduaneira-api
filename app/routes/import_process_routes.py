@@ -343,6 +343,7 @@ def list_process_nfe_drafts(process_id: str):
                     if draft.updated_at
                     else None
                 ),
+                "signature": service.signature_summary(draft),
                 "xml_versions": [
                     {
                         "id": str(version.id),
