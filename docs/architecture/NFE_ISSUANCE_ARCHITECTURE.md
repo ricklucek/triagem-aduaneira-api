@@ -2,6 +2,22 @@
 
 Status: checkpoint 4H - assinatura A1 integrada ao workflow operacional.
 
+## Continuidade preservada
+
+Depois da correção do cadastro inicial do perfil fiscal, a integração com a
+SEFAZ continuará em três entregas controladas:
+
+1. `4I-A`: isolamento de homologação, resolução do autorizador por UF,
+   TLS/mTLS e consulta de status, sem transmitir NF-e;
+2. `4I-B`: autorização em homologação, recibos, consultas, rejeições,
+   protocolos e montagem do `procNFe`;
+3. `4I-C`: habilitação de produção por feature flag, canário manual,
+   monitoramento e rollback.
+
+Produção permanece bloqueada até a conclusão e validação manual dessas três
+entregas. Homologação e produção não compartilham sequência, endpoint,
+idempotência, service account ou referências de secrets.
+
 ## Objetivo
 
 Emitir NF-e de entrada de importação a partir de uma DUIMP registrada, usando
