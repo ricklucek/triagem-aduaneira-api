@@ -1610,7 +1610,7 @@ def test_process_dashboard_groups_by_client_and_exposes_next_action(
     existing_client = db.session.get(Client, UUID(importer_id))
     second_client = Client(
         organization_id=existing_client.organization_id,
-        cnpj="11222333000181",
+        cnpj="32157202000138",
         razao_social="Cliente Painel Aduaneiro Ltda",
         nome_resumido="Cliente Painel",
         ativo=True,
@@ -1639,7 +1639,7 @@ def test_process_dashboard_groups_by_client_and_exposes_next_action(
         grouped = client.get(
             (
                 "/import-processes/client-groups"
-                "?q=11222333000181&created_by_me=true"
+                "?q=32157202000138&created_by_me=true"
             ),
             headers=headers,
         )
@@ -1651,7 +1651,7 @@ def test_process_dashboard_groups_by_client_and_exposes_next_action(
             "client_id": str(second_client.id),
             "name": "Cliente Painel",
             "legal_name": "Cliente Painel Aduaneiro Ltda",
-            "cnpj": "11222333000181",
+            "cnpj": "32157202000138",
             "process_count": 1,
             "pending_count": 1,
             "last_updated_at": grouped_body["items"][0]["last_updated_at"],
@@ -1672,6 +1672,41 @@ def test_process_dashboard_groups_by_client_and_exposes_next_action(
     assert process["planned_documents_count"] == 0
     assert process["last_responsible"]["name"] == "Operador Teste"
     assert process["last_responsible"]["is_current_user"] is True
+
+    workflow = client.get(
+        f"/import-processes/{process['id']}/nfe-workflow-state",
+        headers=headers,
+    )
+    assert workflow.status_code == 200
+    workflow_body = workflow.get_json()
+    assert workflow_body["next_action"] == "configure_fiscal_profile"
+    assert workflow_body["process"]["importer"] == {
+        "id": str(second_client.id),
+        "name": "Cliente Painel",
+        "legal_name": "Cliente Painel Aduaneiro Ltda",
+        "cnpj": "32157202000138",
+    }
+
+    profile = client.put(
+        f"/clients/{second_client.id}/fiscal-profile",
+        headers=headers,
+        json={
+            "legal_name": workflow_body["process"]["importer"]["legal_name"],
+            "cnpj": workflow_body["process"]["importer"]["cnpj"],
+            "state_registration": "123309550110",
+            "tax_regime": "3",
+            "street": "R DO ORATORIO",
+            "number": "2790",
+            "complement": "SALA 2",
+            "district": "Alto da Mooca",
+            "city_code": "3550308",
+            "city_name": "São Paulo",
+            "state": "SP",
+            "zip_code": "03195000",
+        },
+    )
+    assert profile.status_code == 200, profile.get_json()
+    assert profile.get_json()["cnpj"] == "32157202000138"
 
 
 def test_number_sequence_preserves_progress_and_rejects_regression(api):

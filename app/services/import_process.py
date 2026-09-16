@@ -681,6 +681,7 @@ class ImportNfeService:
         return summary
 
     def build_import_process_summary(self, process: ImportProcess) -> dict[str, Any]:
+        importer = process.importer
         latest_draft = (
             NfeDraft.query.filter(
                 NfeDraft.import_process_id == process.id,
@@ -700,6 +701,16 @@ class ImportNfeService:
             "id": str(process.id),
             "organization_id": str(process.organization_id),
             "importer_id": str(process.importer_id),
+            "importer": (
+                {
+                    "id": str(importer.id),
+                    "name": importer.nome_resumido or importer.razao_social,
+                    "legal_name": importer.razao_social,
+                    "cnpj": importer.cnpj,
+                }
+                if importer
+                else None
+            ),
             "reference_code": process.reference_code,
             "duimp_number": process.duimp_number,
             "duimp_version": process.duimp_version,
