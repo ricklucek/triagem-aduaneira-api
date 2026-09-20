@@ -100,6 +100,7 @@ class PrepostoLookupItemSchema(Schema):
     cidade = fields.String(required=True)
     uf = fields.String(allow_none=True)
     descricaoLocal = fields.String(allow_none=True)
+    tipoLocal = fields.String(allow_none=True)
     operacao = fields.String(required=True)
     valor = fields.Decimal(as_string=False, allow_none=True)
     valorDescricao = fields.String(allow_none=True)

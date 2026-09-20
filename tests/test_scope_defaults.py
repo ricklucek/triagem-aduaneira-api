@@ -14,6 +14,25 @@ merge_scope_draft = scope_defaults.merge_scope_draft
 
 
 class ScopeFreightDefaultsTestCase(unittest.TestCase):
+    def test_legacy_export_payload_receives_optional_urf_defaults(self):
+        legacy_payload = {
+            "operacao": {
+                "exportacao": {
+                    "produtosExportados": "Madeira",
+                }
+            }
+        }
+
+        normalized = merge_scope_draft(build_default_scope_draft(), legacy_payload)
+        export = normalized["operacao"]["exportacao"]
+
+        self.assertEqual(export["modaisSaida"], [])
+        self.assertEqual(export["urfsDespacho"], [])
+        self.assertEqual(export["outraUrfDespacho"], "")
+        self.assertEqual(export["urfsEmbarque"], [])
+        self.assertEqual(export["outraUrfEmbarque"], "")
+        self.assertEqual(export["produtosExportados"], "Madeira")
+
     def test_legacy_freight_payload_defaults_to_casco(self):
         legacy_payload = {
             "servicos": {
