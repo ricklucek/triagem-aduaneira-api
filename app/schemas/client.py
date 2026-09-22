@@ -1,3 +1,4 @@
+from flask import g, has_request_context
 from marshmallow import (
     Schema,
     ValidationError,
@@ -35,11 +36,25 @@ class ClientSchema(SQLAlchemyAutoSchema):
 
     @staticmethod
     def get_scope_id(client):
-        return str(client.scope.id) if client.scope else None
+        scope = ClientSchema._visible_scope(client)
+        return str(scope.id) if scope else None
 
     @staticmethod
     def get_has_scope(client):
         return client.scope is not None
+
+    @staticmethod
+    def _visible_scope(client):
+        scope = client.scope
+        if not scope or scope.status == "published" or not has_request_context():
+            return scope
+
+        current_user = getattr(g, "current_user", None)
+        if not current_user:
+            return None
+        if current_user.role == "admin" or current_user.id == scope.created_by_id:
+            return scope
+        return None
 
 
 class ClientCreateSchema(Schema):
@@ -110,6 +125,10 @@ class ClientListQuerySchema(Schema):
     q = fields.String(required=False)
     cnpj = fields.String(required=False)
     ativo = fields.Boolean(required=False)
+    scope_status = fields.String(
+        required=False,
+        validate=validate.OneOf(("draft", "published", "archived")),
+    )
     limit = fields.Integer(load_default=20, validate=validate.Range(min=1, max=200))
     offset = fields.Integer(load_default=0, validate=validate.Range(min=0))
 
