@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from flask import abort
-from sqlalchemy import and_, distinct, func
+from sqlalchemy import and_, distinct, func, or_
 
 from app.cnpj import normalize_cnpj
 from app.models.scope import ScopeTemplate
@@ -165,6 +165,16 @@ class ScopeDataProcessor:
         query = Scope.query
         if self.organization_id:
             query = query.filter(Scope.organization_id == self.organization_id)
+        return self._apply_scope_visibility_filter(query)
+
+    def _apply_scope_visibility_filter(self, query):
+        if getattr(self.current_user, "role", None) != "admin":
+            query = query.filter(
+                or_(
+                    Scope.status == "published",
+                    Scope.created_by_id == self.user_id,
+                )
+            )
         return query
 
     def get_scope_for_current_user(self, scope_id: str) -> Scope:
@@ -827,6 +837,8 @@ class ScopeDataProcessor:
             if self.organization_id:
                 query = query.filter(Scope.organization_id == self.organization_id)
 
+        query = self._apply_scope_visibility_filter(query)
+
         rows = (
             query.group_by(User.id, User.nome, User.role, User.setor)
             .order_by(User.nome.asc())
@@ -875,6 +887,7 @@ class ScopeDataProcessor:
             )
 
         query = self._apply_org_filter_to_scope_query(query)
+        query = self._apply_scope_visibility_filter(query)
         scopes = query.order_by(Scope.updated_at.desc().nullslast(), Scope.created_at.desc()).all()
 
         items = [
@@ -922,6 +935,7 @@ class ScopeDataProcessor:
 
         query = Scope.query.filter(Scope.id.in_(scope_ids))
         query = self._apply_org_filter_to_scope_query(query)
+        query = self._apply_scope_visibility_filter(query)
         scopes = query.all()
 
         scopes_by_id = {str(scope.id): scope for scope in scopes}

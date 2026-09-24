@@ -13,6 +13,7 @@ from ..schemas import (
     ClientSchema,
     ClientUpdateSchema,
 )
+from ..services.scope_processor import ScopeDataProcessor
 from .route_helpers import json_payload, validation_error_response
 
 client_bp = Blueprint("clients", __name__, url_prefix="/clients")
@@ -90,6 +91,17 @@ def list_clients():
         query = query.filter(Client.cnpj == params["cnpj"])
     if params.get("ativo") is not None:
         query = query.filter(Client.ativo == params["ativo"])
+    if params.get("scope_status"):
+        query = query.join(Scope, Scope.client_id == Client.id).filter(
+            Scope.status == params["scope_status"]
+        )
+        if g.current_user.role != "admin":
+            query = query.filter(
+                or_(
+                    Scope.status == "published",
+                    Scope.created_by_id == g.current_user.id,
+                )
+            )
     if params.get("q"):
         term = f"%{params['q']}%"
         query = query.filter(or_(Client.razao_social.ilike(term), Client.nome_resumido.ilike(term), Client.cnpj.ilike(term)))
@@ -135,15 +147,16 @@ def update_client(client_id: str):
 @client_bp.get("/<client_id>/scopes")
 @auth_required
 def list_client_scopes(client_id: str):
-    _client_query_for_user().filter(Client.id == client_id).first_or_404()
+    processor = ScopeDataProcessor(current_user=g.current_user)
+    client = processor.get_client_for_current_user(client_id)
 
     status = request.args.get("status")
     limit = min(max(int(request.args.get("limit", 20)), 1), 200)
     offset = max(int(request.args.get("offset", 0)), 0)
 
-    query = Scope.query.filter_by(client_id=client_id)
-    if g.current_user.organization_id:
-        query = query.filter(Scope.organization_id == g.current_user.organization_id)
+    query = processor.scope_query_for_current_user().filter(
+        Scope.client_id == client.id
+    )
     if status:
         query = query.filter(Scope.status == status)
 

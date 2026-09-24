@@ -55,6 +55,38 @@ def api():
         db.drop_all()
 
 
+def _create_user_headers(client, *, email: str, role: str = "comercial"):
+    app = client.application
+    with app.app_context():
+        organization = Organization.query.one()
+        user = User(
+            organization_id=organization.id,
+            nome=email.split("@", 1)[0],
+            email=email,
+            role=role,
+            ativo=True,
+        )
+        user.set_password("test-password")
+        db.session.add(user)
+        db.session.commit()
+
+        now = datetime.utcnow()
+        token = jwt.encode(
+            {
+                "sub": str(user.id),
+                "email": user.email,
+                "role": user.role,
+                "principal_type": "user",
+                "type": "access",
+                "iat": now,
+                "exp": now + timedelta(hours=1),
+            },
+            app.config["SECRET_KEY"],
+            algorithm="HS256",
+        )
+        return {"Authorization": f"Bearer {token}"}, str(user.id)
+
+
 def test_create_client_normalizes_cnpj_and_scopes_organization(api):
     client, headers = api
 
@@ -208,6 +240,134 @@ def test_client_list_exposes_scope_metadata(api):
     after_scope = client.get("/clients", headers=headers).get_json()["items"][0]
     assert after_scope["scope_id"] == created_scope.get_json()["id"]
     assert after_scope["has_scope"] is True
+
+
+def test_draft_scope_is_private_to_author_and_admin_until_published(api):
+    client, admin_headers = api
+    author_headers, _ = _create_user_headers(
+        client,
+        email="autor-escopo@example.invalid",
+    )
+    other_headers, _ = _create_user_headers(
+        client,
+        email="outro-usuario@example.invalid",
+        role="operacao",
+    )
+
+    published_client = client.post(
+        "/clients",
+        headers=author_headers,
+        json={
+            "cnpj": "03.114.340/0001-31",
+            "razao_social": "Cliente a publicar",
+        },
+    ).get_json()
+    private_client = client.post(
+        "/clients",
+        headers=author_headers,
+        json={
+            "cnpj": "08.266.216/0001-05",
+            "razao_social": "Cliente ainda em rascunho",
+        },
+    ).get_json()
+
+    scope_response = client.post(
+        f"/scopes?clientId={published_client['id']}",
+        headers=author_headers,
+        json={},
+    )
+    private_scope_response = client.post(
+        f"/scopes?clientId={private_client['id']}",
+        headers=author_headers,
+        json={},
+    )
+    assert scope_response.status_code == 201
+    assert private_scope_response.status_code == 201
+    scope_id = scope_response.get_json()["id"]
+
+    assert client.get(f"/scopes/{scope_id}", headers=author_headers).status_code == 200
+    assert client.get(f"/scopes/{scope_id}", headers=admin_headers).status_code == 200
+
+    author_drafts = client.get(
+        "/scopes?status=draft",
+        headers=author_headers,
+    ).get_json()
+    assert {item["id"] for item in author_drafts["items"]} == {
+        scope_id,
+        private_scope_response.get_json()["id"],
+    }
+    assert author_drafts["total"] == 2
+
+    assert client.get(f"/scopes/{scope_id}", headers=other_headers).status_code == 404
+    assert client.put(f"/scopes/{scope_id}", headers=other_headers, json={}).status_code == 404
+    assert client.post(f"/scopes/{scope_id}/publish", headers=other_headers).status_code == 404
+    assert client.post(f"/scopes/{scope_id}/sync", headers=other_headers, json={}).status_code == 404
+    assert client.get(f"/scopes/{scope_id}/versions", headers=other_headers).status_code == 404
+    assert client.delete(f"/scopes/{scope_id}", headers=other_headers).status_code == 404
+
+    draft_list = client.get("/scopes?status=draft", headers=other_headers).get_json()
+    assert draft_list["items"] == []
+    assert draft_list["total"] == 0
+
+    other_clients = client.get("/clients", headers=other_headers).get_json()["items"]
+    hidden_client = next(
+        item for item in other_clients if item["id"] == published_client["id"]
+    )
+    assert hidden_client["has_scope"] is True
+    assert hidden_client["scope_id"] is None
+
+    private_clients = client.get(
+        "/clients?scope_status=draft",
+        headers=other_headers,
+    ).get_json()
+    assert private_clients["items"] == []
+    assert private_clients["total"] == 0
+
+    client_scopes = client.get(
+        f"/clients/{published_client['id']}/scopes",
+        headers=other_headers,
+    ).get_json()
+    assert client_scopes["items"] == []
+    assert client_scopes["total"] == 0
+
+    published_clients = client.get(
+        "/clients?scope_status=published",
+        headers=other_headers,
+    ).get_json()
+    assert published_clients["items"] == []
+    assert published_clients["total"] == 0
+
+    publish_response = client.post(
+        f"/scopes/{scope_id}/publish",
+        headers=author_headers,
+    )
+    assert publish_response.status_code == 200
+
+    assert client.get(f"/scopes/{scope_id}", headers=other_headers).status_code == 200
+
+    published_list = client.get(
+        "/scopes?status=published",
+        headers=other_headers,
+    ).get_json()
+    assert [item["id"] for item in published_list["items"]] == [scope_id]
+    assert published_list["total"] == 1
+
+    client_scopes = client.get(
+        f"/clients/{published_client['id']}/scopes",
+        headers=other_headers,
+    ).get_json()
+    assert [item["id"] for item in client_scopes["items"]] == [scope_id]
+    assert client_scopes["total"] == 1
+
+    published_clients = client.get(
+        "/clients?scope_status=published",
+        headers=other_headers,
+    ).get_json()
+    assert [item["id"] for item in published_clients["items"]] == [
+        published_client["id"]
+    ]
+    assert published_clients["items"][0]["scope_id"] == scope_id
+    assert published_clients["total"] == 1
 
 
 def test_create_scope_for_client_rejects_second_scope(api):
