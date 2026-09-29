@@ -225,13 +225,13 @@ def bulk_api():
         db.drop_all()
 
 
-def test_bulk_endpoints_are_admin_only_and_expose_field_options(bulk_api):
+def test_bulk_endpoints_allow_authenticated_users_and_expose_field_options(bulk_api):
     client, context = bulk_api
 
-    forbidden = client.get("/scopes/bulk/options", headers=context["regular"])
+    regular_response = client.get("/scopes/bulk/options", headers=context["regular"])
     response = client.get("/scopes/bulk/options", headers=context["admin"])
 
-    assert forbidden.status_code == 403
+    assert regular_response.status_code == 200
     assert response.status_code == 200
     assert [field["value"] for field in response.get_json()["fields"]] == [
         "responsavel_comercial",
@@ -240,6 +240,57 @@ def test_bulk_endpoints_are_admin_only_and_expose_field_options(bulk_api):
         "analista_da_exportacao",
         "analista_ae_exportacao",
     ]
+
+
+def test_regular_user_sees_published_scopes_but_not_other_users_drafts(bulk_api):
+    client, context = bulk_api
+
+    candidates = client.get(
+        "/scopes/bulk/candidates",
+        headers=context["regular"],
+    )
+    preview = client.post(
+        "/scopes/bulk/preview",
+        headers=context["regular"],
+        json={
+            "field": "responsavel_comercial",
+            "targetUserId": context["commercial_target_id"],
+            "scopeIds": [context["import_scope_id"], context["export_scope_id"]],
+        },
+    )
+
+    assert candidates.status_code == 200
+    assert [item["id"] for item in candidates.get_json()["items"]] == [
+        context["import_scope_id"]
+    ]
+    assert preview.status_code == 200
+    assert preview.get_json()["eligibleScopes"] == 1
+    assert preview.get_json()["skippedScopes"] == 1
+    assert preview.get_json()["skipped"][0]["scopeId"] == context["export_scope_id"]
+    assert preview.get_json()["skipped"][0]["reason"] == "not_found_or_forbidden"
+
+
+def test_regular_user_can_apply_bulk_update_to_visible_scope(bulk_api):
+    client, context = bulk_api
+
+    response = client.post(
+        "/scopes/bulk/apply",
+        headers=context["regular"],
+        json={
+            "field": "responsavel_comercial",
+            "targetUserId": context["commercial_target_id"],
+            "scopeIds": [context["import_scope_id"], context["export_scope_id"]],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["impactedScopes"] == 1
+    assert response.get_json()["skippedScopes"] == 1
+    with context["app"].app_context():
+        published = db.session.get(Scope, UUID(context["import_scope_id"]))
+        hidden_draft = db.session.get(Scope, UUID(context["export_scope_id"]))
+        assert str(published.responsible_user_id) == context["commercial_target_id"]
+        assert str(hidden_draft.responsible_user_id) != context["commercial_target_id"]
 
 
 def test_candidates_search_inside_scope_and_support_filters(bulk_api):

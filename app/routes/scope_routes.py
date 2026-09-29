@@ -220,13 +220,13 @@ def bulk_update_assignment():
 
 
 @scope_bp.get("/bulk/options")
-@admin_required
+@auth_required
 def get_bulk_update_options():
     return jsonify(_processor().get_bulk_update_options())
 
 
 @scope_bp.get("/bulk/candidates")
-@admin_required
+@auth_required
 def get_bulk_update_candidates():
     processor = _processor()
     try:
@@ -267,13 +267,13 @@ def _bulk_scope_update_response(*, apply_changes: bool):
 
 
 @scope_bp.post("/bulk/preview")
-@admin_required
+@auth_required
 def preview_bulk_scope_update():
     return _bulk_scope_update_response(apply_changes=False)
 
 
 @scope_bp.post("/bulk/apply")
-@admin_required
+@auth_required
 def apply_bulk_scope_update():
     return _bulk_scope_update_response(apply_changes=True)
 

@@ -1,6 +1,6 @@
 # Alteração em massa de escopos
 
-O fluxo de alteração em massa é administrativo e possui quatro etapas:
+O fluxo de alteração em massa está disponível para usuários autenticados e possui quatro etapas:
 
 1. pesquisar, filtrar e selecionar os escopos;
 2. escolher um campo e um usuário de destino;
@@ -18,7 +18,10 @@ O fluxo de alteração em massa é administrativo e possui quatro etapas:
 - `tagId`: retorna escopos vinculados a usuários com a tag informada;
 - `limit` e `offset`: paginação, limitada a 200 registros por página.
 
-As consultas e atualizações são sempre limitadas à organização do administrador.
+As consultas e atualizações são sempre limitadas à organização do usuário. Usuários
+não administradores podem trabalhar com escopos publicados e com os próprios
+rascunhos; rascunhos de outros autores não são listados nem alterados. Administradores
+mantêm acesso a todos os escopos da organização.
 
 ## Campos alteráveis
 
@@ -54,5 +57,8 @@ no schema do escopo.
 Para escopos publicados, a operação atualiza `draft`, `published_snapshot`,
 atribuições relacionais e cria uma nova `ScopeVersion`. Rascunhos permanecem
 restritos ao autor e aos administradores nas demais consultas da plataforma.
+
+A interface exige uma confirmação explícita, com o resumo do campo, usuário de
+destino e quantidade de escopos, antes de chamar o endpoint de aplicação.
 
 Não há nova migration neste checkpoint.
