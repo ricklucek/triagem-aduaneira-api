@@ -175,6 +175,15 @@ def bulk_api():
         export_scope = Scope(
             organization_id=organization.id,
             client_id=export_client.id,
+            status="published",
+            version=1,
+            draft=export_draft,
+            published_snapshot=export_draft,
+            created_by_id=admin.id,
+            responsible_user_id=commercial.id,
+        )
+        hidden_draft_scope = Scope(
+            organization_id=organization.id,
             status="draft",
             version=1,
             draft=export_draft,
@@ -194,7 +203,7 @@ def bulk_api():
             created_by_id=outsider.id,
             responsible_user_id=outsider.id,
         )
-        db.session.add_all([import_scope, export_scope, outside_scope])
+        db.session.add_all([import_scope, export_scope, hidden_draft_scope, outside_scope])
         db.session.flush()
         db.session.add_all(
             [
@@ -202,6 +211,8 @@ def bulk_api():
                 ScopeAssignment(scope_id=import_scope.id, user_id=da_current.id, role="ANALISTA_DA_IMPORT", active=True),
                 ScopeAssignment(scope_id=export_scope.id, user_id=commercial.id, role="RESPONSAVEL_COMERCIAL", active=True),
                 ScopeAssignment(scope_id=export_scope.id, user_id=da_current.id, role="ANALISTA_DA_EXPORT", active=True),
+                ScopeAssignment(scope_id=hidden_draft_scope.id, user_id=commercial.id, role="RESPONSAVEL_COMERCIAL", active=True),
+                ScopeAssignment(scope_id=hidden_draft_scope.id, user_id=da_current.id, role="ANALISTA_DA_EXPORT", active=True),
                 ScopeAssignment(scope_id=outside_scope.id, user_id=outsider.id, role="ANALISTA_DA_IMPORT", active=True),
             ]
         )
@@ -213,13 +224,15 @@ def bulk_api():
             "regular": _token(app, regular),
             "import_scope_id": str(import_scope.id),
             "export_scope_id": str(export_scope.id),
+            "hidden_draft_scope_id": str(hidden_draft_scope.id),
             "outside_scope_id": str(outside_scope.id),
-            "da_tag_id": str(da_tag.id),
-            "outsider_tag_id": str(outsider_tag.id),
+            "commercial_id": str(commercial.id),
+            "da_current_id": str(da_current.id),
             "da_target_id": str(da_target.id),
             "ae_target_id": str(ae_target.id),
             "commercial_target_id": str(commercial_target.id),
             "regular_id": str(regular.id),
+            "outsider_id": str(outsider.id),
         }
         db.session.remove()
         db.drop_all()
@@ -233,13 +246,16 @@ def test_bulk_endpoints_allow_authenticated_users_and_expose_field_options(bulk_
 
     assert regular_response.status_code == 200
     assert response.status_code == 200
-    assert [field["value"] for field in response.get_json()["fields"]] == [
+    body = response.get_json()
+    assert [field["value"] for field in body["fields"]] == [
         "responsavel_comercial",
         "analista_da_importacao",
         "analista_ae_importacao",
         "analista_da_exportacao",
         "analista_ae_exportacao",
     ]
+    assert "statuses" not in body
+    assert "operations" not in body
 
 
 def test_regular_user_sees_published_scopes_but_not_other_users_drafts(bulk_api):
@@ -255,18 +271,19 @@ def test_regular_user_sees_published_scopes_but_not_other_users_drafts(bulk_api)
         json={
             "field": "responsavel_comercial",
             "targetUserId": context["commercial_target_id"],
-            "scopeIds": [context["import_scope_id"], context["export_scope_id"]],
+            "scopeIds": [context["import_scope_id"], context["hidden_draft_scope_id"]],
         },
     )
 
     assert candidates.status_code == 200
-    assert [item["id"] for item in candidates.get_json()["items"]] == [
-        context["import_scope_id"]
-    ]
+    assert {item["id"] for item in candidates.get_json()["items"]} == {
+        context["import_scope_id"],
+        context["export_scope_id"],
+    }
     assert preview.status_code == 200
     assert preview.get_json()["eligibleScopes"] == 1
     assert preview.get_json()["skippedScopes"] == 1
-    assert preview.get_json()["skipped"][0]["scopeId"] == context["export_scope_id"]
+    assert preview.get_json()["skipped"][0]["scopeId"] == context["hidden_draft_scope_id"]
     assert preview.get_json()["skipped"][0]["reason"] == "not_found_or_forbidden"
 
 
@@ -279,7 +296,7 @@ def test_regular_user_can_apply_bulk_update_to_visible_scope(bulk_api):
         json={
             "field": "responsavel_comercial",
             "targetUserId": context["commercial_target_id"],
-            "scopeIds": [context["import_scope_id"], context["export_scope_id"]],
+            "scopeIds": [context["import_scope_id"], context["hidden_draft_scope_id"]],
         },
     )
 
@@ -288,12 +305,12 @@ def test_regular_user_can_apply_bulk_update_to_visible_scope(bulk_api):
     assert response.get_json()["skippedScopes"] == 1
     with context["app"].app_context():
         published = db.session.get(Scope, UUID(context["import_scope_id"]))
-        hidden_draft = db.session.get(Scope, UUID(context["export_scope_id"]))
+        hidden_draft = db.session.get(Scope, UUID(context["hidden_draft_scope_id"]))
         assert str(published.responsible_user_id) == context["commercial_target_id"]
         assert str(hidden_draft.responsible_user_id) != context["commercial_target_id"]
 
 
-def test_candidates_search_inside_scope_and_support_filters(bulk_api):
+def test_candidates_search_inside_scope_and_filter_by_people(bulk_api):
     client, context = bulk_api
 
     response = client.get(
@@ -301,9 +318,8 @@ def test_candidates_search_inside_scope_and_support_filters(bulk_api):
         headers=context["admin"],
         query_string={
             "q": "Aurora madeira",
-            "status": "published",
-            "operation": "IMPORTACAO",
-            "tagId": context["da_tag_id"],
+            "commercialUserIds": context["commercial_id"],
+            "analystDaUserIds": context["da_current_id"],
         },
     )
 
@@ -313,14 +329,25 @@ def test_candidates_search_inside_scope_and_support_filters(bulk_api):
     assert body["items"][0]["id"] == context["import_scope_id"]
     assert body["items"][0]["assignments"]["analista_da_importacao"][0]["name"] == "Analista DA Atual"
 
-
-def test_cross_organization_tag_and_scope_are_never_exposed(bulk_api):
-    client, context = bulk_api
-
-    tag_response = client.get(
+    no_match = client.get(
         "/scopes/bulk/candidates",
         headers=context["admin"],
-        query_string={"tagId": context["outsider_tag_id"]},
+        query_string={
+            "commercialUserIds": context["commercial_id"],
+            "analystAeUserIds": context["ae_target_id"],
+        },
+    )
+    assert no_match.status_code == 200
+    assert no_match.get_json()["total"] == 0
+
+
+def test_cross_organization_people_and_scope_are_never_exposed(bulk_api):
+    client, context = bulk_api
+
+    people_response = client.get(
+        "/scopes/bulk/candidates",
+        headers=context["admin"],
+        query_string={"analystDaUserIds": context["outsider_id"]},
     )
     preview = client.post(
         "/scopes/bulk/preview",
@@ -332,10 +359,31 @@ def test_cross_organization_tag_and_scope_are_never_exposed(bulk_api):
         },
     )
 
-    assert tag_response.status_code == 400
+    assert people_response.status_code == 400
     assert preview.status_code == 200
     assert preview.get_json()["eligibleScopes"] == 0
     assert preview.get_json()["skipped"][0]["reason"] == "not_found_or_forbidden"
+
+
+def test_admin_cannot_preview_or_apply_a_draft_in_bulk_workflow(bulk_api):
+    client, context = bulk_api
+    payload = {
+        "field": "responsavel_comercial",
+        "targetUserId": context["commercial_target_id"],
+        "scopeIds": [context["hidden_draft_scope_id"]],
+    }
+
+    preview = client.post("/scopes/bulk/preview", headers=context["admin"], json=payload)
+    applied = client.post("/scopes/bulk/apply", headers=context["admin"], json=payload)
+
+    assert preview.status_code == 200
+    assert preview.get_json()["eligibleScopes"] == 0
+    assert preview.get_json()["skipped"][0]["reason"] == "not_found_or_forbidden"
+    assert applied.status_code == 200
+    assert applied.get_json()["impactedScopes"] == 0
+    with context["app"].app_context():
+        scope = db.session.get(Scope, UUID(context["hidden_draft_scope_id"]))
+        assert str(scope.responsible_user_id) == context["commercial_id"]
 
 
 def test_preview_identifies_operation_mismatch_and_requires_matching_tag(bulk_api):

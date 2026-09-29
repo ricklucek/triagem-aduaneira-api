@@ -26,8 +26,6 @@ from ..models import (
     ScopeVersion,
     ServiceCatalog,
     User,
-    UserTag,
-    UserTagAssignment,
 )
 from ..scope_defaults import apply_admin_defaults, build_default_scope_draft, merge_scope_draft
 
@@ -1048,46 +1046,62 @@ class ScopeDataProcessor:
                 }
                 for field_name, config in self.BULK_UPDATE_FIELDS.items()
             ],
-            "statuses": ["draft", "published", "archived"],
-            "operations": ["IMPORTACAO", "EXPORTACAO"],
         }
 
-    def _validated_tag_id(self, tag_id: str | None):
-        if not tag_id:
-            return None
-        try:
-            parsed = UUID(str(tag_id))
-        except (TypeError, ValueError, AttributeError):
-            raise ValueError("tagId inválido.") from None
+    def _validated_bulk_filter_user_ids(
+        self,
+        raw_user_ids: str | None,
+        *,
+        parameter_name: str,
+        required_tag_code: str,
+    ) -> list[UUID]:
+        values = list(
+            dict.fromkeys(
+                value.strip()
+                for value in str(raw_user_ids or "").split(",")
+                if value.strip()
+            )
+        )
+        if len(values) > 100:
+            raise ValueError(f"{parameter_name} aceita no máximo 100 usuários.")
 
-        query = UserTag.query.filter(UserTag.id == parsed, UserTag.active.is_(True))
+        parsed: list[UUID] = []
+        for value in values:
+            try:
+                parsed.append(UUID(value))
+            except (TypeError, ValueError, AttributeError):
+                raise ValueError(f"{parameter_name} contém um usuário inválido.") from None
+        if not parsed:
+            return []
+
+        query = User.query.filter(User.id.in_(parsed), User.ativo.is_(True))
         if self.organization_id:
-            query = query.filter(UserTag.organization_id == self.organization_id)
-        if not query.first():
-            raise ValueError("Tag não encontrada na organização atual.")
+            query = query.filter(User.organization_id == self.organization_id)
+        users = {user.id: user for user in query.all()}
+        for user_id in parsed:
+            user = users.get(user_id)
+            has_required_tag = user and any(
+                assignment.tag
+                and assignment.tag.active
+                and assignment.tag.code == required_tag_code
+                for assignment in user.tag_assignments
+            )
+            if not has_required_tag:
+                raise ValueError(
+                    f"{parameter_name} contém usuário inativo, de outra organização "
+                    f'ou sem a tag "{required_tag_code}".'
+                )
         return parsed
 
-    def _apply_bulk_tag_filter(self, query, tag_id):
-        if not tag_id:
+    def _apply_bulk_assignment_user_filter(self, query, user_ids, roles):
+        if not user_ids:
             return query
-
-        tagged_users = db.session.query(UserTagAssignment.user_id).filter(
-            UserTagAssignment.tag_id == tag_id
+        scope_ids = db.session.query(ScopeAssignment.scope_id).filter(
+            ScopeAssignment.user_id.in_(user_ids),
+            ScopeAssignment.role.in_(roles),
+            ScopeAssignment.active.is_(True),
         )
-        tagged_assignment_scopes = (
-            db.session.query(ScopeAssignment.scope_id)
-            .filter(
-                ScopeAssignment.user_id.in_(tagged_users),
-                ScopeAssignment.active.is_(True),
-            )
-        )
-        return query.filter(
-            or_(
-                Scope.created_by_id.in_(tagged_users),
-                Scope.responsible_user_id.in_(tagged_users),
-                Scope.id.in_(tagged_assignment_scopes),
-            )
-        )
+        return query.filter(Scope.id.in_(scope_ids))
 
     def _scope_operations(self, scope: Scope) -> list[str]:
         operation = (scope.draft or {}).get("operacao") or {}
@@ -1139,32 +1153,49 @@ class ScopeDataProcessor:
         self,
         *,
         q: str | None = None,
-        status: str | None = None,
-        operation: str | None = None,
-        tag_id: str | None = None,
+        commercial_user_ids: str | None = None,
+        analyst_da_user_ids: str | None = None,
+        analyst_ae_user_ids: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
-        if status and status not in {"draft", "published", "archived"}:
-            raise ValueError("status inválido.")
-        if operation and operation not in {"IMPORTACAO", "EXPORTACAO"}:
-            raise ValueError("operation inválida.")
         try:
             limit = min(max(int(limit), 1), 200)
             offset = max(int(offset), 0)
         except (TypeError, ValueError):
             raise ValueError("limit e offset devem ser números inteiros.") from None
 
-        parsed_tag_id = self._validated_tag_id(tag_id)
+        commercial_ids = self._validated_bulk_filter_user_ids(
+            commercial_user_ids,
+            parameter_name="commercialUserIds",
+            required_tag_code="comercial",
+        )
+        analyst_da_ids = self._validated_bulk_filter_user_ids(
+            analyst_da_user_ids,
+            parameter_name="analystDaUserIds",
+            required_tag_code="analista-da",
+        )
+        analyst_ae_ids = self._validated_bulk_filter_user_ids(
+            analyst_ae_user_ids,
+            parameter_name="analystAeUserIds",
+            required_tag_code="analista-ae",
+        )
         query = Scope.query.outerjoin(Client, Scope.client_id == Client.id)
         query = self._apply_org_filter_to_scope_query(query)
         query = self._apply_scope_visibility_filter(query)
-
-        if status:
-            query = query.filter(Scope.status == status)
-        if operation:
-            query = query.filter(cast(Scope.draft, Text).ilike(f'%"{operation}"%'))
-        query = self._apply_bulk_tag_filter(query, parsed_tag_id)
+        query = query.filter(Scope.status == "published")
+        if commercial_ids:
+            query = query.filter(Scope.responsible_user_id.in_(commercial_ids))
+        query = self._apply_bulk_assignment_user_filter(
+            query,
+            analyst_da_ids,
+            ("ANALISTA_DA_IMPORT", "ANALISTA_DA_EXPORT"),
+        )
+        query = self._apply_bulk_assignment_user_filter(
+            query,
+            analyst_ae_ids,
+            ("ANALISTA_AE_IMPORT", "ANALISTA_AE_EXPORT"),
+        )
 
         keywords = [part for part in str(q or "").strip().split() if part]
         for keyword in keywords:
@@ -1174,7 +1205,6 @@ class ScopeDataProcessor:
                 Client.razao_social.ilike(term),
                 Client.nome_resumido.ilike(term),
                 Client.cnpj.ilike(f"%{digits}%" if digits else term),
-                Scope.status.ilike(term),
                 cast(Scope.draft, Text).ilike(term),
             ]
             query = query.filter(or_(*conditions))
@@ -1193,9 +1223,9 @@ class ScopeDataProcessor:
             "offset": offset,
             "filters": {
                 "q": str(q or "").strip() or None,
-                "status": status,
-                "operation": operation,
-                "tagId": str(parsed_tag_id) if parsed_tag_id else None,
+                "commercialUserIds": [str(user_id) for user_id in commercial_ids],
+                "analystDaUserIds": [str(user_id) for user_id in analyst_da_ids],
+                "analystAeUserIds": [str(user_id) for user_id in analyst_ae_ids],
             },
         }
 
@@ -1265,7 +1295,8 @@ class ScopeDataProcessor:
                 normalized_ids.append(normalized)
 
         query = Scope.query.filter(
-            Scope.id.in_([UUID(scope_id) for scope_id in normalized_ids])
+            Scope.id.in_([UUID(scope_id) for scope_id in normalized_ids]),
+            Scope.status == "published",
         )
         query = self._apply_org_filter_to_scope_query(query)
         query = self._apply_scope_visibility_filter(query)
