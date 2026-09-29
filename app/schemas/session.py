@@ -10,7 +10,10 @@ class RegisterSchema(Schema):
     nome = fields.String(required=True)
     email = fields.Email(required=True)
     password = fields.String(required=True, load_only=True, validate=validate.Length(min=8))
-    role = fields.String(load_default="admin")
+    role = fields.String(
+        load_default="admin",
+        validate=validate.OneOf(("admin", "comercial", "credenciamento", "operacao")),
+    )
     setor = fields.String(allow_none=True)
 
     organization_id = fields.String(load_default=None, allow_none=True)

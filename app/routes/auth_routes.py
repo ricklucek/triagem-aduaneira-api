@@ -9,6 +9,11 @@ from ..auth import auth_required, decode_token, generate_tokens, serialize_ident
 from ..extensions import db
 from ..models import Organization, RefreshToken, User
 from ..schemas import LoginSchema, RefreshSchema, RegisterSchema
+from ..services.user_tags import (
+    ensure_default_user_tags,
+    normalize_access_role,
+    replace_user_tags,
+)
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
 login_schema = LoginSchema()
@@ -43,16 +48,26 @@ def register():
         db.session.add(organization)
         db.session.flush()
 
+    role = normalize_access_role(payload["role"])
     user = User(
         nome=payload["nome"],
         email=payload["email"],
-        role=payload["role"],
+        role=role,
         setor=payload.get("setor"),
         organization_id=organization.id,
     )
     user.set_password(payload["password"])
 
     db.session.add(user)
+    db.session.flush()
+    tags = ensure_default_user_tags(organization.id, created_by_id=user.id)
+    default_tag = next((tag for tag in tags if tag.code == role), None)
+    replace_user_tags(
+        user,
+        [str(default_tag.id)] if default_tag else [],
+        actor=user,
+        requested_role=role,
+    )
     try:
         db.session.commit()
     except IntegrityError:
