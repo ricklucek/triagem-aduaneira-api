@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from flask import abort
-from sqlalchemy import and_, distinct, func, or_
+from sqlalchemy import Text, and_, cast, distinct, func, or_
 
 from app.cnpj import normalize_cnpj
 from app.models.scope import ScopeTemplate
@@ -23,8 +23,11 @@ from ..models import (
     ScopeAssignment,
     ScopePreposto,
     ScopeService,
+    ScopeVersion,
     ServiceCatalog,
     User,
+    UserTag,
+    UserTagAssignment,
 )
 from ..scope_defaults import apply_admin_defaults, build_default_scope_draft, merge_scope_draft
 
@@ -108,6 +111,47 @@ class ScopeDataProcessor:
                 ("operacao", "importacao", "analistaAE"),
                 ("operacao", "exportacao", "analistaAE"),
             ),
+        },
+    }
+
+    BULK_UPDATE_FIELDS = {
+        "responsavel_comercial": {
+            "label": "Responsável comercial",
+            "role": "RESPONSAVEL_COMERCIAL",
+            "draft_path": ("sobreEmpresa", "responsavelComercial"),
+            "tag_code": "comercial",
+        },
+        "analista_da_importacao": {
+            "label": "Analista DA — Importação",
+            "role": "ANALISTA_DA_IMPORT",
+            "draft_path": ("operacao", "importacao", "analistaDA"),
+            "operation": "IMPORTACAO",
+            "tag_code": "analista-da",
+            "multiple": True,
+        },
+        "analista_ae_importacao": {
+            "label": "Analista AE — Importação",
+            "role": "ANALISTA_AE_IMPORT",
+            "draft_path": ("operacao", "importacao", "analistaAE"),
+            "operation": "IMPORTACAO",
+            "tag_code": "analista-ae",
+            "multiple": True,
+        },
+        "analista_da_exportacao": {
+            "label": "Analista DA — Exportação",
+            "role": "ANALISTA_DA_EXPORT",
+            "draft_path": ("operacao", "exportacao", "analistaDA"),
+            "operation": "EXPORTACAO",
+            "tag_code": "analista-da",
+            "multiple": True,
+        },
+        "analista_ae_exportacao": {
+            "label": "Analista AE — Exportação",
+            "role": "ANALISTA_AE_EXPORT",
+            "draft_path": ("operacao", "exportacao", "analistaAE"),
+            "operation": "EXPORTACAO",
+            "tag_code": "analista-ae",
+            "multiple": True,
         },
     }
 
@@ -687,7 +731,11 @@ class ScopeDataProcessor:
         return query
 
     def _validate_bulk_user(self, user_id: str, *, require_active: bool = False) -> User:
-        query = User.query.filter(User.id == user_id)
+        try:
+            parsed_user_id = UUID(str(user_id))
+        except (TypeError, ValueError, AttributeError):
+            raise ValueError("Identificador de usuário inválido.") from None
+        query = User.query.filter(User.id == parsed_user_id)
         if self.organization_id:
             query = query.filter(User.organization_id == self.organization_id)
         if require_active:
@@ -754,9 +802,10 @@ class ScopeDataProcessor:
         scope.draft = draft
 
     def _upsert_active_assignment(self, scope_id, user_id: str, role: str, now: datetime) -> None:
+        parsed_user_id = UUID(str(user_id))
         existing = ScopeAssignment.query.filter_by(
             scope_id=scope_id,
-            user_id=user_id,
+            user_id=parsed_user_id,
             role=role,
             active=True,
         ).first()
@@ -766,7 +815,7 @@ class ScopeDataProcessor:
         db.session.add(
             ScopeAssignment(
                 scope_id=scope_id,
-                user_id=user_id,
+                user_id=parsed_user_id,
                 role=role,
                 active=True,
                 starts_at=now,
@@ -783,7 +832,7 @@ class ScopeDataProcessor:
     ) -> bool:
         source_assignments = ScopeAssignment.query.filter(
             ScopeAssignment.scope_id == scope.id,
-            ScopeAssignment.user_id == from_user_id,
+            ScopeAssignment.user_id == UUID(str(from_user_id)),
             ScopeAssignment.role.in_(roles),
             ScopeAssignment.active.is_(True),
         ).all()
@@ -865,15 +914,15 @@ class ScopeDataProcessor:
 
     def get_bulk_assignment_scopes(self, group_by: str, user_id: str) -> dict[str, Any]:
         config = self._bulk_group_config(group_by)
-        self._validate_bulk_user(user_id)
+        user = self._validate_bulk_user(user_id)
 
         if config.get("scope_field") == "responsible_user_id":
-            query = Scope.query.filter(Scope.responsible_user_id == user_id)
+            query = Scope.query.filter(Scope.responsible_user_id == user.id)
         else:
             scope_ids_subquery = (
                 db.session.query(ScopeAssignment.scope_id)
                 .filter(
-                    ScopeAssignment.user_id == user_id,
+                    ScopeAssignment.user_id == user.id,
                     ScopeAssignment.role.in_(config["roles"]),
                     ScopeAssignment.active.is_(True),
                 )
@@ -933,7 +982,8 @@ class ScopeDataProcessor:
         self._validate_bulk_user(from_user_id)
         self._validate_bulk_user(to_user_id, require_active=True)
 
-        query = Scope.query.filter(Scope.id.in_(scope_ids))
+        parsed_scope_ids = [UUID(scope_id) for scope_id in scope_ids]
+        query = Scope.query.filter(Scope.id.in_(parsed_scope_ids))
         query = self._apply_org_filter_to_scope_query(query)
         query = self._apply_scope_visibility_filter(query)
         scopes = query.all()
@@ -975,6 +1025,410 @@ class ScopeDataProcessor:
             "ok": True,
             "impactedScopes": len(updated_scope_ids),
             "updatedScopeIds": updated_scope_ids,
+        }
+
+    # ------------------------------------------------------------------
+    # Bulk scope maintenance workflow
+    # ------------------------------------------------------------------
+    def _bulk_update_field_config(self, field_name: str) -> dict[str, Any]:
+        config = self.BULK_UPDATE_FIELDS.get(str(field_name or ""))
+        if not config:
+            allowed = ", ".join(sorted(self.BULK_UPDATE_FIELDS))
+            raise ValueError(f"Campo de alteração inválido. Valores aceitos: {allowed}.")
+        return config
+
+    def get_bulk_update_options(self) -> dict[str, Any]:
+        return {
+            "fields": [
+                {
+                    "value": field_name,
+                    "label": config["label"],
+                    "operation": config.get("operation"),
+                    "requiredTagCode": config["tag_code"],
+                }
+                for field_name, config in self.BULK_UPDATE_FIELDS.items()
+            ],
+            "statuses": ["draft", "published", "archived"],
+            "operations": ["IMPORTACAO", "EXPORTACAO"],
+        }
+
+    def _validated_tag_id(self, tag_id: str | None):
+        if not tag_id:
+            return None
+        try:
+            parsed = UUID(str(tag_id))
+        except (TypeError, ValueError, AttributeError):
+            raise ValueError("tagId inválido.") from None
+
+        query = UserTag.query.filter(UserTag.id == parsed, UserTag.active.is_(True))
+        if self.organization_id:
+            query = query.filter(UserTag.organization_id == self.organization_id)
+        if not query.first():
+            raise ValueError("Tag não encontrada na organização atual.")
+        return parsed
+
+    def _apply_bulk_tag_filter(self, query, tag_id):
+        if not tag_id:
+            return query
+
+        tagged_users = db.session.query(UserTagAssignment.user_id).filter(
+            UserTagAssignment.tag_id == tag_id
+        )
+        tagged_assignment_scopes = (
+            db.session.query(ScopeAssignment.scope_id)
+            .filter(
+                ScopeAssignment.user_id.in_(tagged_users),
+                ScopeAssignment.active.is_(True),
+            )
+        )
+        return query.filter(
+            or_(
+                Scope.created_by_id.in_(tagged_users),
+                Scope.responsible_user_id.in_(tagged_users),
+                Scope.id.in_(tagged_assignment_scopes),
+            )
+        )
+
+    def _scope_operations(self, scope: Scope) -> list[str]:
+        operation = (scope.draft or {}).get("operacao") or {}
+        values = operation.get("tipos") if isinstance(operation, dict) else []
+        return [value for value in (values or []) if value in {"IMPORTACAO", "EXPORTACAO"}]
+
+    def _scope_users_for_role(self, scope: Scope, role: str) -> list[User]:
+        users: list[User] = []
+        seen: set[str] = set()
+        for assignment in scope.assignments:
+            if not assignment.active or assignment.role != role or not assignment.user:
+                continue
+            user_id = str(assignment.user.id)
+            if user_id in seen:
+                continue
+            users.append(assignment.user)
+            seen.add(user_id)
+        return sorted(users, key=lambda user: (user.nome or "").lower())
+
+    def _serialize_bulk_user(self, user: User) -> dict[str, Any]:
+        return {"id": str(user.id), "name": user.nome}
+
+    def _serialize_bulk_scope(self, scope: Scope) -> dict[str, Any]:
+        assignments = {
+            field_name: [
+                self._serialize_bulk_user(user)
+                for user in self._scope_users_for_role(scope, config["role"])
+            ]
+            for field_name, config in self.BULK_UPDATE_FIELDS.items()
+        }
+        if scope.responsible_user:
+            assignments["responsavel_comercial"] = [
+                self._serialize_bulk_user(scope.responsible_user)
+            ]
+
+        return {
+            "id": str(scope.id),
+            "status": scope.status,
+            "version": scope.version,
+            "clientName": scope.client.razao_social if scope.client else None,
+            "clientShortName": scope.client.nome_resumido if scope.client else None,
+            "clientCnpj": scope.client.cnpj if scope.client else None,
+            "operations": self._scope_operations(scope),
+            "assignments": assignments,
+            "updatedAt": self._isoformat_z(scope.updated_at),
+        }
+
+    def list_bulk_update_candidates(
+        self,
+        *,
+        q: str | None = None,
+        status: str | None = None,
+        operation: str | None = None,
+        tag_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        if status and status not in {"draft", "published", "archived"}:
+            raise ValueError("status inválido.")
+        if operation and operation not in {"IMPORTACAO", "EXPORTACAO"}:
+            raise ValueError("operation inválida.")
+        try:
+            limit = min(max(int(limit), 1), 200)
+            offset = max(int(offset), 0)
+        except (TypeError, ValueError):
+            raise ValueError("limit e offset devem ser números inteiros.") from None
+
+        parsed_tag_id = self._validated_tag_id(tag_id)
+        query = Scope.query.outerjoin(Client, Scope.client_id == Client.id)
+        query = self._apply_org_filter_to_scope_query(query)
+        query = self._apply_scope_visibility_filter(query)
+
+        if status:
+            query = query.filter(Scope.status == status)
+        if operation:
+            query = query.filter(cast(Scope.draft, Text).ilike(f'%"{operation}"%'))
+        query = self._apply_bulk_tag_filter(query, parsed_tag_id)
+
+        keywords = [part for part in str(q or "").strip().split() if part]
+        for keyword in keywords:
+            term = f"%{keyword}%"
+            digits = "".join(char for char in keyword if char.isdigit())
+            conditions = [
+                Client.razao_social.ilike(term),
+                Client.nome_resumido.ilike(term),
+                Client.cnpj.ilike(f"%{digits}%" if digits else term),
+                Scope.status.ilike(term),
+                cast(Scope.draft, Text).ilike(term),
+            ]
+            query = query.filter(or_(*conditions))
+
+        total = query.order_by(None).count()
+        scopes = (
+            query.order_by(Scope.updated_at.desc().nullslast(), Scope.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+            .all()
+        )
+        return {
+            "items": [self._serialize_bulk_scope(scope) for scope in scopes],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "filters": {
+                "q": str(q or "").strip() or None,
+                "status": status,
+                "operation": operation,
+                "tagId": str(parsed_tag_id) if parsed_tag_id else None,
+            },
+        }
+
+    def _validate_bulk_target_user(self, user_id: str, config: dict[str, Any]) -> User:
+        try:
+            parsed_user_id = UUID(str(user_id))
+        except (TypeError, ValueError, AttributeError):
+            raise ValueError("targetUserId inválido.") from None
+
+        user = self._validate_bulk_user(str(parsed_user_id), require_active=True)
+        required_tag_code = config["tag_code"]
+        has_tag = any(
+            assignment.tag
+            and assignment.tag.active
+            and assignment.tag.code == required_tag_code
+            for assignment in user.tag_assignments
+        )
+        if not has_tag:
+            raise ValueError(
+                f'O usuário de destino precisa possuir a tag "{required_tag_code}".'
+            )
+        return user
+
+    def _bulk_scope_supports_field(self, scope: Scope, config: dict[str, Any]) -> bool:
+        required_operation = config.get("operation")
+        if not required_operation:
+            return True
+        if required_operation not in self._scope_operations(scope):
+            return False
+        operation_key = required_operation.lower()
+        operation_data = (scope.draft or {}).get("operacao") or {}
+        return isinstance(operation_data.get(operation_key), dict)
+
+    def _draft_matches_bulk_target(
+        self,
+        draft: dict | None,
+        config: dict[str, Any],
+        target_user_id: str,
+    ) -> bool:
+        value = self._get_nested_value(draft or {}, config["draft_path"])
+        if config.get("multiple"):
+            return isinstance(value, list) and [str(item) for item in value] == [target_user_id]
+        return str(value or "") == target_user_id
+
+    def _bulk_update_plan(
+        self,
+        *,
+        field_name: str,
+        target_user_id: str,
+        scope_ids: list[str],
+        lock_scopes: bool = False,
+    ) -> tuple[dict[str, Any], User, list[dict[str, Any]], list[dict[str, Any]]]:
+        config = self._bulk_update_field_config(field_name)
+        target_user = self._validate_bulk_target_user(target_user_id, config)
+        if not isinstance(scope_ids, list) or not scope_ids:
+            raise ValueError("scopeIds deve ser uma lista não vazia.")
+        if len(scope_ids) > 500:
+            raise ValueError("Selecione no máximo 500 escopos por operação.")
+
+        normalized_ids: list[str] = []
+        for scope_id in scope_ids:
+            try:
+                normalized = str(UUID(str(scope_id)))
+            except (TypeError, ValueError, AttributeError):
+                raise ValueError("scopeIds contém um identificador inválido.") from None
+            if normalized not in normalized_ids:
+                normalized_ids.append(normalized)
+
+        query = Scope.query.filter(
+            Scope.id.in_([UUID(scope_id) for scope_id in normalized_ids])
+        )
+        query = self._apply_org_filter_to_scope_query(query)
+        query = self._apply_scope_visibility_filter(query)
+        if lock_scopes:
+            query = query.with_for_update()
+        scopes_by_id = {str(scope.id): scope for scope in query.all()}
+
+        eligible: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for scope_id in normalized_ids:
+            scope = scopes_by_id.get(scope_id)
+            if not scope:
+                skipped.append({"scopeId": scope_id, "reason": "not_found_or_forbidden"})
+                continue
+            if not self._bulk_scope_supports_field(scope, config):
+                skipped.append({
+                    "scopeId": scope_id,
+                    "clientName": scope.client.razao_social if scope.client else None,
+                    "reason": "operation_not_enabled",
+                })
+                continue
+
+            current_users = self._scope_users_for_role(scope, config["role"])
+            if field_name == "responsavel_comercial" and scope.responsible_user:
+                current_users = [scope.responsible_user]
+            current_ids = [str(user.id) for user in current_users]
+            draft_matches = self._draft_matches_bulk_target(
+                scope.draft,
+                config,
+                str(target_user.id),
+            )
+            if current_ids == [str(target_user.id)] and draft_matches:
+                skipped.append({
+                    "scopeId": scope_id,
+                    "clientName": scope.client.razao_social if scope.client else None,
+                    "reason": "already_assigned",
+                })
+                continue
+
+            eligible.append({
+                "scope": scope,
+                "scopeId": scope_id,
+                "clientName": scope.client.razao_social if scope.client else None,
+                "clientCnpj": scope.client.cnpj if scope.client else None,
+                "fromUsers": [self._serialize_bulk_user(user) for user in current_users],
+                "toUser": self._serialize_bulk_user(target_user),
+            })
+
+        return config, target_user, eligible, skipped
+
+    def preview_bulk_scope_update(
+        self,
+        *,
+        field_name: str,
+        target_user_id: str,
+        scope_ids: list[str],
+    ) -> dict[str, Any]:
+        config, target_user, eligible, skipped = self._bulk_update_plan(
+            field_name=field_name,
+            target_user_id=target_user_id,
+            scope_ids=scope_ids,
+        )
+        return {
+            "field": field_name,
+            "fieldLabel": config["label"],
+            "targetUser": self._serialize_bulk_user(target_user),
+            "requestedScopes": len({str(scope_id) for scope_id in scope_ids}),
+            "eligibleScopes": len(eligible),
+            "skippedScopes": len(skipped),
+            "changes": [
+                {key: value for key, value in item.items() if key != "scope"}
+                for item in eligible
+            ],
+            "skipped": skipped,
+        }
+
+    def _replace_bulk_assignment(
+        self,
+        scope: Scope,
+        config: dict[str, Any],
+        target_user: User,
+        now: datetime,
+    ) -> None:
+        role = config["role"]
+        current = ScopeAssignment.query.filter_by(
+            scope_id=scope.id,
+            role=role,
+            active=True,
+        ).all()
+        for assignment in current:
+            if assignment.user_id == target_user.id:
+                continue
+            assignment.active = False
+            assignment.ends_at = now
+        self._upsert_active_assignment(scope.id, str(target_user.id), role, now)
+
+    def _write_bulk_target_to_snapshot(
+        self,
+        snapshot: dict | None,
+        config: dict[str, Any],
+        target_user_id: str,
+    ) -> dict:
+        updated = deepcopy(snapshot or {})
+        value: Any = [target_user_id] if config.get("multiple") else target_user_id
+        self._set_nested_value(updated, config["draft_path"], value)
+        return updated
+
+    def apply_bulk_scope_update(
+        self,
+        *,
+        field_name: str,
+        target_user_id: str,
+        scope_ids: list[str],
+    ) -> dict[str, Any]:
+        config, target_user, eligible, skipped = self._bulk_update_plan(
+            field_name=field_name,
+            target_user_id=target_user_id,
+            scope_ids=scope_ids,
+            lock_scopes=True,
+        )
+        now = datetime.utcnow()
+        updated_scope_ids: list[str] = []
+
+        for item in eligible:
+            scope: Scope = item["scope"]
+            self._replace_bulk_assignment(scope, config, target_user, now)
+            if field_name == "responsavel_comercial":
+                scope.responsible_user_id = target_user.id
+
+            scope.draft = self._write_bulk_target_to_snapshot(
+                scope.draft,
+                config,
+                str(target_user.id),
+            )
+            if scope.status == "published":
+                scope.published_snapshot = self._write_bulk_target_to_snapshot(
+                    scope.published_snapshot or scope.draft,
+                    config,
+                    str(target_user.id),
+                )
+                scope.version = (scope.version or 0) + 1
+                scope.last_published_at = now
+                db.session.add(
+                    ScopeVersion(
+                        scope_id=scope.id,
+                        version_number=scope.version,
+                        draft_snapshot=deepcopy(scope.draft),
+                        published_snapshot=deepcopy(scope.published_snapshot),
+                        created_by_id=self.current_user.id,
+                    )
+                )
+            updated_scope_ids.append(str(scope.id))
+
+        return {
+            "ok": True,
+            "field": field_name,
+            "fieldLabel": config["label"],
+            "targetUser": self._serialize_bulk_user(target_user),
+            "requestedScopes": len({str(scope_id) for scope_id in scope_ids}),
+            "impactedScopes": len(updated_scope_ids),
+            "skippedScopes": len(skipped),
+            "updatedScopeIds": updated_scope_ids,
+            "skipped": skipped,
         }
 
     # ---------------------------------------------------------------------
