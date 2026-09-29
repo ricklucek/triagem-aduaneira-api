@@ -7,7 +7,7 @@ from app.models.scope import ScopeTemplate
 from app.schemas.scope import ScopeTemplateSchema
 from app.scope_defaults import merge_scope_draft
 
-from ..auth import auth_required
+from ..auth import admin_required, auth_required
 from ..extensions import db
 from ..models import Client, Scope, ScopeAssignment, ScopeVersion, User
 from ..schemas import ScopeBulkResponsibleSchema, ScopeListQuerySchema, ScopeSchema, UserSchema
@@ -169,7 +169,7 @@ def list_scopes():
     )
 
 @scope_bp.get("/bulk/assignment-summary")
-@auth_required
+@admin_required
 def get_bulk_assignment_summary():
 
     processor = _processor()
@@ -182,7 +182,7 @@ def get_bulk_assignment_summary():
 
 
 @scope_bp.get("/bulk/assignment-scopes")
-@auth_required
+@admin_required
 def get_bulk_assignment_scopes():
 
     processor = _processor()
@@ -199,7 +199,7 @@ def get_bulk_assignment_scopes():
 
 
 @scope_bp.post("/bulk/assignment-update")
-@auth_required
+@admin_required
 def bulk_update_assignment():
 
     processor = _processor()
@@ -217,6 +217,65 @@ def bulk_update_assignment():
 
     db.session.commit()
     return jsonify(result)
+
+
+@scope_bp.get("/bulk/options")
+@admin_required
+def get_bulk_update_options():
+    return jsonify(_processor().get_bulk_update_options())
+
+
+@scope_bp.get("/bulk/candidates")
+@admin_required
+def get_bulk_update_candidates():
+    processor = _processor()
+    try:
+        result = processor.list_bulk_update_candidates(
+            q=request.args.get("q"),
+            status=request.args.get("status"),
+            operation=request.args.get("operation"),
+            tag_id=request.args.get("tagId"),
+            limit=request.args.get("limit", 50),
+            offset=request.args.get("offset", 0),
+        )
+    except ValueError as exc:
+        return jsonify({"error": "bad_request", "message": str(exc)}), 400
+    return jsonify(result)
+
+
+def _bulk_scope_update_response(*, apply_changes: bool):
+    processor = _processor()
+    payload = _load_optional_json_payload()
+    try:
+        method = (
+            processor.apply_bulk_scope_update
+            if apply_changes
+            else processor.preview_bulk_scope_update
+        )
+        result = method(
+            field_name=payload.get("field"),
+            target_user_id=payload.get("targetUserId"),
+            scope_ids=payload.get("scopeIds") or [],
+        )
+    except ValueError as exc:
+        db.session.rollback()
+        return jsonify({"error": "bad_request", "message": str(exc)}), 400
+
+    if apply_changes:
+        db.session.commit()
+    return jsonify(result)
+
+
+@scope_bp.post("/bulk/preview")
+@admin_required
+def preview_bulk_scope_update():
+    return _bulk_scope_update_response(apply_changes=False)
+
+
+@scope_bp.post("/bulk/apply")
+@admin_required
+def apply_bulk_scope_update():
+    return _bulk_scope_update_response(apply_changes=True)
 
 
 @scope_bp.get("/user/assigned-count")
