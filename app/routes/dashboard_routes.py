@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from uuid import UUID
 
 from flask import Blueprint, g, jsonify, request
 
@@ -8,6 +9,15 @@ from ..auth import admin_required, roles_required
 from ..services.dashboard_metrics_service import DashboardMetricsService
 
 dashboard_bp = Blueprint("dashboards", __name__, url_prefix="/dashboards")
+
+
+class DashboardFilterError(ValueError):
+    pass
+
+
+@dashboard_bp.errorhandler(DashboardFilterError)
+def handle_dashboard_filter_error(exc):
+    return jsonify({"error": "dashboard_filter_error", "message": str(exc)}), 400
 
 
 def _parse_bool(value, default=False) -> bool:
@@ -57,6 +67,15 @@ def _parse_datetime(value):
         return None
 
 
+def _parse_uuid_filter(value, label: str):
+    if not value:
+        return None
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError):
+        raise DashboardFilterError(f"{label} inválido.") from None
+
+
 def _common_filters() -> dict:
     return {
         "status": request.args.get("status") or None,
@@ -65,6 +84,10 @@ def _common_filters() -> dict:
         "created_by_id": request.args.get("createdById") or request.args.get("created_by_id") or None,
         "responsible_user_id": request.args.get("responsibleUserId") or request.args.get("responsible_user_id") or None,
         "client_id": request.args.get("clientId") or request.args.get("client_id") or None,
+        "tag_id": _parse_uuid_filter(
+            request.args.get("tagId") or request.args.get("tag_id"),
+            "tagId",
+        ),
         "q": request.args.get("q") or None,
         "date_from": _parse_datetime(request.args.get("dateFrom") or request.args.get("date_from")),
         "date_to": _parse_datetime(request.args.get("dateTo") or request.args.get("date_to")),
@@ -82,15 +105,16 @@ def admin_dashboard():
 
     overview = service.get_admin_metrics_overview(
         status=filters["status"],
+        tag_id=filters["tag_id"],
         date_from=filters["date_from"],
         date_to=filters["date_to"],
     )
 
     scopes_by_user = service.get_scopes_by_user(
         status=filters["status"],
+        tag_id=filters["tag_id"],
         date_from=filters["date_from"],
         date_to=filters["date_to"],
-        include_scopes=False,
     )
 
     return jsonify(
@@ -123,6 +147,7 @@ def admin_metrics_overview():
 
     data = service.get_admin_metrics_overview(
         status=filters["status"],
+        tag_id=filters["tag_id"],
         date_from=filters["date_from"],
         date_to=filters["date_to"],
     )
@@ -145,6 +170,7 @@ def admin_scopes_by_user():
     data = service.get_scopes_by_user(
         group_by=group_by,
         status=filters["status"],
+        tag_id=filters["tag_id"],
         date_from=filters["date_from"],
         date_to=filters["date_to"],
     )
@@ -156,6 +182,7 @@ def admin_scopes_by_user():
 def admin_scopes_for_user(user_id):
     service = DashboardMetricsService(g.current_user)
     filters = _common_filters()
+    parsed_user_id = _parse_uuid_filter(user_id, "userId")
 
     group_by = (
         request.args.get("groupBy")
@@ -177,9 +204,10 @@ def admin_scopes_for_user(user_id):
     )
 
     data = service.get_scopes_for_user(
-        user_id=user_id,
+        user_id=parsed_user_id,
         group_by=group_by,
         status=filters["status"],
+        tag_id=filters["tag_id"],
         date_from=filters["date_from"],
         date_to=filters["date_to"],
         limit=limit,
@@ -216,6 +244,7 @@ def admin_clients_by_user():
     data = service.get_clients_by_user(
         group_by=group_by,
         status=filters["status"],
+        tag_id=filters["tag_id"],
         date_from=filters["date_from"],
         date_to=filters["date_to"],
         include_clients=include_clients,
@@ -230,6 +259,7 @@ def admin_clients_by_user():
 def admin_clients_for_user(user_id):
     service = DashboardMetricsService(g.current_user)
     filters = _common_filters()
+    parsed_user_id = _parse_uuid_filter(user_id, "userId")
 
     group_by = (
         request.args.get("groupBy")
@@ -251,9 +281,10 @@ def admin_clients_for_user(user_id):
     )
 
     data = service.get_clients_for_user(
-        user_id=user_id,
+        user_id=parsed_user_id,
         group_by=group_by,
         status=filters["status"],
+        tag_id=filters["tag_id"],
         date_from=filters["date_from"],
         date_to=filters["date_to"],
         limit=limit,
@@ -272,6 +303,7 @@ def admin_services_summary():
 
     data = service.get_services_summary(
         status=filters["status"],
+        tag_id=filters["tag_id"],
         operation_type=filters["operation_type"],
         service_code=filters["service_code"],
         date_from=filters["date_from"],
@@ -297,6 +329,7 @@ def admin_services_by_scope():
         created_by_id=filters["created_by_id"],
         responsible_user_id=filters["responsible_user_id"],
         client_id=filters["client_id"],
+        tag_id=filters["tag_id"],
         q=filters["q"],
         date_from=filters["date_from"],
         date_to=filters["date_to"],

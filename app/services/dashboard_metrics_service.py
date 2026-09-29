@@ -4,10 +4,20 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, distinct, or_
+from sqlalchemy import distinct, func, or_
 
 from ..extensions import db
-from ..models import Client, Scope, ScopeAssignment, ScopeService, ServiceCatalog, User
+from ..models import (
+    Client,
+    Scope,
+    ScopeAssignment,
+    ScopeService,
+    ServiceCatalog,
+    User,
+    UserTag,
+    UserTagAssignment,
+)
+from .user_tags import serialize_user_tag
 
 
 class DashboardMetricsService:
@@ -38,8 +48,77 @@ class DashboardMetricsService:
 
     def _apply_scope_org_filter(self, query):
         if self.organization_id:
-            return query.filter(Scope.organization_id == self.organization_id)
+            query = query.filter(Scope.organization_id == self.organization_id)
+
+        if self.current_user.role != "admin":
+            query = query.filter(
+                or_(
+                    Scope.status == "published",
+                    Scope.created_by_id == self.current_user.id,
+                )
+            )
+
         return query
+
+    def _user_has_tag(self, user_id_column, tag_id):
+        return (
+            db.session.query(UserTagAssignment.id)
+            .join(UserTag, UserTag.id == UserTagAssignment.tag_id)
+            .filter(UserTagAssignment.user_id == user_id_column)
+            .filter(UserTagAssignment.tag_id == tag_id)
+            .filter(UserTag.organization_id == self.organization_id)
+            .exists()
+        )
+
+    def _scope_has_tagged_user(self, tag_id):
+        assignment_match = (
+            db.session.query(ScopeAssignment.id)
+            .join(
+                UserTagAssignment,
+                UserTagAssignment.user_id == ScopeAssignment.user_id,
+            )
+            .join(UserTag, UserTag.id == UserTagAssignment.tag_id)
+            .filter(ScopeAssignment.scope_id == Scope.id)
+            .filter(ScopeAssignment.active.is_(True))
+            .filter(UserTagAssignment.tag_id == tag_id)
+            .filter(UserTag.organization_id == self.organization_id)
+            .exists()
+        )
+
+        return or_(
+            self._user_has_tag(Scope.created_by_id, tag_id),
+            self._user_has_tag(Scope.responsible_user_id, tag_id),
+            assignment_match,
+        )
+
+    def _user_tags_map(self, user_ids) -> dict:
+        ids = list({user_id for user_id in user_ids if user_id})
+        if not ids:
+            return {}
+
+        rows = (
+            db.session.query(UserTagAssignment.user_id, UserTag)
+            .join(UserTag, UserTag.id == UserTagAssignment.tag_id)
+            .filter(UserTagAssignment.user_id.in_(ids))
+            .filter(UserTag.organization_id == self.organization_id)
+            .order_by(UserTag.is_master.desc(), UserTag.name.asc())
+            .all()
+        )
+        result = {user_id: [] for user_id in ids}
+        for user_id, tag in rows:
+            result.setdefault(user_id, []).append(serialize_user_tag(tag))
+        return result
+
+    def _user_has_tag_id(self, user_id, tag_id) -> bool:
+        return (
+            db.session.query(UserTagAssignment.id)
+            .join(UserTag, UserTag.id == UserTagAssignment.tag_id)
+            .filter(UserTagAssignment.user_id == user_id)
+            .filter(UserTagAssignment.tag_id == tag_id)
+            .filter(UserTag.organization_id == self.organization_id)
+            .first()
+            is not None
+        )
 
     def _apply_common_scope_filters(
         self,
@@ -49,6 +128,7 @@ class DashboardMetricsService:
         created_by_id: str | None = None,
         responsible_user_id: str | None = None,
         client_id: str | None = None,
+        tag_id=None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
     ):
@@ -65,6 +145,9 @@ class DashboardMetricsService:
 
         if client_id:
             query = query.filter(Scope.client_id == client_id)
+
+        if tag_id:
+            query = query.filter(self._scope_has_tagged_user(tag_id))
 
         if date_from:
             query = query.filter(Scope.created_at >= date_from)
@@ -131,6 +214,7 @@ class DashboardMetricsService:
         group_by: str,
         roles: list[str],
         status: str | None = None,
+        tag_id=None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
     ) -> dict:
@@ -152,9 +236,13 @@ class DashboardMetricsService:
         base_query = self._apply_common_scope_filters(
             base_query,
             status=status,
+            tag_id=tag_id,
             date_from=date_from,
             date_to=date_to,
         )
+
+        if tag_id:
+            base_query = base_query.filter(self._user_has_tag(User.id, tag_id))
 
         rows = (
             base_query
@@ -164,6 +252,7 @@ class DashboardMetricsService:
         )
 
         items = []
+        tags_by_user = self._user_tags_map(row.user_id for row in rows)
 
         for row in rows:
             item = {
@@ -172,6 +261,7 @@ class DashboardMetricsService:
                 "userEmail": row.user_email,
                 "userRole": row.user_role,
                 "userSetor": row.user_setor,
+                "userTags": tags_by_user.get(row.user_id, []),
                 "assignmentRoles": roles,
                 "totalScopes": int(row.total_scopes or 0),
             }
@@ -181,6 +271,7 @@ class DashboardMetricsService:
         return {
             "groupBy": group_by,
             "assignmentRoles": roles,
+            "tagId": str(tag_id) if tag_id else None,
             "items": items,
             "totalUsers": len(items),
             "totalScopes": sum(item["totalScopes"] for item in items),
@@ -190,6 +281,7 @@ class DashboardMetricsService:
         self,
         *,
         status: str | None = None,
+        tag_id=None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
     ) -> dict:
@@ -208,9 +300,13 @@ class DashboardMetricsService:
         base_query = self._apply_common_scope_filters(
             base_query,
             status=status,
+            tag_id=tag_id,
             date_from=date_from,
             date_to=date_to,
         )
+
+        if tag_id:
+            base_query = base_query.filter(self._user_has_tag(User.id, tag_id))
 
         rows = (
             base_query
@@ -220,6 +316,7 @@ class DashboardMetricsService:
         )
 
         items = []
+        tags_by_user = self._user_tags_map(row.user_id for row in rows)
 
         for row in rows:
             items.append({
@@ -228,12 +325,14 @@ class DashboardMetricsService:
                 "userEmail": row.user_email,
                 "userRole": row.user_role,
                 "userSetor": row.user_setor,
+                "userTags": tags_by_user.get(row.user_id, []),
                 "assignmentRoles": [],
                 "totalScopes": int(row.total_scopes or 0),
             })
 
         return {
             "groupBy": "created_by",
+            "tagId": str(tag_id) if tag_id else None,
             "items": items,
             "totalUsers": len(items),
             "totalScopes": sum(item["totalScopes"] for item in items),
@@ -244,6 +343,7 @@ class DashboardMetricsService:
         *,
         group_by: str = "created_by",
         status: str | None = None,
+        tag_id=None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
     ) -> dict:
@@ -260,6 +360,7 @@ class DashboardMetricsService:
         if group_by == "created_by":
             return self._get_scopes_by_created_by(
                 status=status,
+                tag_id=tag_id,
                 date_from=date_from,
                 date_to=date_to,
             )
@@ -279,6 +380,7 @@ class DashboardMetricsService:
             group_by=group_by,
             roles=roles,
             status=status,
+            tag_id=tag_id,
             date_from=date_from,
             date_to=date_to,
         )
@@ -289,12 +391,24 @@ class DashboardMetricsService:
         user_id: str,
         group_by: str = "created_by",
         status: str | None = None,
+        tag_id=None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> dict:
         limit, offset = self._pagination(limit, offset)
+
+        if tag_id and not self._user_has_tag_id(user_id, tag_id):
+            return {
+                "userId": str(user_id),
+                "groupBy": group_by,
+                "tagId": str(tag_id),
+                "items": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+            }
 
         if group_by == "created_by":
             query = (
@@ -306,6 +420,7 @@ class DashboardMetricsService:
             query = self._apply_common_scope_filters(
                 query,
                 status=status,
+                tag_id=tag_id,
                 date_from=date_from,
                 date_to=date_to,
             )
@@ -335,6 +450,7 @@ class DashboardMetricsService:
             scope_ids_subquery = self._apply_common_scope_filters(
                 scope_ids_subquery,
                 status=status,
+                tag_id=tag_id,
                 date_from=date_from,
                 date_to=date_to,
             )
@@ -363,6 +479,7 @@ class DashboardMetricsService:
         return {
             "userId": str(user_id),
             "groupBy": group_by,
+            "tagId": str(tag_id) if tag_id else None,
             "items": [
                 self._scope_dashboard_item(scope)
                 for scope in scopes
@@ -398,6 +515,7 @@ class DashboardMetricsService:
         group_by: str,
         roles: list[str],
         status: str | None = None,
+        tag_id=None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
         include_clients: bool = False,
@@ -423,9 +541,13 @@ class DashboardMetricsService:
         base_query = self._apply_common_scope_filters(
             base_query,
             status=status,
+            tag_id=tag_id,
             date_from=date_from,
             date_to=date_to,
         )
+
+        if tag_id:
+            base_query = base_query.filter(self._user_has_tag(User.id, tag_id))
 
         rows = (
             base_query
@@ -435,6 +557,7 @@ class DashboardMetricsService:
         )
 
         items = []
+        tags_by_user = self._user_tags_map(row.user_id for row in rows)
         clients_limit_per_user, _ = self._pagination(clients_limit_per_user, 0)
 
         for row in rows:
@@ -444,6 +567,7 @@ class DashboardMetricsService:
                 "userEmail": row.user_email,
                 "userRole": row.user_role,
                 "userSetor": row.user_setor,
+                "userTags": tags_by_user.get(row.user_id, []),
                 "assignmentRoles": roles,
                 "totalClients": int(row.total_clients or 0),
             }
@@ -453,6 +577,7 @@ class DashboardMetricsService:
                     user_id=str(row.user_id),
                     group_by=group_by,
                     status=status,
+                    tag_id=tag_id,
                     date_from=date_from,
                     date_to=date_to,
                     limit=clients_limit_per_user,
@@ -468,6 +593,7 @@ class DashboardMetricsService:
         return {
             "groupBy": group_by,
             "assignmentRoles": roles,
+            "tagId": str(tag_id) if tag_id else None,
             "items": items,
             "totalUsers": len(items),
             "totalClients": sum(item["totalClients"] for item in items),
@@ -477,6 +603,7 @@ class DashboardMetricsService:
         self,
         *,
         status: str | None = None,
+        tag_id=None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
         include_clients: bool = False,
@@ -499,9 +626,13 @@ class DashboardMetricsService:
         base_query = self._apply_common_scope_filters(
             base_query,
             status=status,
+            tag_id=tag_id,
             date_from=date_from,
             date_to=date_to,
         )
+
+        if tag_id:
+            base_query = base_query.filter(self._user_has_tag(User.id, tag_id))
 
         rows = (
             base_query
@@ -511,6 +642,7 @@ class DashboardMetricsService:
         )
 
         items = []
+        tags_by_user = self._user_tags_map(row.user_id for row in rows)
         clients_limit_per_user, _ = self._pagination(clients_limit_per_user, 0)
 
         for row in rows:
@@ -520,6 +652,7 @@ class DashboardMetricsService:
                 "userEmail": row.user_email,
                 "userRole": row.user_role,
                 "userSetor": row.user_setor,
+                "userTags": tags_by_user.get(row.user_id, []),
                 "assignmentRoles": [],
                 "totalClients": int(row.total_clients or 0),
             }
@@ -529,6 +662,7 @@ class DashboardMetricsService:
                     user_id=str(row.user_id),
                     group_by="created_by",
                     status=status,
+                    tag_id=tag_id,
                     date_from=date_from,
                     date_to=date_to,
                     limit=clients_limit_per_user,
@@ -543,6 +677,7 @@ class DashboardMetricsService:
 
         return {
             "groupBy": "created_by",
+            "tagId": str(tag_id) if tag_id else None,
             "items": items,
             "totalUsers": len(items),
             "totalClients": sum(item["totalClients"] for item in items),
@@ -553,6 +688,7 @@ class DashboardMetricsService:
         *,
         group_by: str = "analista_da",
         status: str | None = None,
+        tag_id=None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
         include_clients: bool = False,
@@ -571,6 +707,7 @@ class DashboardMetricsService:
         if group_by == "created_by":
             return self._get_clients_by_created_by(
                 status=status,
+                tag_id=tag_id,
                 date_from=date_from,
                 date_to=date_to,
                 include_clients=include_clients,
@@ -592,6 +729,7 @@ class DashboardMetricsService:
             group_by=group_by,
             roles=roles,
             status=status,
+            tag_id=tag_id,
             date_from=date_from,
             date_to=date_to,
             include_clients=include_clients,
@@ -604,12 +742,24 @@ class DashboardMetricsService:
         user_id: str,
         group_by: str = "analista_da",
         status: str | None = None,
+        tag_id=None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> dict:
         limit, offset = self._pagination(limit, offset)
+
+        if tag_id and not self._user_has_tag_id(user_id, tag_id):
+            return {
+                "userId": str(user_id),
+                "groupBy": group_by,
+                "tagId": str(tag_id),
+                "items": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+            }
 
         if group_by == "created_by":
             client_ids_query = (
@@ -625,6 +775,7 @@ class DashboardMetricsService:
             client_ids_query = self._apply_common_scope_filters(
                 client_ids_query,
                 status=status,
+                tag_id=tag_id,
                 date_from=date_from,
                 date_to=date_to,
             )
@@ -659,6 +810,7 @@ class DashboardMetricsService:
             client_ids_query = self._apply_common_scope_filters(
                 client_ids_query,
                 status=status,
+                tag_id=tag_id,
                 date_from=date_from,
                 date_to=date_to,
             )
@@ -682,6 +834,7 @@ class DashboardMetricsService:
         return {
             "userId": str(user_id),
             "groupBy": group_by,
+            "tagId": str(tag_id) if tag_id else None,
             "items": [
                 self._client_dashboard_item(client)
                 for client, _last_scope_created_at in rows
@@ -697,6 +850,7 @@ class DashboardMetricsService:
         status: str | None = None,
         operation_type: str | None = None,
         service_code: str | None = None,
+        tag_id=None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
     ) -> dict:
@@ -727,6 +881,7 @@ class DashboardMetricsService:
         query = self._apply_common_scope_filters(
             query,
             status=status,
+            tag_id=tag_id,
             date_from=date_from,
             date_to=date_to,
         )
@@ -762,6 +917,7 @@ class DashboardMetricsService:
         total_scopes_query = self._apply_common_scope_filters(
             total_scopes_query,
             status=status,
+            tag_id=tag_id,
             date_from=date_from,
             date_to=date_to,
         )
@@ -820,6 +976,7 @@ class DashboardMetricsService:
         created_by_id: str | None = None,
         responsible_user_id: str | None = None,
         client_id: str | None = None,
+        tag_id=None,
         q: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
@@ -868,6 +1025,7 @@ class DashboardMetricsService:
             created_by_id=created_by_id,
             responsible_user_id=responsible_user_id,
             client_id=client_id,
+            tag_id=tag_id,
             date_from=date_from,
             date_to=date_to,
         )
@@ -945,6 +1103,7 @@ class DashboardMetricsService:
         self,
         *,
         status: str | None = None,
+        tag_id=None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
     ) -> dict:
@@ -985,6 +1144,7 @@ class DashboardMetricsService:
         scope_query = self._apply_common_scope_filters(
             db.session.query(Scope),
             status=status,
+            tag_id=tag_id,
             date_from=date_from,
             date_to=date_to,
         )
@@ -1018,6 +1178,7 @@ class DashboardMetricsService:
         service_query = self._apply_common_scope_filters(
             service_query,
             status=status,
+            tag_id=tag_id,
             date_from=date_from,
             date_to=date_to,
         )
@@ -1031,6 +1192,7 @@ class DashboardMetricsService:
         amount_query = self._apply_common_scope_filters(
             amount_query,
             status=status,
+            tag_id=tag_id,
             date_from=date_from,
             date_to=date_to,
         )
@@ -1044,6 +1206,7 @@ class DashboardMetricsService:
         distinct_services_query = self._apply_common_scope_filters(
             distinct_services_query,
             status=status,
+            tag_id=tag_id,
             date_from=date_from,
             date_to=date_to,
         )
