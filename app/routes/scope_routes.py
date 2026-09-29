@@ -232,9 +232,9 @@ def get_bulk_update_candidates():
     try:
         result = processor.list_bulk_update_candidates(
             q=request.args.get("q"),
-            status=request.args.get("status"),
-            operation=request.args.get("operation"),
-            tag_id=request.args.get("tagId"),
+            commercial_user_ids=request.args.get("commercialUserIds"),
+            analyst_da_user_ids=request.args.get("analystDaUserIds"),
+            analyst_ae_user_ids=request.args.get("analystAeUserIds"),
             limit=request.args.get("limit", 50),
             offset=request.args.get("offset", 0),
         )

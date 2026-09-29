@@ -9,19 +9,23 @@ O fluxo de alteração em massa está disponível para usuários autenticados e 
 
 ## Pesquisa e filtros
 
-`GET /scopes/bulk/candidates` aceita:
+`GET /scopes/bulk/candidates` lista exclusivamente escopos publicados e aceita:
 
 - `q`: palavras pesquisadas, em conjunto, na razão social, nome resumido, CNPJ,
-  status e conteúdo JSON do escopo;
-- `status`: `draft`, `published` ou `archived`;
-- `operation`: `IMPORTACAO` ou `EXPORTACAO`;
-- `tagId`: retorna escopos vinculados a usuários com a tag informada;
+  e conteúdo JSON do escopo;
+- `commercialUserIds`: responsáveis comerciais, separados por vírgula;
+- `analystDaUserIds`: analistas DA, separados por vírgula;
+- `analystAeUserIds`: analistas AE, separados por vírgula;
 - `limit` e `offset`: paginação, limitada a 200 registros por página.
 
-As consultas e atualizações são sempre limitadas à organização do usuário. Usuários
-não administradores podem trabalhar com escopos publicados e com os próprios
-rascunhos; rascunhos de outros autores não são listados nem alterados. Administradores
-mantêm acesso a todos os escopos da organização.
+Dentro do mesmo grupo de pessoas, o filtro usa lógica OU. Entre grupos, utiliza
+lógica E. Importação e exportação permanecem juntas na listagem e não possuem filtro
+de operação. Na interface, as pessoas são agrupadas por função e cada seleção aparece
+como uma tag removível.
+
+As consultas e atualizações são sempre limitadas à organização do usuário e a escopos
+publicados. Rascunhos e escopos arquivados não são listados, aceitos na prévia ou
+alterados, inclusive para administradores.
 
 ## Campos alteráveis
 
@@ -54,9 +58,8 @@ no schema do escopo.
 }
 ```
 
-Para escopos publicados, a operação atualiza `draft`, `published_snapshot`,
-atribuições relacionais e cria uma nova `ScopeVersion`. Rascunhos permanecem
-restritos ao autor e aos administradores nas demais consultas da plataforma.
+A operação atualiza `draft`, `published_snapshot`, atribuições relacionais e cria
+uma nova `ScopeVersion`.
 
 A interface exige uma confirmação explícita, com o resumo do campo, usuário de
 destino e quantidade de escopos, antes de chamar o endpoint de aplicação.
