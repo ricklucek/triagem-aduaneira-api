@@ -309,6 +309,30 @@ def test_draft_scope_is_private_to_author_and_admin_until_published(api):
     assert draft_list["items"] == []
     assert draft_list["total"] == 0
 
+    visible_draft_list = client.get(
+        "/scopes?include_drafts=true",
+        headers=other_headers,
+    ).get_json()
+    assert {item["id"] for item in visible_draft_list["items"]} == {
+        scope_id,
+        private_scope_response.get_json()["id"],
+    }
+    assert all(item["status"] == "draft" for item in visible_draft_list["items"])
+    assert all(item["can_view"] is False for item in visible_draft_list["items"])
+    assert client.get(f"/scopes/{scope_id}", headers=other_headers).status_code == 404
+
+    author_draft_list = client.get(
+        "/scopes?include_drafts=true",
+        headers=author_headers,
+    ).get_json()
+    assert all(item["can_view"] is True for item in author_draft_list["items"])
+
+    admin_draft_list = client.get(
+        "/scopes?include_drafts=true",
+        headers=admin_headers,
+    ).get_json()
+    assert all(item["can_view"] is True for item in admin_draft_list["items"])
+
     other_clients = client.get("/clients", headers=other_headers).get_json()["items"]
     hidden_client = next(
         item for item in other_clients if item["id"] == published_client["id"]

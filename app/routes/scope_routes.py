@@ -161,7 +161,9 @@ def list_scopes():
     processor = _processor()
     params = scope_list_query_schema.load(request.args)
 
-    query = processor.scope_query_for_current_user()
+    query = processor.scope_list_query_for_current_user(
+        include_drafts=params["include_drafts"]
+    )
 
     if params.get("status"):
         query = query.filter(Scope.status == params["status"])
