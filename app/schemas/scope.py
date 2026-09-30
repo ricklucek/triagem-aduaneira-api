@@ -50,6 +50,7 @@ class ScopeSchema(SQLAlchemyAutoSchema):
 class ScopeSummarySchema(Schema):
     id = fields.String(required=True)
     status = fields.String(required=True)
+    can_view = fields.Boolean(required=True)
     version = fields.Integer(allow_none=True)
     updated_at = fields.DateTime(allow_none=True)
     last_published_at = fields.DateTime(allow_none=True)
@@ -62,6 +63,7 @@ class ScopeSummarySchema(Schema):
 
 class ScopeListQuerySchema(Schema):
     status = fields.String(required=False)
+    include_drafts = fields.Boolean(load_default=False, data_key="include_drafts")
     q = fields.String(required=False)
     cnpj = fields.String(required=False)
     client_id = fields.String(required=False)

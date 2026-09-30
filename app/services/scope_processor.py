@@ -209,6 +209,14 @@ class ScopeDataProcessor:
             query = query.filter(Scope.organization_id == self.organization_id)
         return self._apply_scope_visibility_filter(query)
 
+    def scope_list_query_for_current_user(self, *, include_drafts: bool = False):
+        query = Scope.query
+        if self.organization_id:
+            query = query.filter(Scope.organization_id == self.organization_id)
+        if include_drafts:
+            return query.filter(Scope.status.in_(("published", "draft")))
+        return self._apply_scope_visibility_filter(query)
+
     def _apply_scope_visibility_filter(self, query):
         if getattr(self.current_user, "role", None) != "admin":
             query = query.filter(
@@ -236,9 +244,15 @@ class ScopeDataProcessor:
         return query
 
     def build_scope_summary(self, scope: Scope) -> dict:
+        can_view = (
+            getattr(self.current_user, "role", None) == "admin"
+            or scope.status == "published"
+            or scope.created_by_id == self.user_id
+        )
         return {
             "id": str(scope.id),
             "status": scope.status,
+            "can_view": can_view,
             "version": scope.version,
             "updated_at": scope.updated_at,
             "last_published_at": scope.last_published_at,
