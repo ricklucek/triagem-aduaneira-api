@@ -1,4 +1,5 @@
 from datetime import datetime
+from uuid import UUID, uuid4
 
 from flask import Blueprint, g, jsonify, request
 from sqlalchemy import and_, or_
@@ -12,6 +13,10 @@ from ..extensions import db
 from ..models import Client, Scope, ScopeAssignment, ScopeVersion, User
 from ..schemas import ScopeBulkResponsibleSchema, ScopeListQuerySchema, ScopeSchema, UserSchema
 from ..services.scope_processor import ClientScopeConflictError, ScopeDataProcessor
+from ..services.audit_service import (
+    record_scope_event,
+    snapshot_scope,
+)
 
 scope_bp = Blueprint("scopes", __name__, url_prefix="/scopes")
 scope_schema = ScopeSchema()
@@ -69,6 +74,22 @@ def _serialize_responsibles() -> list[dict]:
     ]
 
 
+def _scope_label(scope: Scope) -> str:
+    if scope.client:
+        return (
+            scope.client.nome_resumido
+            or scope.client.razao_social
+            or scope.client.cnpj
+        )
+    company = (scope.draft or {}).get("sobreEmpresa") or {}
+    return (
+        company.get("nomeResumido")
+        or company.get("razaoSocial")
+        or company.get("cnpj")
+        or str(scope.id)
+    )
+
+
 @scope_bp.get("/metadata")
 @auth_required
 def get_scope_metadata():
@@ -118,6 +139,17 @@ def create_scope():
     processor.sync_assignments_from_draft(scope, draft)
     processor.sync_services_from_draft(scope, draft)
     processor.sync_prepostos_from_draft(scope, draft)
+
+    db.session.flush()
+    record_scope_event(
+        actor=g.current_user,
+        scope=scope,
+        action="scope.created",
+        title=f"Escopo criado — {_scope_label(scope)}",
+        summary="Novo rascunho de escopo cadastrado.",
+        before_state=None,
+        after_state=snapshot_scope(scope),
+    )
 
     db.session.commit()
     return jsonify({"id": str(scope.id)}), 201
@@ -204,6 +236,22 @@ def bulk_update_assignment():
 
     processor = _processor()
     payload = _load_optional_json_payload()
+    try:
+        operation_id = UUID(str(payload.get("operationId") or uuid4()))
+    except (TypeError, ValueError):
+        return jsonify({"error": "bad_request", "message": "operationId inválido."}), 400
+    requested_ids = []
+    for value in payload.get("scopeIds") or []:
+        try:
+            requested_ids.append(UUID(str(value)))
+        except (TypeError, ValueError):
+            continue
+    before_by_id = {
+        str(scope.id): snapshot_scope(scope)
+        for scope in processor.scope_query_for_current_user()
+        .filter(Scope.id.in_(requested_ids))
+        .all()
+    }
 
     try:
         result = processor.bulk_update_assignment(
@@ -215,7 +263,31 @@ def bulk_update_assignment():
     except ValueError as exc:
         return jsonify({"error": "bad_request", "message": str(exc)}), 400
 
+    db.session.flush()
+    updated_ids = result.get("updatedScopeIds") or []
+    if updated_ids:
+        for scope in processor.scope_query_for_current_user().filter(
+            Scope.id.in_([UUID(value) for value in updated_ids])
+        ).all():
+            record_scope_event(
+                actor=g.current_user,
+                scope=scope,
+                action="scope.bulk_updated",
+                title=f"Alteração em massa — {payload.get('groupBy') or 'atribuições'}",
+                summary=f"{len(updated_ids)} escopo(s) alterado(s).",
+                before_state=before_by_id.get(str(scope.id)),
+                after_state=snapshot_scope(scope),
+                details={
+                    "field": payload.get("groupBy"),
+                    "fromUserId": payload.get("fromUserId"),
+                    "toUserId": payload.get("toUserId"),
+                    "legacyFlow": True,
+                },
+                operation_id=operation_id,
+                append_operation=True,
+            )
     db.session.commit()
+    result["operationId"] = str(operation_id)
     return jsonify(result)
 
 
@@ -246,6 +318,23 @@ def get_bulk_update_candidates():
 def _bulk_scope_update_response(*, apply_changes: bool):
     processor = _processor()
     payload = _load_optional_json_payload()
+    operation_id = None
+    before_by_id = {}
+    if apply_changes:
+        try:
+            operation_id = UUID(str(payload.get("operationId") or uuid4()))
+        except (TypeError, ValueError):
+            return jsonify({"error": "bad_request", "message": "operationId inválido."}), 400
+        requested_ids = []
+        for value in payload.get("scopeIds") or []:
+            try:
+                requested_ids.append(UUID(str(value)))
+            except (TypeError, ValueError):
+                continue
+        for scope in processor.scope_query_for_current_user().filter(
+            Scope.id.in_(requested_ids)
+        ).all():
+            before_by_id[str(scope.id)] = snapshot_scope(scope)
     try:
         method = (
             processor.apply_bulk_scope_update
@@ -262,7 +351,33 @@ def _bulk_scope_update_response(*, apply_changes: bool):
         return jsonify({"error": "bad_request", "message": str(exc)}), 400
 
     if apply_changes:
+        db.session.flush()
+        updated_scopes = (
+            processor.scope_query_for_current_user()
+            .filter(Scope.id.in_([UUID(value) for value in result["updatedScopeIds"]]))
+            .all()
+            if result.get("updatedScopeIds")
+            else []
+        )
+        for scope in updated_scopes:
+            record_scope_event(
+                actor=g.current_user,
+                scope=scope,
+                action="scope.bulk_updated",
+                title=f"Alteração em massa — {result.get('fieldLabel') or payload.get('field')}",
+                summary=f"{result.get('impactedScopes', 0)} escopo(s) alterado(s).",
+                before_state=before_by_id.get(str(scope.id)),
+                after_state=snapshot_scope(scope),
+                details={
+                    "field": result.get("field"),
+                    "fieldLabel": result.get("fieldLabel"),
+                    "targetUser": result.get("targetUser"),
+                },
+                operation_id=operation_id,
+                append_operation=True,
+            )
         db.session.commit()
+        result["operationId"] = str(operation_id)
     return jsonify(result)
 
 
@@ -399,6 +514,7 @@ def get_scope(scope_id: str):
 def update_scope(scope_id: str):
     processor = _processor()
     scope = processor.get_scope_for_current_user(scope_id)
+    before = snapshot_scope(scope)
     normalized_draft = processor.normalize_draft(_load_scope_payload())
 
     processor.apply_draft_to_scope(scope, normalized_draft)
@@ -410,6 +526,16 @@ def update_scope(scope_id: str):
     processor.sync_services_from_draft(scope, normalized_draft)
     processor.sync_prepostos_from_draft(scope, normalized_draft)
 
+    db.session.flush()
+    record_scope_event(
+        actor=g.current_user,
+        scope=scope,
+        action="scope.updated",
+        title=f"Escopo atualizado — {_scope_label(scope)}",
+        summary="Dados do escopo alterados.",
+        before_state=before,
+        after_state=snapshot_scope(scope),
+    )
     db.session.commit()
     return jsonify(scope_schema.dump(scope))
 
@@ -419,6 +545,7 @@ def update_scope(scope_id: str):
 def publish_scope(scope_id: str):
     processor = _processor()
     scope = processor.get_scope_for_current_user(scope_id)
+    before = snapshot_scope(scope)
     now = datetime.now()
 
     normalized_draft = processor.normalize_draft(scope.draft)
@@ -445,6 +572,18 @@ def publish_scope(scope_id: str):
             published_snapshot=normalized_draft,
             created_by_id=g.current_user.id,
         )
+    )
+
+    db.session.flush()
+    record_scope_event(
+        actor=g.current_user,
+        scope=scope,
+        action="scope.published",
+        title=f"Escopo publicado — {_scope_label(scope)}",
+        summary=f"Versão {scope.version} publicada.",
+        before_state=before,
+        after_state=snapshot_scope(scope),
+        details={"version": scope.version},
     )
 
     db.session.commit()
@@ -547,6 +686,17 @@ def list_scope_versions(scope_id: str):
 def delete_scope(scope_id: str):
     processor = _processor()
     scope = processor.get_scope_for_current_user(scope_id)
+    before = snapshot_scope(scope)
+    record_scope_event(
+        actor=g.current_user,
+        scope=scope,
+        action="scope.deleted",
+        title=f"Escopo excluído — {_scope_label(scope)}",
+        summary="Escopo excluído do cadastro.",
+        before_state=before,
+        after_state=None,
+    )
+    db.session.flush()
     db.session.delete(scope)
     db.session.commit()
     return "", 204

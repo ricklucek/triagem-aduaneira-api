@@ -258,7 +258,12 @@ class ScopeDataProcessor:
         )
 
         scope.draft = normalized_draft
-        scope.responsible_user_id = responsible_user_id or None
+        try:
+            scope.responsible_user_id = (
+                UUID(str(responsible_user_id)) if responsible_user_id else None
+            )
+        except (TypeError, ValueError):
+            scope.responsible_user_id = None
         return scope
 
     # ---------------------------------------------------------------------
@@ -347,8 +352,8 @@ class ScopeDataProcessor:
     # ---------------------------------------------------------------------
     # Assignments
     # ---------------------------------------------------------------------
-    def _extract_assignment_targets(self, draft: dict) -> list[tuple[str, str]]:
-        targets: list[tuple[str, str]] = []
+    def _extract_assignment_targets(self, draft: dict) -> list[tuple[UUID, str]]:
+        targets: list[tuple[Any, str]] = []
         sobre_empresa = draft.get("sobreEmpresa") or {}
         operacao = draft.get("operacao") or {}
 
@@ -379,19 +384,23 @@ class ScopeDataProcessor:
                 targets.append((user_id, "ANALISTA_AE_EXPORT"))
 
         # Remove duplicidades mantendo ordem.
-        deduped = []
+        deduped: list[tuple[UUID, str]] = []
         seen = set()
         for user_id, role in targets:
-            key = (str(user_id), role)
+            try:
+                normalized_user_id = UUID(str(user_id))
+            except (TypeError, ValueError):
+                continue
+            key = (str(normalized_user_id), role)
             if key not in seen:
-                deduped.append((str(user_id), role))
+                deduped.append((normalized_user_id, role))
                 seen.add(key)
         return deduped
 
     def sync_assignments_from_draft(self, scope: Scope, draft: dict) -> dict[str, int]:
         now = datetime.utcnow()
         desired = self._extract_assignment_targets(draft)
-        desired_keys = {(user_id, role) for user_id, role in desired}
+        desired_keys = {(str(user_id), role) for user_id, role in desired}
         counters = {"created": 0, "updated": 0, "deactivated": 0}
 
         active_assignments = ScopeAssignment.query.filter(
