@@ -21,6 +21,12 @@ from ..services.user_tags import (
     serialize_user_tag,
     slugify_tag,
 )
+from ..services.audit_service import (
+    add_audit_change,
+    record_audit_event,
+    snapshot_tag,
+    snapshot_user,
+)
 
 user_bp = Blueprint("users", __name__, url_prefix="/users")
 user_schema = UserSchema()
@@ -65,6 +71,45 @@ def _bootstrap_user_tags() -> None:
 def _error_response(exc: Exception, status=400):
     db.session.rollback()
     return jsonify({"error": "user_profile_error", "message": str(exc)}), status
+
+
+def _record_user_event(*, user, action, title, summary, before, after):
+    event = record_audit_event(
+        actor=g.current_user,
+        module="users",
+        action=action,
+        entity_type="user",
+        entity_id=user.id,
+        title=title,
+        summary=summary,
+    )
+    add_audit_change(
+        event,
+        entity_type="user",
+        entity_id=user.id,
+        subject_user_id=user.id,
+        before_state=before,
+        after_state=after,
+    )
+
+
+def _record_tag_event(*, tag, action, title, before, after):
+    event = record_audit_event(
+        actor=g.current_user,
+        module="users",
+        action=action,
+        entity_type="user_tag",
+        entity_id=tag.id,
+        title=title,
+        summary="Cadastro de categorias de usuários alterado.",
+    )
+    add_audit_change(
+        event,
+        entity_type="user_tag",
+        entity_id=tag.id,
+        before_state=before,
+        after_state=after,
+    )
 
 
 @user_bp.get("")
@@ -166,6 +211,14 @@ def create_tag():
         created_by_id=g.current_user.id,
     )
     db.session.add(tag)
+    db.session.flush()
+    _record_tag_event(
+        tag=tag,
+        action="user_tag.created",
+        title=f"Tag criada — {tag.name}",
+        before=None,
+        after=snapshot_tag(tag),
+    )
     db.session.commit()
     return jsonify(serialize_user_tag(tag)), 201
 
@@ -178,6 +231,7 @@ def update_tag(tag_id: str):
         organization_id=g.current_user.organization_id,
     ).first_or_404()
     payload = request.get_json(silent=True) or {}
+    before = snapshot_tag(tag)
 
     if "name" in payload:
         name = str(payload.get("name") or "").strip()
@@ -197,6 +251,14 @@ def update_tag(tag_id: str):
             return _error_response(UserTagError("A tag Admin não pode ser inativada."))
         tag.active = active
 
+    db.session.flush()
+    _record_tag_event(
+        tag=tag,
+        action="user_tag.updated",
+        title=f"Tag atualizada — {tag.name}",
+        before=before,
+        after=snapshot_tag(tag),
+    )
     db.session.commit()
     item = serialize_user_tag(tag)
     item["users_count"] = UserTagAssignment.query.filter_by(tag_id=tag.id).count()
@@ -251,6 +313,16 @@ def create_user():
             actor=g.current_user,
             requested_role=role,
         )
+        db.session.flush()
+        db.session.expire(user, ["tag_assignments"])
+        _record_user_event(
+            user=user,
+            action="user.created",
+            title=f"Usuário criado — {user.nome}",
+            summary="Novo usuário cadastrado.",
+            before=None,
+            after=snapshot_user(user),
+        )
         db.session.commit()
     except (UserTagError, IntegrityError) as exc:
         return _error_response(exc, 409 if isinstance(exc, IntegrityError) else 400)
@@ -264,6 +336,8 @@ def update_user(user_id: str):
     user = _load_user(user_id)
     payload = request.get_json(silent=True) or {}
     was_admin = is_admin_user(user)
+    before = snapshot_user(user)
+    password_changed = bool(payload.get("password"))
 
     if "nome" in payload:
         nome = str(payload.get("nome") or "").strip()
@@ -309,6 +383,26 @@ def update_user(user_id: str):
 
         if was_admin and (not user.ativo or user.role != "admin"):
             assert_admin_can_be_removed(user)
+        db.session.flush()
+        db.session.expire(user, ["tag_assignments"])
+        after = snapshot_user(user, password_changed=password_changed)
+        if before.get("active") and not after.get("active"):
+            action = "user.deactivated"
+            verb = "inativado"
+        elif not before.get("active") and after.get("active"):
+            action = "user.activated"
+            verb = "reativado"
+        else:
+            action = "user.updated"
+            verb = "atualizado"
+        _record_user_event(
+            user=user,
+            action=action,
+            title=f"Usuário {verb} — {user.nome}",
+            summary="Perfil, acesso ou tags do usuário alterados.",
+            before=before,
+            after=after,
+        )
         db.session.commit()
     except (UserTagError, IntegrityError) as exc:
         return _error_response(exc, 409 if isinstance(exc, IntegrityError) else 400)
@@ -320,6 +414,7 @@ def update_user(user_id: str):
 @admin_required
 def delete_user(user_id: str):
     user = _load_user(user_id)
+    before = snapshot_user(user)
     if user.id == g.current_user.id:
         return _error_response(UserTagError("Você não pode inativar o próprio usuário."))
     if is_admin_user(user):
@@ -328,5 +423,14 @@ def delete_user(user_id: str):
         except UserTagError as exc:
             return _error_response(exc)
     user.ativo = False
+    db.session.flush()
+    _record_user_event(
+        user=user,
+        action="user.deactivated",
+        title=f"Usuário inativado — {user.nome}",
+        summary="Acesso do usuário inativado.",
+        before=before,
+        after=snapshot_user(user),
+    )
     db.session.commit()
     return jsonify({"ok": True, "message": "Usuário inativado com sucesso."})

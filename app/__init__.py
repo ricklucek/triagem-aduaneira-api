@@ -39,6 +39,7 @@ def create_app(config_object=Config):
     )
     from .routes.nfe_carrier_routes import nfe_carrier_bp
     from .routes.fiscal_reference_routes import fiscal_reference_bp
+    from .routes.audit_routes import audit_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(scope_bp)
@@ -58,6 +59,7 @@ def create_app(config_object=Config):
     app.register_blueprint(nfe_context_bp)
     app.register_blueprint(nfe_carrier_bp)
     app.register_blueprint(fiscal_reference_bp)
+    app.register_blueprint(audit_bp)
 
     from .scope_cnae_cli import scope_cnae_cli
     from .preposto_catalog_cli import preposto_catalog_cli
