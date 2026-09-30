@@ -4,6 +4,8 @@ from uuid import UUID, uuid4
 
 import jwt
 import pytest
+from flask import g
+from sqlalchemy.dialects import postgresql
 
 from app import create_app
 from app.extensions import db
@@ -20,6 +22,7 @@ from app.models import (
     UserTagAssignment,
 )
 from app.services.audit_service import sanitize_audit_value
+from app.routes.audit_routes import _audit_event_options_queries
 
 
 class TestConfig:
@@ -207,6 +210,43 @@ def test_scope_and_user_events_are_filtered_and_do_not_expose_passwords(audit_ap
 
     outsider_events = client.get("/audit/events", headers=context["outsider"]).get_json()
     assert outsider_events["total"] == 0
+
+
+def test_audit_options_do_not_apply_distinct_to_json_columns(audit_api):
+    client, context = audit_api
+    scope_id = context["scope_ids"][0]
+    detail = client.get(f"/scopes/{scope_id}", headers=context["admin"]).get_json()
+    draft = detail["draft"]
+    draft["operacao"]["importacao"]["observacoes"] = "audit-search-marker"
+    assert client.put(
+        f"/scopes/{scope_id}", headers=context["admin"], json=draft
+    ).status_code == 200
+
+    admin_options = client.get("/audit/events/options", headers=context["admin"])
+    assert admin_options.status_code == 200
+    assert "scopes" in admin_options.get_json()["modules"]
+
+    regular_options = client.get("/audit/events/options", headers=context["regular"])
+    assert regular_options.status_code == 200
+    assert regular_options.get_json()["actions"] == ["scope.updated"]
+
+    search = client.get(
+        "/audit/events",
+        headers=context["admin"],
+        query_string={"q": "audit-search-marker"},
+    )
+    assert search.status_code == 200
+    assert search.get_json()["total"] == 1
+
+    with context["app"].app_context(), context["app"].test_request_context():
+        g.current_user = db.session.get(User, UUID(context["admin_id"]))
+        queries = _audit_event_options_queries()
+        statements = [
+            str(query.statement.compile(dialect=postgresql.dialect()))
+            for query in queries.values()
+        ]
+
+    assert all("audit_events.metadata" not in statement for statement in statements)
 
 
 def test_bulk_batches_share_one_event_and_admin_can_reverse_them(audit_api):
