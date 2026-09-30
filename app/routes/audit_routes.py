@@ -26,12 +26,12 @@ def _uuid_or_404(value):
 
 
 def _visible_events_query():
-    query = (
-        AuditEvent.query.join(
-            AuditEventChange, AuditEventChange.event_id == AuditEvent.id
-        )
-        .filter(AuditEvent.organization_id == g.current_user.organization_id)
-        .distinct()
+    has_change = db.session.query(AuditEventChange.id).filter(
+        AuditEventChange.event_id == AuditEvent.id
+    ).exists()
+    query = AuditEvent.query.filter(
+        AuditEvent.organization_id == g.current_user.organization_id,
+        has_change,
     )
     if g.current_user.role == "admin":
         return query
@@ -39,12 +39,13 @@ def _visible_events_query():
     visible_scope_ids = ScopeDataProcessor(
         current_user=g.current_user
     ).scope_query_for_current_user().with_entities(Scope.id)
-    return (
-        query.filter(
-            AuditEvent.module == "scopes",
-            AuditEventChange.scope_id.in_(visible_scope_ids),
-        )
-        .distinct()
+    has_visible_scope_change = db.session.query(AuditEventChange.id).filter(
+        AuditEventChange.event_id == AuditEvent.id,
+        AuditEventChange.scope_id.in_(visible_scope_ids),
+    ).exists()
+    return query.filter(
+        AuditEvent.module == "scopes",
+        has_visible_scope_change,
     )
 
 
@@ -143,6 +144,13 @@ def list_audit_events():
     q = str(request.args.get("q") or "").strip()
     if q:
         term = f"%{q}%"
+        has_matching_change = db.session.query(AuditEventChange.id).filter(
+            AuditEventChange.event_id == AuditEvent.id,
+            or_(
+                cast(AuditEventChange.before_state, Text).ilike(term),
+                cast(AuditEventChange.after_state, Text).ilike(term),
+            ),
+        ).exists()
         query = query.filter(
             or_(
                 AuditEvent.title.ilike(term),
@@ -150,10 +158,9 @@ def list_audit_events():
                 AuditEvent.actor_name.ilike(term),
                 AuditEvent.actor_email.ilike(term),
                 AuditEvent.action.ilike(term),
-                cast(AuditEventChange.before_state, Text).ilike(term),
-                cast(AuditEventChange.after_state, Text).ilike(term),
+                has_matching_change,
             )
-        ).distinct()
+        )
     if request.args.get("module"):
         query = query.filter(AuditEvent.module == request.args["module"])
     if request.args.get("action"):
@@ -191,25 +198,39 @@ def list_audit_events():
 @audit_bp.get("/events/options")
 @auth_required
 def get_audit_event_options():
-    query = _visible_events_query().subquery()
+    queries = _audit_event_options_queries()
     modules = [
         row[0]
-        for row in db.session.query(query.c.module).distinct().order_by(query.c.module).all()
+        for row in queries["modules"].all()
     ]
     actions = [
         row[0]
-        for row in db.session.query(query.c.action).distinct().order_by(query.c.action).all()
+        for row in queries["actions"].all()
     ]
     actors = [
         {"id": str(row[0]) if row[0] else None, "name": row[1], "email": row[2]}
-        for row in db.session.query(
-            query.c.actor_user_id, query.c.actor_name, query.c.actor_email
-        )
-        .distinct()
-        .order_by(query.c.actor_name)
-        .all()
+        for row in queries["actors"].all()
     ]
     return jsonify({"modules": modules, "actions": actions, "actors": actors})
+
+
+def _audit_event_options_queries():
+    visible = _visible_events_query()
+    return {
+        "modules": visible.with_entities(AuditEvent.module)
+        .distinct()
+        .order_by(AuditEvent.module),
+        "actions": visible.with_entities(AuditEvent.action)
+        .distinct()
+        .order_by(AuditEvent.action),
+        "actors": visible.with_entities(
+            AuditEvent.actor_user_id,
+            AuditEvent.actor_name,
+            AuditEvent.actor_email,
+        )
+        .distinct()
+        .order_by(AuditEvent.actor_name),
+    }
 
 
 @audit_bp.get("/events/<event_id>")
