@@ -47,6 +47,7 @@ class DashboardMetricsService:
         self.organization_id = getattr(current_user, "organization_id", None)
 
     def _apply_scope_org_filter(self, query):
+        query = query.filter(Scope.status != "archived")
         if self.organization_id:
             query = query.filter(Scope.organization_id == self.organization_id)
 

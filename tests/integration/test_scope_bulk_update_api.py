@@ -493,3 +493,22 @@ def test_commercial_update_syncs_scope_field_and_draft(bulk_api):
         scope = db.session.get(Scope, UUID(context["export_scope_id"]))
         assert str(scope.responsible_user_id) == context["commercial_target_id"]
         assert scope.draft["sobreEmpresa"]["responsavelComercial"] == context["commercial_target_id"]
+
+
+def test_inactive_scopes_are_excluded_from_bulk_preview_and_apply(bulk_api):
+    client, context = bulk_api
+    scope_id = context["import_scope_id"]
+    assert client.post(f"/scopes/{scope_id}/deactivate", headers=context["admin"]).status_code == 200
+    payload = {
+        "field": "responsavel_comercial",
+        "targetUserId": context["commercial_target_id"],
+        "scopeIds": [scope_id],
+    }
+    for action in ("preview", "apply"):
+        response = client.post(f"/scopes/bulk/{action}", headers=context["admin"], json=payload)
+        assert response.status_code == 200
+        assert response.get_json()["eligibleScopes" if action == "preview" else "impactedScopes"] == 0
+    with context["app"].app_context():
+        scope = db.session.get(Scope, UUID(scope_id))
+        assert scope.status == "archived"
+        assert str(scope.responsible_user_id) == context["commercial_id"]

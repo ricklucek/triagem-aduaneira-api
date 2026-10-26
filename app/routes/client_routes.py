@@ -96,7 +96,7 @@ def list_clients():
             Scope.status == params["scope_status"]
         )
         if g.current_user.role != "admin":
-            query = query.filter(
+            query = query.filter(Scope.status != "archived").filter(
                 or_(
                     Scope.status == "published",
                     Scope.created_by_id == g.current_user.id,

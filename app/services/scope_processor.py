@@ -13,6 +13,8 @@ from sqlalchemy import Text, and_, cast, distinct, func, or_
 from app.cnpj import normalize_cnpj
 from app.models.scope import ScopeTemplate
 from app.cnae import normalize_cnae, normalize_cnae_list
+from app.scope_permissions import can_manage_scope_lifecycle
+from .scope_lifecycle import ensure_scope_writable
 
 from ..extensions import db
 from ..models import (
@@ -204,21 +206,24 @@ class ScopeDataProcessor:
         return normalized
 
     def scope_query_for_current_user(self):
-        query = Scope.query
-        if self.organization_id:
-            query = query.filter(Scope.organization_id == self.organization_id)
+        query = Scope.query.filter(Scope.organization_id == self.organization_id)
         return self._apply_scope_visibility_filter(query)
 
-    def scope_list_query_for_current_user(self, *, include_drafts: bool = False):
-        query = Scope.query
-        if self.organization_id:
-            query = query.filter(Scope.organization_id == self.organization_id)
+    def scope_list_query_for_current_user(self, *, include_drafts: bool = False, activity: str = "active"):
+        query = Scope.query.filter(Scope.organization_id == self.organization_id)
+        if activity != "active" and not can_manage_scope_lifecycle(self.current_user):
+            abort(403)
+        if activity == "inactive":
+            query = query.filter(Scope.status == "archived")
+        elif activity == "active":
+            query = query.filter(Scope.status.in_(("published", "draft")))
         if include_drafts:
-            return query.filter(Scope.status.in_(("published", "draft")))
+            return query
         return self._apply_scope_visibility_filter(query)
 
     def _apply_scope_visibility_filter(self, query):
-        if getattr(self.current_user, "role", None) != "admin":
+        if not can_manage_scope_lifecycle(self.current_user):
+            query = query.filter(Scope.status != "archived")
             query = query.filter(
                 or_(
                     Scope.status == "published",
@@ -227,15 +232,16 @@ class ScopeDataProcessor:
             )
         return query
 
-    def get_scope_for_current_user(self, scope_id: str) -> Scope:
+    def get_scope_for_current_user(self, scope_id: str, *, for_update: bool = False) -> Scope:
         try:
             normalized_scope_id = UUID(str(scope_id))
         except (TypeError, ValueError):
             abort(404)
 
-        return self.scope_query_for_current_user().filter(
-            Scope.id == normalized_scope_id
-        ).first_or_404()
+        query = self.scope_query_for_current_user().filter(Scope.id == normalized_scope_id)
+        if for_update:
+            query = query.populate_existing().with_for_update()
+        return query.first_or_404()
     
     def template_query_for_current_user(self):
         query = ScopeTemplate.query
@@ -245,13 +251,16 @@ class ScopeDataProcessor:
 
     def build_scope_summary(self, scope: Scope) -> dict:
         can_view = (
-            getattr(self.current_user, "role", None) == "admin"
+            can_manage_scope_lifecycle(self.current_user)
             or scope.status == "published"
-            or scope.created_by_id == self.user_id
+            or (scope.status == "draft" and scope.created_by_id == self.user_id)
         )
         return {
             "id": str(scope.id),
             "status": scope.status,
+            "archived_at": self._isoformat_z(scope.archived_at),
+            "archived_by_id": str(scope.archived_by_id) if scope.archived_by_id else None,
+            "archived_from_status": scope.archived_from_status,
             "can_view": can_view,
             "version": scope.version,
             "updated_at": scope.updated_at,
@@ -265,6 +274,7 @@ class ScopeDataProcessor:
         }
 
     def apply_draft_to_scope(self, scope: Scope, normalized_draft: dict) -> Scope:
+        ensure_scope_writable(scope)
         sobre_empresa = normalized_draft.get("sobreEmpresa") or {}
         responsible_user_id = (
             sobre_empresa.get("responsavelComercial")
@@ -909,6 +919,7 @@ class ScopeDataProcessor:
 
         query = self._apply_scope_visibility_filter(query)
 
+        query = query.filter(Scope.status != "archived")
         rows = (
             query.group_by(User.id, User.nome, User.role, User.setor)
             .order_by(User.nome.asc())
@@ -958,7 +969,7 @@ class ScopeDataProcessor:
 
         query = self._apply_org_filter_to_scope_query(query)
         query = self._apply_scope_visibility_filter(query)
-        scopes = query.order_by(Scope.updated_at.desc().nullslast(), Scope.created_at.desc()).all()
+        scopes = query.filter(Scope.status != "archived").order_by(Scope.updated_at.desc().nullslast(), Scope.created_at.desc()).all()
 
         items = [
             {
@@ -1004,10 +1015,10 @@ class ScopeDataProcessor:
         self._validate_bulk_user(to_user_id, require_active=True)
 
         parsed_scope_ids = [UUID(scope_id) for scope_id in scope_ids]
-        query = Scope.query.filter(Scope.id.in_(parsed_scope_ids))
+        query = Scope.query.filter(Scope.id.in_(parsed_scope_ids), Scope.status != "archived")
         query = self._apply_org_filter_to_scope_query(query)
         query = self._apply_scope_visibility_filter(query)
-        scopes = query.all()
+        scopes = query.populate_existing().with_for_update().all()
 
         scopes_by_id = {str(scope.id): scope for scope in scopes}
         ordered_scopes = [scopes_by_id[scope_id] for scope_id in scope_ids if scope_id in scopes_by_id]
@@ -1557,6 +1568,7 @@ class ScopeDataProcessor:
         return not bool(self.get_sync_missing(scope, draft=draft))
 
     def sync_scope(self, scope: Scope, dry_run: bool = False) -> ScopeSyncResult:
+        ensure_scope_writable(scope)
         normalized_draft = self.normalize_draft(scope.draft or {})
         missing = self.get_sync_missing(scope, draft=normalized_draft)
         already_synced = not bool(missing)

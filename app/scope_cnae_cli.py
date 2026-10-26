@@ -108,7 +108,7 @@ def repair_scope_cnaes(scope_ids, organization_id, all_scopes: bool, apply: bool
     if all_scopes and not organization_id:
         raise click.UsageError("--organization-id é obrigatório com --all.")
 
-    query = Scope.query
+    query = Scope.query.filter(Scope.status != "archived")
     if all_scopes:
         query = query.filter(Scope.organization_id == organization_id)
     else:

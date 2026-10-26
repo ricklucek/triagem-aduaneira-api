@@ -36,6 +36,9 @@ class ScopeVersionSchema(SQLAlchemyAutoSchema):
 
 
 class ScopeSchema(SQLAlchemyAutoSchema):
+    archived_from_status = fields.String(dump_only=True, allow_none=True)
+    archived_at = fields.DateTime(format="%Y-%m-%dT%H:%M:%S.%fZ", dump_only=True, allow_none=True)
+    archived_by_id = fields.UUID(dump_only=True, allow_none=True)
     client = fields.Nested(ClientSchema, dump_only=True)
     responsible_user = fields.Nested(UserSchema, only=("id", "nome", "email", "role", "setor"), dump_only=True)
     assignments = fields.Nested(ScopeAssignmentSchema, many=True, dump_only=True)
@@ -62,7 +65,8 @@ class ScopeSummarySchema(Schema):
 
 
 class ScopeListQuerySchema(Schema):
-    status = fields.String(required=False)
+    status = fields.String(required=False, validate=validate.OneOf(("draft", "published", "archived")))
+    activity = fields.String(load_default="active", validate=validate.OneOf(("active", "inactive", "all")))
     include_drafts = fields.Boolean(load_default=False, data_key="include_drafts")
     q = fields.String(required=False)
     cnpj = fields.String(required=False)
