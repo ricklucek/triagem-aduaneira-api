@@ -1,5 +1,6 @@
 from copy import deepcopy
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 import jwt
 import pytest
@@ -320,6 +321,33 @@ def test_dashboard_metrics_and_assignment_counts_exclude_inactive_scopes(api):
     assert (
         next(item["count"] for item in counts if item["type"] == "created_by_id") == 1
     )
+
+
+def test_mixed_audit_event_hides_inactive_scope_snapshots_from_regular_users(api):
+    http, scopes, users, headers, _ = api
+    operation_id = uuid4()
+    for scope in scopes.values():
+        event = record_scope_event(
+            actor=users["admin"],
+            scope=scope,
+            action="scope.bulk_updated",
+            title="Bulk update",
+            summary="Two scopes",
+            before_state=snapshot_scope(scope),
+            after_state=snapshot_scope(scope),
+            operation_id=operation_id,
+            append_operation=True,
+        )
+    db.session.commit()
+    event_id = event.id
+    http.post(f"/scopes/{scopes['published'].id}/deactivate", headers=headers["admin"])
+    detail = http.get(f"/audit/events/{event_id}", headers=headers["owner"]).get_json()
+    assert detail["affectedCount"] == 1
+    assert detail["changes"][0]["scopeId"] == str(scopes["draft"].id)
+    admin_detail = http.get(
+        f"/audit/events/{event_id}", headers=headers["admin"]
+    ).get_json()
+    assert admin_detail["affectedCount"] == 2
 
 
 def test_invalid_filter_is_rejected(api):
