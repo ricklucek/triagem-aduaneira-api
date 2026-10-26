@@ -28,6 +28,9 @@ class Scope(TimestampMixin, Base):
     )
 
     status = Column(String(16), nullable=False, default="draft", index=True)
+    archived_from_status = Column(String(16), nullable=True)
+    archived_at = Column(DateTime, nullable=True)
+    archived_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
     draft = Column(JSON, nullable=False, default=dict)
 

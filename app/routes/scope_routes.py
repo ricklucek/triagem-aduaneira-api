@@ -13,6 +13,8 @@ from ..extensions import db
 from ..models import Client, Scope, ScopeAssignment, ScopeVersion, User
 from ..schemas import ScopeBulkResponsibleSchema, ScopeListQuerySchema, ScopeSchema, UserSchema
 from ..services.scope_processor import ClientScopeConflictError, ScopeDataProcessor
+from ..scope_permissions import can_manage_scope_lifecycle
+from ..services.scope_lifecycle import ScopeLifecycleError, change_scope_activity, ensure_scope_writable
 from ..services.audit_service import (
     record_scope_event,
     snapshot_scope,
@@ -22,6 +24,12 @@ scope_bp = Blueprint("scopes", __name__, url_prefix="/scopes")
 scope_schema = ScopeSchema()
 scope_list_query_schema = ScopeListQuerySchema()
 bulk_responsible_schema = ScopeBulkResponsibleSchema()
+
+
+@scope_bp.errorhandler(ScopeLifecycleError)
+def handle_scope_lifecycle_error(exc):
+    db.session.rollback()
+    return jsonify({"error": exc.code, "message": str(exc)}), 409
 
 
 def _processor() -> ScopeDataProcessor:
@@ -161,8 +169,11 @@ def list_scopes():
     processor = _processor()
     params = scope_list_query_schema.load(request.args)
 
+    activity = params["activity"]
+    if params.get("status") == "archived" and "activity" not in request.args:
+        activity = "inactive"
     query = processor.scope_list_query_for_current_user(
-        include_drafts=params["include_drafts"]
+        include_drafts=params["include_drafts"], activity=activity
     )
 
     if params.get("status"):
@@ -400,7 +411,7 @@ def apply_bulk_scope_update():
 def count_user_assigned_scopes():
     processor = _processor()
 
-    query = processor.scope_query_for_current_user()
+    query = processor.scope_query_for_current_user().filter(Scope.status != "archived")
 
     query_responsible_user_id = query.filter(Scope.responsible_user_id == g.current_user.id)
     query_created_by_id = query.filter(Scope.created_by_id == g.current_user.id)
@@ -515,7 +526,8 @@ def get_scope(scope_id: str):
 @auth_required
 def update_scope(scope_id: str):
     processor = _processor()
-    scope = processor.get_scope_for_current_user(scope_id)
+    scope = processor.get_scope_for_current_user(scope_id, for_update=True)
+    ensure_scope_writable(scope)
     before = snapshot_scope(scope)
     normalized_draft = processor.normalize_draft(_load_scope_payload())
 
@@ -546,7 +558,8 @@ def update_scope(scope_id: str):
 @auth_required
 def publish_scope(scope_id: str):
     processor = _processor()
-    scope = processor.get_scope_for_current_user(scope_id)
+    scope = processor.get_scope_for_current_user(scope_id, for_update=True)
+    ensure_scope_writable(scope)
     before = snapshot_scope(scope)
     now = datetime.now()
 
@@ -607,7 +620,7 @@ def sync_scope(scope_id: str):
     payload = request.get_json(silent=True) or {}
     dry_run = bool(payload.get("dryRun", True))
 
-    scope = processor.get_scope_for_current_user(scope_id)
+    scope = processor.get_scope_for_current_user(scope_id, for_update=True)
     try:
         result = processor.sync_scope(scope, dry_run=dry_run)
     except ClientScopeConflictError as exc:
@@ -636,11 +649,11 @@ def sync_missing_scopes():
     dry_run = bool(payload.get("dryRun", True))
     limit = min(int(payload.get("limit", 100)), 500)
 
-    query = processor.scope_query_for_current_user().order_by(Scope.created_at.asc())
+    query = processor.scope_query_for_current_user().filter(Scope.status != "archived").order_by(Scope.created_at.asc())
     if payload.get("status"):
         query = query.filter(Scope.status == payload["status"])
 
-    scopes = query.limit(limit).all()
+    scopes = query.limit(limit).populate_existing().with_for_update().all()
     try:
         results = processor.sync_scopes(scopes, dry_run=dry_run)
     except ClientScopeConflictError as exc:
@@ -687,7 +700,8 @@ def list_scope_versions(scope_id: str):
 @auth_required
 def delete_scope(scope_id: str):
     processor = _processor()
-    scope = processor.get_scope_for_current_user(scope_id)
+    scope = processor.get_scope_for_current_user(scope_id, for_update=True)
+    ensure_scope_writable(scope)
     before = snapshot_scope(scope)
     record_scope_event(
         actor=g.current_user,
@@ -702,3 +716,24 @@ def delete_scope(scope_id: str):
     db.session.delete(scope)
     db.session.commit()
     return "", 204
+
+
+def _change_scope_activity(scope_id, *, deactivate):
+    if not can_manage_scope_lifecycle(g.current_user):
+        return jsonify({"error": "forbidden", "message": "Apenas administradores podem alterar a situação do escopo."}), 403
+    scope = _processor().get_scope_for_current_user(scope_id, for_update=True)
+    change_scope_activity(scope, actor=g.current_user, deactivate=deactivate)
+    db.session.commit()
+    return jsonify(scope_schema.dump(scope))
+
+
+@scope_bp.post("/<scope_id>/deactivate")
+@auth_required
+def deactivate_scope(scope_id):
+    return _change_scope_activity(scope_id, deactivate=True)
+
+
+@scope_bp.post("/<scope_id>/reactivate")
+@auth_required
+def reactivate_scope(scope_id):
+    return _change_scope_activity(scope_id, deactivate=False)

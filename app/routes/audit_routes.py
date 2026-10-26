@@ -87,9 +87,11 @@ def _serialize_change(change: AuditEventChange, *, include_states: bool) -> dict
 
 
 def _serialize_event(event: AuditEvent, *, include_changes: bool = False) -> dict:
-    changes = AuditEventChange.query.filter_by(event_id=event.id).order_by(
-        AuditEventChange.created_at.asc()
-    ).all()
+    changes_query = AuditEventChange.query.filter_by(event_id=event.id)
+    if g.current_user.role != "admin":
+        visible_scope_ids = ScopeDataProcessor(current_user=g.current_user).scope_query_for_current_user().with_entities(Scope.id)
+        changes_query = changes_query.filter(AuditEventChange.scope_id.in_(visible_scope_ids))
+    changes = changes_query.order_by(AuditEventChange.created_at.asc()).all()
     result = {
         "id": str(event.id),
         "organizationId": str(event.organization_id),
@@ -112,6 +114,8 @@ def _serialize_event(event: AuditEvent, *, include_changes: bool = False) -> dic
         "affectedCount": len(changes),
         "createdAt": _iso(event.created_at),
     }
+    if g.current_user.role != "admin" and event.entity_type == "scope" and not any(change.scope_id == event.entity_id for change in changes):
+        result["entityId"] = None
     if include_changes:
         result["changes"] = [
             _serialize_change(change, include_states=True) for change in changes

@@ -63,6 +63,9 @@ def snapshot_scope(scope: Scope) -> dict[str, Any]:
         {
             "id": scope.id,
             "status": scope.status,
+            "archivedFromStatus": scope.archived_from_status,
+            "archivedAt": scope.archived_at,
+            "archivedById": scope.archived_by_id,
             "draft": scope.draft or {},
             "publishedSnapshot": scope.published_snapshot,
             "version": scope.version,
@@ -248,6 +251,9 @@ def _scope_conflict_state(snapshot: dict | None) -> dict | None:
         return None
     return {
         "status": snapshot.get("status"),
+        "archivedFromStatus": snapshot.get("archivedFromStatus"),
+        "archivedAt": snapshot.get("archivedAt"),
+        "archivedById": snapshot.get("archivedById"),
         "draft": snapshot.get("draft") or {},
         "publishedSnapshot": snapshot.get("publishedSnapshot"),
         "responsibleUserId": snapshot.get("responsibleUserId"),
@@ -285,6 +291,9 @@ def build_reversal_preview(event: AuditEvent) -> dict[str, Any]:
             if not scope or scope.organization_id != event.organization_id:
                 status = "missing"
                 reason = "O escopo não existe mais."
+            elif scope.status == "archived":
+                status = "conflict"
+                reason = "Escopo inativo. Reative-o antes de reverter alterações."
             elif _scope_conflict_state(snapshot_scope(scope)) != _scope_conflict_state(
                 change.after_state
             ):
@@ -342,7 +351,9 @@ def reverse_audit_event(event: AuditEvent, *, actor: User) -> tuple[AuditEvent, 
     for change in AuditEventChange.query.filter_by(event_id=event.id).all():
         if str(change.id) not in eligible_ids:
             continue
-        scope = db.session.get(Scope, change.entity_id)
+        scope = Scope.query.filter_by(id=change.entity_id, organization_id=event.organization_id).populate_existing().with_for_update().first()
+        if not scope or scope.status == "archived" or _scope_conflict_state(snapshot_scope(scope)) != _scope_conflict_state(change.after_state):
+            raise ValueError("O escopo foi alterado ou inativado durante a reversão. Atualize a prévia.")
         current = snapshot_scope(scope)
         target = deepcopy(change.before_state or {})
         current_version = scope.version or 0

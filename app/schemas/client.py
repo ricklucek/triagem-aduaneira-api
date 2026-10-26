@@ -10,6 +10,7 @@ from marshmallow import (
 from marshmallow_sqlalchemy import SQLAlchemyAutoSchema
 
 from app.cnpj import is_valid_cnpj, normalize_cnpj
+from app.scope_permissions import can_manage_scope_lifecycle
 from app.models import (
     Client,
     ClientContact,
@@ -52,7 +53,9 @@ class ClientSchema(SQLAlchemyAutoSchema):
         current_user = getattr(g, "current_user", None)
         if not current_user:
             return None
-        if current_user.role == "admin" or current_user.id == scope.created_by_id:
+        if scope.status == "archived" and not can_manage_scope_lifecycle(current_user):
+            return None
+        if can_manage_scope_lifecycle(current_user) or current_user.id == scope.created_by_id:
             return scope
         return None
 
